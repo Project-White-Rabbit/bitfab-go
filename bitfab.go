@@ -197,6 +197,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		}
 		if fnErr != nil {
 			spanData["error"] = fnErr.Error()
+			spanData["error_source"] = "code"
 		}
 
 		rawSpan := map[string]any{
@@ -438,6 +439,7 @@ func (s *ActiveSpan) End() {
 		}
 		if s.spanErr != nil {
 			spanData["error"] = s.spanErr.Error()
+			spanData["error_source"] = "code"
 		}
 		if len(s.contexts) > 0 {
 			spanData["contexts"] = s.contexts
