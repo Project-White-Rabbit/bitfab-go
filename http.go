@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,9 +40,17 @@ func (h *httpClient) request(endpoint string, payload map[string]any, opts ...re
 		opt(&cfg)
 	}
 
-	body, err := MarshalSpanPayload(payload)
-	if err != nil {
-		return fmt.Errorf("bitfab: failed to marshal payload: %w", err)
+	// Encode defensively so a stray non-encodable value can never abort the
+	// send and silently drop the span. Strays are stubbed in place; a degraded
+	// payload warns loudly that the trace may not be replayable.
+	body, dropped := marshalPayloadSafe(payload)
+	if len(dropped) > 0 {
+		log.Printf(
+			"bitfab: request body to %s held %d non-serializable value(s) (%s); "+
+				"they were stubbed so the span still sends, but the trace may be "+
+				"incomplete or not replayable",
+			endpoint, len(dropped), strings.Join(uniqueStrings(dropped), ", "),
+		)
 	}
 
 	var lastErr error
