@@ -34,8 +34,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // Client is the main entry point for creating spans.
@@ -144,35 +142,29 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		opt(&cfg)
 	}
 
+	// An invalid span type must not fail the user's call. Degrade to "custom"
+	// (warn once) so fn still runs and the span still ships, rather than
+	// returning a Bitfab error in place of the user's real result.
 	if !validSpanTypes[cfg.spanType] {
-		return nil, fmt.Errorf("bitfab: invalid span type %q, must be one of: llm, agent, function, guardrail, handoff, custom", cfg.spanType)
+		warnOnce(
+			"invalid-span-type",
+			fmt.Sprintf("an invalid span type was used; defaulting to %q. Valid types: llm, agent, function, guardrail, handoff, custom.", "custom"),
+		)
+		cfg.spanType = "custom"
 	}
 
-	parent := currentSpan(ctx)
-	traceID := uuid.New().String()
-	if parent != nil {
-		traceID = parent.traceID
-	}
-	spanID := uuid.New().String()
-
-	var parentSpanID string
-	isRootSpan := parent == nil
-	if parent != nil {
-		parentSpanID = parent.spanID
-	}
-
-	// Register trace state for root spans
-	if isRootSpan && getTraceState(traceID) == nil {
-		createTraceState(traceID)
-		c.pendingMu.Lock()
-		c.pendingSpans[traceID] = []<-chan struct{}{}
-		c.pendingMu.Unlock()
+	// Compute span identity and register trace state. If this instrumentation
+	// prologue fails for any reason, run fn untraced rather than crashing the
+	// host or skipping the user's call.
+	id, ok := c.beginSpan(ctx)
+	if !ok {
+		return fn(ctx)
 	}
 
 	startedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 
 	// Execute fn with the new span pushed onto the context stack
-	childCtx := withSpanContext(ctx, traceID, spanID)
+	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
 	result, fnErr := fn(childCtx)
 
 	endedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
@@ -190,10 +182,10 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			spanData["function_name"] = cfg.functionName
 		}
 		if cfg.input != nil {
-			spanData["input"] = cfg.input
+			spanData["input"] = capValue(cfg.input)
 		}
 		if result != nil {
-			spanData["output"] = result
+			spanData["output"] = capValue(result)
 		}
 		if fnErr != nil {
 			spanData["error"] = fnErr.Error()
@@ -201,51 +193,123 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		}
 
 		rawSpan := map[string]any{
-			"id":         spanID,
-			"trace_id":   traceID,
+			"id":         id.spanID,
+			"trace_id":   id.traceID,
 			"started_at": startedAt,
 			"ended_at":   endedAt,
 			"span_data":  spanData,
 		}
-		if parentSpanID != "" {
-			rawSpan["parent_id"] = parentSpanID
+		if id.parentSpanID != "" {
+			rawSpan["parent_id"] = id.parentSpanID
 		}
 
 		done := c.httpClient.sendExternalSpan(map[string]any{
 			"type":             "sdk-function",
 			"source":           "go-sdk-function",
-			"sourceTraceId":    traceID,
+			"sourceTraceId":    id.traceID,
 			"traceFunctionKey": traceFunctionKey,
 			"rawSpan":          rawSpan,
 		})
 
-		if isRootSpan {
-			c.pendingMu.Lock()
-			pending := c.pendingSpans[traceID]
-			delete(c.pendingSpans, traceID)
-			c.pendingMu.Unlock()
-
-			for _, ch := range pending {
-				select {
-				case <-ch:
-				case <-time.After(5 * time.Second):
-				}
-			}
-
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-			}
-
-			c.sendTraceCompletion(traceFunctionKey, traceID, startedAt, endedAt)
+		if id.isRootSpan {
+			c.completeRootTrace(traceFunctionKey, id.traceID, startedAt, endedAt, done)
 		} else {
 			c.pendingMu.Lock()
-			c.pendingSpans[traceID] = append(c.pendingSpans[traceID], done)
+			c.pendingSpans[id.traceID] = append(c.pendingSpans[id.traceID], done)
 			c.pendingMu.Unlock()
 		}
 	}()
 
 	return result, fnErr
+}
+
+// spanIdentity is the per-span state produced by the instrumentation prologue.
+type spanIdentity struct {
+	traceID      string
+	spanID       string
+	parentSpanID string
+	isRootSpan   bool
+}
+
+// beginSpan computes the trace/span ids and registers root trace state. It runs
+// on the user's synchronous call path, so it is fully guarded: a panic here
+// (id generation, map writes) can never crash the host. On failure it cleans up
+// any partially registered trace state, warns once, and returns ok=false so the
+// caller runs the user's function untraced.
+func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
+	var registered string
+	defer func() {
+		if r := recover(); r != nil {
+			if registered != "" {
+				deleteTraceState(registered)
+				c.pendingMu.Lock()
+				delete(c.pendingSpans, registered)
+				c.pendingMu.Unlock()
+			}
+			warnOnce(
+				"span-setup",
+				"span setup failed; this call runs untraced. Your function still executes and returns normally.",
+			)
+			id = spanIdentity{}
+			ok = false
+		}
+	}()
+
+	parent := currentSpan(ctx)
+	traceID := randomUUID()
+	if parent != nil {
+		traceID = parent.traceID
+	}
+	spanID := randomUUID()
+
+	isRootSpan := parent == nil
+	var parentSpanID string
+	if parent != nil {
+		parentSpanID = parent.spanID
+	}
+
+	if isRootSpan && getTraceState(traceID) == nil {
+		createTraceState(traceID)
+		registered = traceID
+		c.pendingMu.Lock()
+		c.pendingSpans[traceID] = []<-chan struct{}{}
+		c.pendingMu.Unlock()
+	}
+
+	return spanIdentity{
+		traceID:      traceID,
+		spanID:       spanID,
+		parentSpanID: parentSpanID,
+		isRootSpan:   isRootSpan,
+	}, true
+}
+
+// completeRootTrace drains the trace's pending child spans and sends trace
+// completion. It runs in a tracked background goroutine so the user's traced
+// call returns immediately instead of blocking for up to (N+1)*5s on child
+// span network I/O. FlushTraces still waits for it because the goroutine is
+// tracked by the http client's wait group.
+func (c *Client) completeRootTrace(traceFunctionKey, traceID, startedAt, endedAt string, done <-chan struct{}) {
+	c.httpClient.runBackground(func() {
+		c.pendingMu.Lock()
+		pending := c.pendingSpans[traceID]
+		delete(c.pendingSpans, traceID)
+		c.pendingMu.Unlock()
+
+		for _, ch := range pending {
+			select {
+			case <-ch:
+			case <-time.After(5 * time.Second):
+			}
+		}
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+
+		c.sendTraceCompletion(traceFunctionKey, traceID, startedAt, endedAt)
+	})
 }
 
 // Start begins a new span and returns the updated context and an ActiveSpan handle.
@@ -266,38 +330,33 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 		opt(&cfg)
 	}
 
-	parent := currentSpan(ctx)
-	traceID := uuid.New().String()
-	if parent != nil {
-		traceID = parent.traceID
-	}
-	spanID := uuid.New().String()
-
-	var parentSpanID string
-	isRootSpan := parent == nil
-	if parent != nil {
-		parentSpanID = parent.spanID
+	if !validSpanTypes[cfg.spanType] {
+		warnOnce(
+			"invalid-span-type",
+			fmt.Sprintf("an invalid span type was used; defaulting to %q. Valid types: llm, agent, function, guardrail, handoff, custom.", "custom"),
+		)
+		cfg.spanType = "custom"
 	}
 
-	// Register trace state for root spans
-	if isRootSpan && getTraceState(traceID) == nil {
-		createTraceState(traceID)
-		c.pendingMu.Lock()
-		c.pendingSpans[traceID] = []<-chan struct{}{}
-		c.pendingMu.Unlock()
+	// If the instrumentation prologue fails, hand back the original context and
+	// a no-op span (its methods all guard a nil client) so the caller keeps
+	// running normally, untraced.
+	id, ok := c.beginSpan(ctx)
+	if !ok {
+		return ctx, &ActiveSpan{}
 	}
 
-	childCtx := withSpanContext(ctx, traceID, spanID)
+	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
 
 	span := &ActiveSpan{
 		client:           c,
 		traceFunctionKey: traceFunctionKey,
-		traceID:          traceID,
-		spanID:           spanID,
-		parentSpanID:     parentSpanID,
+		traceID:          id.traceID,
+		spanID:           id.spanID,
+		parentSpanID:     id.parentSpanID,
 		startedAt:        time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		cfg:              cfg,
-		isRootSpan:       isRootSpan,
+		isRootSpan:       id.isRootSpan,
 	}
 
 	return childCtx, span
@@ -432,10 +491,10 @@ func (s *ActiveSpan) End() {
 			spanData["function_name"] = s.cfg.functionName
 		}
 		if s.input != nil {
-			spanData["input"] = s.input
+			spanData["input"] = capValue(s.input)
 		}
 		if s.output != nil {
-			spanData["output"] = s.output
+			spanData["output"] = capValue(s.output)
 		}
 		if s.spanErr != nil {
 			spanData["error"] = s.spanErr.Error()
@@ -468,24 +527,7 @@ func (s *ActiveSpan) End() {
 		})
 
 		if s.isRootSpan {
-			s.client.pendingMu.Lock()
-			pending := s.client.pendingSpans[s.traceID]
-			delete(s.client.pendingSpans, s.traceID)
-			s.client.pendingMu.Unlock()
-
-			for _, ch := range pending {
-				select {
-				case <-ch:
-				case <-time.After(5 * time.Second):
-				}
-			}
-
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-			}
-
-			s.client.sendTraceCompletion(s.traceFunctionKey, s.traceID, s.startedAt, endedAt)
+			s.client.completeRootTrace(s.traceFunctionKey, s.traceID, s.startedAt, endedAt, done)
 		} else {
 			s.client.pendingMu.Lock()
 			s.client.pendingSpans[s.traceID] = append(s.client.pendingSpans[s.traceID], done)

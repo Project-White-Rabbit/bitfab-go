@@ -153,15 +153,25 @@ func TestSpan_CapturesError(t *testing.T) {
 }
 
 func TestSpan_InvalidType(t *testing.T) {
+	// An invalid span type must never fail the user's call. The span degrades to
+	// "custom" and fn still runs and returns its real value.
 	client := NewClient("test-key")
 	ctx := context.Background()
 
-	_, err := client.Span(ctx, "test", func(ctx context.Context) (any, error) {
-		return nil, nil
+	ran := false
+	result, err := client.Span(ctx, "test", func(ctx context.Context) (any, error) {
+		ran = true
+		return "real-value", nil
 	}, WithType("invalid"))
 
-	if err == nil {
-		t.Fatal("expected error for invalid type")
+	if err != nil {
+		t.Fatalf("invalid type must not surface an error, got %v", err)
+	}
+	if !ran {
+		t.Fatal("fn must still run when the span type is invalid")
+	}
+	if result != "real-value" {
+		t.Fatalf("expected the function's real return value, got %v", result)
 	}
 }
 

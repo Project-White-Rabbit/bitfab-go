@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,11 +44,14 @@ func (h *httpClient) request(endpoint string, payload map[string]any, opts ...re
 	// payload warns loudly that the trace may not be replayable.
 	body, dropped := marshalPayloadSafe(payload)
 	if len(dropped) > 0 {
-		log.Printf(
-			"bitfab: request body to %s held %d non-serializable value(s) (%s); "+
-				"they were stubbed so the span still sends, but the trace may be "+
-				"incomplete or not replayable",
-			endpoint, len(dropped), strings.Join(uniqueStrings(dropped), ", "),
+		warnOnce(
+			"request-body-stubbed",
+			fmt.Sprintf(
+				"a request body held non-serializable value(s) (e.g. %s); "+
+					"they were stubbed so the span still sends, but the trace may be "+
+					"incomplete or not replayable",
+				strings.Join(uniqueStrings(dropped), ", "),
+			),
 		)
 	}
 
@@ -119,14 +121,11 @@ func (h *httpClient) sendExternalSpan(payload map[string]any) <-chan struct{} {
 		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
-				func() {
-					defer func() { recover() }()
-					log.Printf("bitfab: panic in background request: %v", r)
-				}()
+				warnOnce("panic-background-request", fmt.Sprintf("a background request panicked and was recovered: %v", r))
 			}
 		}()
 		if err := h.request("/api/sdk/externalSpans", merged, withTimeout(30*time.Second)); err != nil {
-			log.Printf("bitfab: failed to send external span: %v", err)
+			warnOnce("send-external-span-failed", fmt.Sprintf("failed to send a span to the backend (further occurrences suppressed): %v", err))
 		}
 	}()
 	return done
@@ -145,15 +144,29 @@ func (h *httpClient) sendExternalTrace(payload map[string]any) {
 		defer h.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				func() {
-					defer func() { recover() }()
-					log.Printf("bitfab: panic in background request: %v", r)
-				}()
+				warnOnce("panic-background-request", fmt.Sprintf("a background request panicked and was recovered: %v", r))
 			}
 		}()
 		if err := h.request("/api/sdk/externalTraces", merged, withTimeout(10*time.Second)); err != nil {
-			log.Printf("bitfab: failed to send external trace: %v", err)
+			warnOnce("send-external-trace-failed", fmt.Sprintf("failed to send a trace to the backend (further occurrences suppressed): %v", err))
 		}
+	}()
+}
+
+// runBackground runs fn in a tracked background goroutine that never crashes the
+// host on panic. flush() waits for these via the wait group, so work moved off
+// the user's hot path (e.g. draining a root trace's child spans) still completes
+// before FlushTraces returns.
+func (h *httpClient) runBackground(fn func()) {
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				warnOnce("panic-background-task", fmt.Sprintf("a background task panicked and was recovered: %v", r))
+			}
+		}()
+		fn()
 	}()
 }
 
