@@ -181,11 +181,16 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		if cfg.functionName != "" {
 			spanData["function_name"] = cfg.functionName
 		}
+		var dropped []string
 		if cfg.input != nil {
-			spanData["input"] = capValue(cfg.input)
+			v, d := capValueReport(cfg.input)
+			spanData["input"] = v
+			dropped = append(dropped, d...)
 		}
 		if result != nil {
-			spanData["output"] = capValue(result)
+			v, d := capValueReport(result)
+			spanData["output"] = v
+			dropped = append(dropped, d...)
 		}
 		if fnErr != nil {
 			spanData["error"] = fnErr.Error()
@@ -203,13 +208,13 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			rawSpan["parent_id"] = id.parentSpanID
 		}
 
-		done := c.httpClient.sendExternalSpan(map[string]any{
+		done := c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
 			"type":             "sdk-function",
 			"source":           "go-sdk-function",
 			"sourceTraceId":    id.traceID,
 			"traceFunctionKey": traceFunctionKey,
 			"rawSpan":          rawSpan,
-		})
+		}, dropped...))
 
 		if id.isRootSpan {
 			c.completeRootTrace(traceFunctionKey, id.traceID, startedAt, endedAt, done)
@@ -490,11 +495,16 @@ func (s *ActiveSpan) End() {
 		if s.cfg.functionName != "" {
 			spanData["function_name"] = s.cfg.functionName
 		}
+		var dropped []string
 		if s.input != nil {
-			spanData["input"] = capValue(s.input)
+			v, d := capValueReport(s.input)
+			spanData["input"] = v
+			dropped = append(dropped, d...)
 		}
 		if s.output != nil {
-			spanData["output"] = capValue(s.output)
+			v, d := capValueReport(s.output)
+			spanData["output"] = v
+			dropped = append(dropped, d...)
 		}
 		if s.spanErr != nil {
 			spanData["error"] = s.spanErr.Error()
@@ -518,13 +528,13 @@ func (s *ActiveSpan) End() {
 			rawSpan["parent_id"] = s.parentSpanID
 		}
 
-		done := s.client.httpClient.sendExternalSpan(map[string]any{
+		done := s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
 			"type":             "sdk-function",
 			"source":           "go-sdk-function",
 			"sourceTraceId":    s.traceID,
 			"traceFunctionKey": s.traceFunctionKey,
 			"rawSpan":          rawSpan,
-		})
+		}, dropped...))
 
 		if s.isRootSpan {
 			s.client.completeRootTrace(s.traceFunctionKey, s.traceID, s.startedAt, endedAt, done)

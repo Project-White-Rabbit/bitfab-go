@@ -473,3 +473,53 @@ func TestRoundTrip_FullSpanPayload(t *testing.T) {
 		t.Errorf("Role = %v", got.Role)
 	}
 }
+
+// TestFinalizeSpanPayloadClean verifies a faithfully-serializable payload is
+// returned without an errors entry.
+func TestFinalizeSpanPayloadClean(t *testing.T) {
+	payload := map[string]any{
+		"type":   "sdk-function",
+		"source": "go-sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": []any{"hi"}, "output": "ok"},
+		},
+	}
+	out := finalizeSpanPayload(payload)
+	if _, ok := out["errors"]; ok {
+		t.Fatalf("clean payload should have no errors, got %v", out["errors"])
+	}
+}
+
+// TestFinalizeSpanPayloadMarksLossy verifies a payload holding an unserializable
+// value is marked serialization_degraded (non-replayable) while control fields
+// and the rest of the body survive.
+func TestFinalizeSpanPayloadMarksLossy(t *testing.T) {
+	payload := map[string]any{
+		"type":   "sdk-function",
+		"source": "go-sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": []any{make(chan int)}},
+		},
+	}
+	out := finalizeSpanPayload(payload)
+
+	errs, ok := out["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("lossy payload should carry errors, got %v", out["errors"])
+	}
+	first, _ := errs[0].(map[string]any)
+	if first["source"] != "sdk" {
+		t.Fatalf("expected source sdk, got %v", first["source"])
+	}
+	if first["step"] != serializationDegradedStep {
+		t.Fatalf("expected step %q, got %v", serializationDegradedStep, first["step"])
+	}
+	// Routing/control fields survive sanitization.
+	if out["type"] != "sdk-function" || out["source"] != "go-sdk-function" {
+		t.Fatalf("control fields lost: %v", out)
+	}
+	// The whole finalized payload must now JSON-encode without error.
+	if _, err := json.Marshal(out); err != nil {
+		t.Fatalf("finalized payload should be JSON-safe: %v", err)
+	}
+}

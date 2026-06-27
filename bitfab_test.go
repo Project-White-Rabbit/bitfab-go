@@ -1554,3 +1554,97 @@ func TestSetPrompt_EmptyStringIgnored(t *testing.T) {
 		t.Error("prompt should not be present when SetPrompt was called with empty string")
 	}
 }
+
+// TestSpan_MarksNonReplayableOnLossyInput verifies the public Span path runs the
+// payload through finalizeSpanPayload: an unserializable input (a channel) still
+// ships, marked serialization_degraded (non-replayable), with routing intact.
+func TestSpan_MarksNonReplayableOnLossyInput(t *testing.T) {
+	var mu sync.Mutex
+	var captured map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			mu.Lock()
+			captured = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "lossy-service", func(ctx context.Context) (any, error) {
+		return "ok", nil
+	}, WithName("Lossy"), WithType("function"), WithInput(make(chan int)))
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if captured == nil {
+		t.Fatal("no span captured")
+	}
+	errs, ok := captured["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("expected a serialization_degraded error, got errors=%v", captured["errors"])
+	}
+	first, _ := errs[0].(map[string]any)
+	if first["step"] != serializationDegradedStep {
+		t.Fatalf("step = %v, want %s", first["step"], serializationDegradedStep)
+	}
+	if captured["traceFunctionKey"] != "lossy-service" {
+		t.Errorf("traceFunctionKey lost on collapse: %v", captured["traceFunctionKey"])
+	}
+}
+
+// TestSpan_MarksNonReplayableOnOversizeInput verifies that an oversize input
+// (which capValue stubs into a JSON-clean placeholder) is still marked
+// serialization_degraded — the gap where the cap would otherwise hide the loss.
+func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
+	var mu sync.Mutex
+	var captured map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			mu.Lock()
+			captured = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	big := strings.Repeat("x", MaxSerializedValueBytes+1)
+	client.Span(ctx, "oversize-service", func(ctx context.Context) (any, error) {
+		return "ok", nil
+	}, WithName("Oversize"), WithType("function"), WithInput(big))
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if captured == nil {
+		t.Fatal("no span captured")
+	}
+	errs, ok := captured["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("oversize input should be marked non-replayable, got errors=%v", captured["errors"])
+	}
+	first, _ := errs[0].(map[string]any)
+	if first["step"] != serializationDegradedStep {
+		t.Fatalf("step = %v, want %s", first["step"], serializationDegradedStep)
+	}
+}

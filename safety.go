@@ -50,28 +50,38 @@ func fallbackUUIDv4() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// capValue bounds the JSON size of a single captured span value. If v marshals
-// to more than MaxSerializedValueBytes (or cannot be marshalled at all here),
-// it is replaced with a stub string so the span still ships. A value that fits
-// is returned unchanged; the http boundary sanitizer remains the final backstop
-// for anything non-encodable that slips through.
+// capValue bounds the JSON size of a single captured span value. See
+// capValueReport; this drops the lossy report for call sites that don't mark.
 func capValue(v any) any {
+	out, _ := capValueReport(v)
+	return out
+}
+
+// capValueReport bounds the JSON size of a single captured span value and
+// reports whether the cap had to stub it. If v marshals to more than
+// MaxSerializedValueBytes it is replaced with a stub string and "too_large" is
+// returned in dropped, so the caller can mark the span non-replayable (the cap
+// stubs a JSON-clean placeholder, which finalizeSpanPayload's sanitize pass
+// cannot otherwise detect). A value that fits is returned unchanged with no
+// drops; a value that cannot be marshalled here is left for the http boundary
+// sanitizer (and finalizeSpanPayload) to stub and report.
+func capValueReport(v any) (any, []string) {
 	if v == nil {
-		return nil
+		return nil, nil
 	}
 	body, err := json.Marshal(v)
 	if err != nil {
 		// Leave it for the boundary sanitizer (marshalPayloadSafe) to stub.
-		return v
+		return v, nil
 	}
 	if len(body) > MaxSerializedValueBytes {
 		warnOnce(
 			"value:too_large",
 			fmt.Sprintf("a captured span value exceeded %d bytes and was replaced with a placeholder so the span still ships. The captured input/output for this span is incomplete.", MaxSerializedValueBytes),
 		)
-		return fmt.Sprintf("<unserializable: too_large_%d_bytes>", len(body))
+		return fmt.Sprintf("<unserializable: too_large_%d_bytes>", len(body)), []string{"too_large"}
 	}
-	return v
+	return v, nil
 }
 
 // warnedKeys dedups warnOnce messages for the life of the process.

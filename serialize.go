@@ -43,6 +43,40 @@ func marshalPayloadSafe(payload map[string]any) ([]byte, []string) {
 	return body, dropped
 }
 
+// serializationDegradedStep is the error step that marks a span non-replayable
+// when its capture was lossy.
+const serializationDegradedStep = "serialization_degraded"
+
+// finalizeSpanPayload sanitizes a span payload for JSON safety and, when a value
+// could only be captured as a placeholder, appends a serialization_degraded
+// error to payload["errors"] so the lossy capture is surfaced as non-replayable
+// instead of shipped silently. A clean payload is returned unchanged (the
+// sanitize fast-path is a single json.Marshal). Mirrors the Python and
+// TypeScript SDKs' finalize step; the HTTP boundary stays as the final net.
+//
+// extraDropped carries losses detected before this point — e.g. capValue
+// stubbing an oversize input/output into a JSON-clean placeholder, which the
+// sanitize pass below cannot otherwise detect. Mirrors the Python/TS extra_dropped.
+func finalizeSpanPayload(payload map[string]any, extraDropped ...string) map[string]any {
+	dropped := append([]string(nil), extraDropped...)
+	sanitized := sanitizeValue(payload, &dropped, 0)
+	out, ok := sanitized.(map[string]any)
+	if !ok {
+		out = map[string]any{"rawSpan": map[string]any{"serialized": sanitized}}
+	}
+	if len(dropped) > 0 {
+		names := strings.Join(uniqueStrings(dropped), ", ")
+		degraded := map[string]any{
+			"source": "sdk",
+			"step":   serializationDegradedStep,
+			"error":  "non-replayable: could not faithfully capture " + names,
+		}
+		existing, _ := out["errors"].([]any)
+		out["errors"] = append(existing, degraded)
+	}
+	return out
+}
+
 // sanitizeValue returns a JSON-encodable copy of v, replacing any value that
 // json.Marshal can't encode with a stub string and recording its type name in
 // dropped. Composite values (maps, slices/arrays, and structs, of any element
