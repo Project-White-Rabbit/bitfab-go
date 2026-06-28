@@ -1055,6 +1055,7 @@ func TestStart_ContextAccumulation(t *testing.T) {
 }
 
 func TestNewClient_EmptyAPIKeyAutoDisables(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "") // ignore any ambient key so the fallback is empty
 	client := NewClient("")
 	if client.enabled {
 		t.Error("client with empty apiKey should be auto-disabled")
@@ -1062,6 +1063,7 @@ func TestNewClient_EmptyAPIKeyAutoDisables(t *testing.T) {
 }
 
 func TestNewClient_WhitespaceAPIKeyAutoDisables(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
 	client := NewClient("   ")
 	if client.enabled {
 		t.Error("client with whitespace apiKey should be auto-disabled")
@@ -1069,6 +1071,7 @@ func TestNewClient_WhitespaceAPIKeyAutoDisables(t *testing.T) {
 }
 
 func TestSpan_EmptyAPIKeyRunsFunctionSilently(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
 	client := NewClient("")
 	ctx := context.Background()
 
@@ -1085,6 +1088,7 @@ func TestSpan_EmptyAPIKeyRunsFunctionSilently(t *testing.T) {
 }
 
 func TestStart_EmptyAPIKeyReturnsNoOpSpan(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
 	client := NewClient("")
 	ctx := context.Background()
 
@@ -1096,6 +1100,50 @@ func TestNewClient_ExplicitDisabledWithEmptyAPIKeyStaysDisabled(t *testing.T) {
 	client := NewClient("", WithEnabled(false))
 	if client.enabled {
 		t.Error("explicitly disabled client should stay disabled")
+	}
+}
+
+func TestNewClient_FallsBackToEnvAPIKey(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "env-key")
+	client := NewClient("")
+	if !client.enabled {
+		t.Error("client should be enabled when key comes from the environment")
+	}
+	if client.apiKey != "env-key" {
+		t.Errorf("apiKey = %q, want env-key", client.apiKey)
+	}
+}
+
+func TestNewClient_ExplicitAPIKeyBeatsEnv(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "env-key")
+	client := NewClient("arg-key")
+	if client.apiKey != "arg-key" {
+		t.Errorf("apiKey = %q, want arg-key (explicit arg wins over env)", client.apiKey)
+	}
+}
+
+func TestNewClient_WithAPIKeyOption(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
+	client := NewClient("", WithAPIKey("opt-key"))
+	if !client.enabled || client.apiKey != "opt-key" {
+		t.Errorf("WithAPIKey did not set the key: enabled=%v apiKey=%q", client.enabled, client.apiKey)
+	}
+}
+
+func TestNewClient_StrictPanicsWithoutKey(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
+	defer func() {
+		if recover() == nil {
+			t.Error("strict client with no key should panic")
+		}
+	}()
+	NewClient("", WithStrict(true))
+}
+
+func TestNewClient_StrictDoesNotPanicWithKey(t *testing.T) {
+	client := NewClient("present", WithStrict(true))
+	if !client.enabled {
+		t.Error("strict client with a key should be enabled")
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ type Client struct {
 	apiKey       string
 	serviceURL   string
 	enabled      bool
+	strict       bool
 	httpClient   *httpClient
 	pendingSpans map[string][]<-chan struct{}
 	pendingMu    sync.Mutex
@@ -61,7 +63,27 @@ func WithEnabled(enabled bool) Option {
 	return func(c *Client) { c.enabled = enabled }
 }
 
+// WithAPIKey sets the API key. Equivalent to the apiKey argument of NewClient,
+// useful when constructing purely via options; whichever is set last wins.
+func WithAPIKey(apiKey string) Option {
+	return func(c *Client) { c.apiKey = apiKey }
+}
+
+// WithStrict makes an unresolvable API key a fatal misconfiguration: NewClient
+// panics instead of disabling tracing quietly. Off by default so a missing
+// telemetry key never crashes the host app; turn it on in standalone programs
+// where an untraced run is a failure you want surfaced immediately.
+func WithStrict(strict bool) Option {
+	return func(c *Client) { c.strict = strict }
+}
+
 // NewClient creates a new Bitfab client.
+//
+// If no apiKey is supplied (empty argument and no WithAPIKey), the key is read
+// from the BITFAB_API_KEY environment variable. Unlike the JS/Python SDKs, Go
+// resolves the key eagerly here: the client is constructed explicitly (normally
+// in main, after env/godotenv has loaded), so there is no import-time
+// construction-before-env trap to defer around.
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:       apiKey,
@@ -72,7 +94,13 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
+	if strings.TrimSpace(c.apiKey) == "" {
+		c.apiKey = os.Getenv("BITFAB_API_KEY")
+	}
 	if c.enabled && strings.TrimSpace(c.apiKey) == "" {
+		if c.strict {
+			panic("bitfab: no API key resolved. Set BITFAB_API_KEY or pass an apiKey to NewClient.")
+		}
 		log.Println("Bitfab: apiKey is empty — tracing is disabled. Provide a valid API key to enable tracing.")
 		c.enabled = false
 	}
