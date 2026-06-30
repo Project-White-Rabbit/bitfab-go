@@ -814,7 +814,7 @@ func TestSpan_UnserializableOutput_DoesNotCrash(t *testing.T) {
 	client := newTestClient(server.URL)
 	ctx := context.Background()
 
-	// Channels cannot be serialized by json.Marshal — this must not crash the app
+	// Channels cannot be serialized by json.Marshal - this must not crash the app
 	result, err := client.Span(ctx, "test", func(ctx context.Context) (any, error) {
 		return map[string]any{"ch": make(chan int)}, nil
 	})
@@ -847,7 +847,7 @@ func TestStart_UnserializableOutput_DoesNotCrash(t *testing.T) {
 }
 
 func TestSpan_ServerDown_ReturnsResult(t *testing.T) {
-	// Point at a server that isn't listening — span sending will fail,
+	// Point at a server that isn't listening - span sending will fail,
 	// but the user's result and error must still be returned.
 	client := newTestClient("http://127.0.0.1:1")
 	ctx := context.Background()
@@ -1653,7 +1653,7 @@ func TestSpan_MarksNonReplayableOnLossyInput(t *testing.T) {
 
 // TestSpan_MarksNonReplayableOnOversizeInput verifies that an oversize input
 // (which capValue stubs into a JSON-clean placeholder) is still marked
-// serialization_degraded — the gap where the cap would otherwise hide the loss.
+// serialization_degraded - the gap where the cap would otherwise hide the loss.
 func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any

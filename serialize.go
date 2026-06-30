@@ -54,7 +54,7 @@ const serializationDegradedStep = "serialization_degraded"
 // sanitize fast-path is a single json.Marshal). Mirrors the Python and
 // TypeScript SDKs' finalize step; the HTTP boundary stays as the final net.
 //
-// extraDropped carries losses detected before this point — e.g. capValue
+// extraDropped carries losses detected before this point - e.g. capValue
 // stubbing an oversize input/output into a JSON-clean placeholder, which the
 // sanitize pass below cannot otherwise detect. Mirrors the Python/TS extra_dropped.
 func finalizeSpanPayload(payload map[string]any, extraDropped ...string) map[string]any {

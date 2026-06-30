@@ -148,7 +148,7 @@ func TestJSONMarshal_Assembly(t *testing.T) {
 		},
 	}
 
-	// This is what the HTTP client does — must not panic or error
+	// This is what the HTTP client does - must not panic or error
 	data, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("json.Marshal failed: %v", err)

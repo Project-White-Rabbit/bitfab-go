@@ -101,7 +101,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		if c.strict {
 			panic("bitfab: no API key resolved. Set BITFAB_API_KEY or pass an apiKey to NewClient.")
 		}
-		log.Println("Bitfab: apiKey is empty — tracing is disabled. Provide a valid API key to enable tracing.")
+		log.Println("Bitfab: apiKey is empty - tracing is disabled. Provide a valid API key to enable tracing.")
 		c.enabled = false
 	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
@@ -197,7 +197,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 
 	endedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 
-	// Build and send span data — wrapped in a closure so a panic here
+	// Build and send span data - wrapped in a closure so a panic here
 	// never crashes the host app. The user's result/error is always returned.
 	func() {
 		defer func() { recover() }()
@@ -505,7 +505,7 @@ func (s *ActiveSpan) SetPrompt(prompt string) {
 }
 
 // End completes the span and sends it to the API in the background.
-// End is idempotent — calling it multiple times has no effect after the first call.
+// End is idempotent - calling it multiple times has no effect after the first call.
 func (s *ActiveSpan) End() {
 	defer func() { recover() }() // Never crash the host app (catches nil receiver)
 	if s.client == nil {
