@@ -611,6 +611,10 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		payload["sessionId"] = ts.SessionID
 	}
 
+	if ts != nil && ts.Dropped {
+		payload["dropped"] = true
+	}
+
 	c.httpClient.sendExternalTrace(payload)
 
 	// Clean up trace state

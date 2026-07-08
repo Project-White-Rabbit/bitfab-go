@@ -1225,6 +1225,95 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 	}
 }
 
+func TestTraceCompletion_Drop(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	var tracePayload map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if strings.Contains(r.URL.Path, "externalTraces") {
+			mu.Lock()
+			tracePayload = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "test-function", func(ctx context.Context) (any, error) {
+		GetCurrentTrace(ctx).Drop()
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if tracePayload == nil {
+		t.Fatal("no trace payload captured")
+	}
+	// dropped is a top-level sibling of completed
+	if tracePayload["dropped"] != true {
+		t.Errorf("dropped = %v, want true", tracePayload["dropped"])
+	}
+	if tracePayload["completed"] != true {
+		t.Errorf("completed = %v, want true", tracePayload["completed"])
+	}
+}
+
+func TestTraceCompletion_NoDrop(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	var tracePayload map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if strings.Contains(r.URL.Path, "externalTraces") {
+			mu.Lock()
+			tracePayload = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "test-function", func(ctx context.Context) (any, error) {
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if tracePayload == nil {
+		t.Fatal("no trace payload captured")
+	}
+	// dropped key must be absent when Drop() is never called
+	if tracePayload["dropped"] != nil {
+		t.Errorf("dropped = %v, want absent (nil)", tracePayload["dropped"])
+	}
+}
+
+func TestTraceDrop_OutsideSpan(t *testing.T) {
+	clearAllTraceStates()
+	ctx := context.Background()
+	// GetCurrentTrace returns nil outside a span; Drop must be a safe no-op.
+	GetCurrentTrace(ctx).Drop()
+}
+
 func TestTraceCompletion_Metadata(t *testing.T) {
 	clearAllTraceStates()
 	var mu sync.Mutex

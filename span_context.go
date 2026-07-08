@@ -45,6 +45,7 @@ type TraceState struct {
 	Metadata  map[string]any
 	Contexts  []ContextEntry
 	StartedAt string
+	Dropped   bool
 	mu        sync.Mutex
 }
 
@@ -154,6 +155,24 @@ func (ct *CurrentTrace) AddContext(context map[string]any) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.Contexts = append(ts.Contexts, context)
+}
+
+// Drop flags the current in-flight trace to be dropped.
+// When the trace completes, the completion payload carries a top-level
+// dropped: true, and the server scrubs and marks the trace dropped.
+// Safe to call on nil receiver (no-op).
+func (ct *CurrentTrace) Drop() {
+	defer func() { recover() }() // Never crash the host app
+	if ct == nil || ct.traceID == "" {
+		return
+	}
+	ts := getTraceState(ct.traceID)
+	if ts == nil {
+		ts = createTraceState(ct.traceID)
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.Dropped = true
 }
 
 // GetCurrentTrace returns a handle to the current active trace from the context.
