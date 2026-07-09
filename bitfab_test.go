@@ -1268,6 +1268,104 @@ func TestTraceCompletion_Drop(t *testing.T) {
 	}
 }
 
+func TestTraceDrop_SuppressesLaterSpanUploads(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	spanUploads := 0
+	var tracePayload map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			spanUploads++
+		}
+		if strings.Contains(r.URL.Path, "externalTraces") {
+			tracePayload = payload
+		}
+		mu.Unlock()
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	outerResult, _ := client.Span(ctx, "outer-function", func(ctx context.Context) (any, error) {
+		// Drop before the child span runs: the child completes after the flag
+		// is set, so its payload must not be uploaded.
+		GetCurrentTrace(ctx).Drop()
+		client.Span(ctx, "inner-function", func(ctx context.Context) (any, error) {
+			return "inner", nil
+		})
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+
+	// Suppressing uploads must not touch execution: the wrapped fn still runs
+	// and returns its real value.
+	if outerResult != "done" {
+		t.Errorf("outerResult = %v, want \"done\"", outerResult)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// No span payloads uploaded once the trace is dropped.
+	if spanUploads != 0 {
+		t.Errorf("spanUploads = %d, want 0", spanUploads)
+	}
+	// The completion signal still rides out with dropped: true.
+	if tracePayload == nil {
+		t.Fatal("no trace payload captured")
+	}
+	if tracePayload["dropped"] != true {
+		t.Errorf("dropped = %v, want true", tracePayload["dropped"])
+	}
+}
+
+func TestTraceNoDrop_DoesNotSuppressSpanUploads(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	spanUploads := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			spanUploads++
+		}
+		mu.Unlock()
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "outer-function", func(ctx context.Context) (any, error) {
+		client.Span(ctx, "inner-function", func(ctx context.Context) (any, error) {
+			return "inner", nil
+		})
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Regression guard: without Drop(), both child and root spans upload.
+	if spanUploads != 2 {
+		t.Errorf("spanUploads = %d, want 2", spanUploads)
+	}
+}
+
 func TestTraceCompletion_NoDrop(t *testing.T) {
 	clearAllTraceStates()
 	var mu sync.Mutex

@@ -236,13 +236,23 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			rawSpan["parent_id"] = id.parentSpanID
 		}
 
-		done := c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
-			"type":             "sdk-function",
-			"source":           "go-sdk-function",
-			"sourceTraceId":    id.traceID,
-			"traceFunctionKey": traceFunctionKey,
-			"rawSpan":          rawSpan,
-		}, dropped...))
+		// If drop() was called on this trace, suppress the span PAYLOAD upload
+		// for every span that completes after the flag was set. The trace
+		// completion still rides out with dropped: true (see
+		// sendTraceCompletion), so the server scrubs any sibling spans that
+		// already raced out before the flag was set.
+		var done <-chan struct{}
+		if ts := getTraceState(id.traceID); ts != nil && ts.Dropped {
+			done = closedDone()
+		} else {
+			done = c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+				"type":             "sdk-function",
+				"source":           "go-sdk-function",
+				"sourceTraceId":    id.traceID,
+				"traceFunctionKey": traceFunctionKey,
+				"rawSpan":          rawSpan,
+			}, dropped...))
+		}
 
 		if id.isRootSpan {
 			c.completeRootTrace(traceFunctionKey, id.traceID, startedAt, endedAt, done)
@@ -322,6 +332,15 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 // call returns immediately instead of blocking for up to (N+1)*5s on child
 // span network I/O. FlushTraces still waits for it because the goroutine is
 // tracked by the http client's wait group.
+// closedDone returns an already-closed channel, used in place of the
+// sendExternalSpan channel when a span's upload is suppressed (the trace was
+// dropped). Waiters on it proceed immediately instead of blocking.
+func closedDone() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
 func (c *Client) completeRootTrace(traceFunctionKey, traceID, startedAt, endedAt string, done <-chan struct{}) {
 	c.httpClient.runBackground(func() {
 		c.pendingMu.Lock()
@@ -556,13 +575,23 @@ func (s *ActiveSpan) End() {
 			rawSpan["parent_id"] = s.parentSpanID
 		}
 
-		done := s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
-			"type":             "sdk-function",
-			"source":           "go-sdk-function",
-			"sourceTraceId":    s.traceID,
-			"traceFunctionKey": s.traceFunctionKey,
-			"rawSpan":          rawSpan,
-		}, dropped...))
+		// If drop() was called on this trace, suppress the span PAYLOAD upload
+		// for every span that completes after the flag was set. The trace
+		// completion still rides out with dropped: true (see
+		// sendTraceCompletion), so the server scrubs any sibling spans that
+		// already raced out before the flag was set.
+		var done <-chan struct{}
+		if ts := getTraceState(s.traceID); ts != nil && ts.Dropped {
+			done = closedDone()
+		} else {
+			done = s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+				"type":             "sdk-function",
+				"source":           "go-sdk-function",
+				"sourceTraceId":    s.traceID,
+				"traceFunctionKey": s.traceFunctionKey,
+				"rawSpan":          rawSpan,
+			}, dropped...))
+		}
 
 		if s.isRootSpan {
 			s.client.completeRootTrace(s.traceFunctionKey, s.traceID, s.startedAt, endedAt, done)
