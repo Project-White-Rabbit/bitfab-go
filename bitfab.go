@@ -242,7 +242,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
 		var done <-chan struct{}
-		if ts := getTraceState(id.traceID); ts != nil && ts.Dropped {
+		if ts := getTraceState(id.traceID); ts != nil && ts.isDropped() {
 			done = closedDone()
 		} else {
 			done = c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
@@ -581,7 +581,7 @@ func (s *ActiveSpan) End() {
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
 		var done <-chan struct{}
-		if ts := getTraceState(s.traceID); ts != nil && ts.Dropped {
+		if ts := getTraceState(s.traceID); ts != nil && ts.isDropped() {
 			done = closedDone()
 		} else {
 			done = s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
@@ -640,7 +640,7 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		payload["sessionId"] = ts.SessionID
 	}
 
-	if ts != nil && ts.Dropped {
+	if ts != nil && ts.isDropped() {
 		payload["dropped"] = true
 	}
 

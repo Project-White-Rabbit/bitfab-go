@@ -64,6 +64,15 @@ func getTraceState(traceID string) *TraceState {
 	return traceStateStore.states[traceID]
 }
 
+// isDropped reports whether Drop() has flagged this trace. Reading Dropped is
+// synchronized with Drop()'s write via ts.mu, so a span finalizing on one
+// goroutine can safely check the flag while another goroutine calls Drop().
+func (ts *TraceState) isDropped() bool {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.Dropped
+}
+
 // createTraceState creates or retrieves the trace state for a given trace ID.
 func createTraceState(traceID string) *TraceState {
 	traceStateStore.Lock()

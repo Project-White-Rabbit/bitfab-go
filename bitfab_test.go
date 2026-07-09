@@ -1412,6 +1412,53 @@ func TestTraceDrop_OutsideSpan(t *testing.T) {
 	GetCurrentTrace(ctx).Drop()
 }
 
+// TestTraceDrop_ConcurrentWithSiblingSpanEnd guards the read of the dropped
+// flag against Drop() running on another goroutine. One goroutine flags the
+// trace while a sibling span for the same trace finalizes; the span-end path
+// reads the flag and Drop() writes it, so this must stay race-clean under
+// `go test -race`.
+func TestTraceDrop_ConcurrentWithSiblingSpanEnd(t *testing.T) {
+	clearAllTraceStates()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "outer-function", func(ctx context.Context) (any, error) {
+		current := GetCurrentTrace(ctx)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Goroutine A: flag the trace as dropped (writes ts.Dropped under mu).
+		go func() {
+			defer wg.Done()
+			current.Drop()
+		}()
+
+		// Goroutine B: run and finalize a sibling span under the same trace
+		// (the span-end path reads the dropped flag via isDropped()).
+		go func() {
+			defer wg.Done()
+			client.Span(ctx, "inner-function", func(ctx context.Context) (any, error) {
+				return "inner", nil
+			})
+		}()
+
+		wg.Wait()
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+}
+
 func TestTraceCompletion_Metadata(t *testing.T) {
 	clearAllTraceStates()
 	var mu sync.Mutex
