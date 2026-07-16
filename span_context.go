@@ -102,9 +102,52 @@ func clearAllTraceStates() {
 	traceStateStore.states = make(map[string]*TraceState)
 }
 
+// CurrentSpan identifies the current active span.
+type CurrentSpan struct {
+	id      string
+	traceID string
+}
+
+// ID returns the canonical Bitfab span ID, or an empty string outside a span.
+// Safe to call on a nil receiver.
+func (cs *CurrentSpan) ID() string {
+	if cs == nil {
+		return ""
+	}
+	return cs.id
+}
+
+// TraceID returns the canonical Bitfab trace ID, or an empty string outside a span.
+// Safe to call on a nil receiver.
+func (cs *CurrentSpan) TraceID() string {
+	if cs == nil {
+		return ""
+	}
+	return cs.traceID
+}
+
+// GetCurrentSpan returns the current active span from the context.
+// Returns nil if not inside a span context.
+func GetCurrentSpan(ctx context.Context) *CurrentSpan {
+	entry := currentSpan(ctx)
+	if entry == nil {
+		return nil
+	}
+	return &CurrentSpan{id: entry.spanID, traceID: entry.traceID}
+}
+
 // CurrentTrace provides a handle to the current active trace for setting trace-level context.
 type CurrentTrace struct {
 	traceID string
+}
+
+// TraceID returns the canonical Bitfab trace ID, or an empty string outside a span.
+// Safe to call on a nil receiver.
+func (ct *CurrentTrace) TraceID() string {
+	if ct == nil {
+		return ""
+	}
+	return ct.traceID
 }
 
 // SetSessionID sets the session ID for this trace.

@@ -33,6 +33,69 @@ func TestNewClient_WithServiceURL(t *testing.T) {
 	}
 }
 
+func TestGetTraceSpan_DefaultsToLast(t *testing.T) {
+	traceID := "11111111-1111-4111-8111-111111111111"
+	spanID := "22222222-2222-4222-8222-222222222222"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("name"); got != "generateAnswer" {
+			t.Errorf("name = %q, want generateAnswer", got)
+		}
+		if got := r.URL.Query().Get("occurrence"); got != "last" {
+			t.Errorf("occurrence = %q, want last", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"span": map[string]any{"id": spanID, "traceId": traceID, "output": "done"},
+		})
+	}))
+	defer server.Close()
+
+	span, err := newTestClient(server.URL).GetTraceSpan(
+		context.Background(),
+		traceID,
+		SpanLookup{Name: "generateAnswer"},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if span == nil || span.ID != spanID {
+		t.Fatalf("span = %#v, want %s", span, spanID)
+	}
+}
+
+func TestGetTraceSpan_IDAndOccurrence(t *testing.T) {
+	traceID := "11111111-1111-4111-8111-111111111111"
+	spanID := "22222222-2222-4222-8222-222222222222"
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		json.NewEncoder(w).Encode(map[string]any{"span": nil})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	if _, err := client.GetTraceSpan(ctx, traceID, SpanLookup{ID: spanID}); err != nil {
+		t.Fatalf("span ID lookup: %v", err)
+	}
+	if _, err := client.GetTraceSpan(ctx, traceID, SpanLookup{Name: "step", Occurrence: SpanOccurrenceAt(2)}); err != nil {
+		t.Fatalf("occurrence lookup: %v", err)
+	}
+	if !strings.Contains(queries[0], "id="+spanID) || !strings.Contains(queries[1], "occurrence=2") {
+		t.Fatalf("queries = %#v", queries)
+	}
+}
+
+func TestGetTraceSpan_RejectsInvalidSelector(t *testing.T) {
+	traceID := "11111111-1111-4111-8111-111111111111"
+	client := NewClient("test-key")
+	if _, err := client.GetTraceSpan(context.Background(), traceID, SpanLookup{}); err == nil {
+		t.Fatal("expected selector error")
+	}
+	if _, err := client.GetTraceSpan(context.Background(), traceID, SpanLookup{Name: "step", Occurrence: SpanOccurrence("-1")}); err == nil {
+		t.Fatal("expected occurrence error")
+	}
+}
+
 func TestSpan_BasicExecution(t *testing.T) {
 	server := newSpanCaptureServer(t)
 	defer server.Close()
@@ -91,6 +154,12 @@ func TestSpan_WithNameAndType(t *testing.T) {
 	rawSpan := captured["rawSpan"].(map[string]any)
 	spanData := rawSpan["span_data"].(map[string]any)
 
+	if captured["id"] != rawSpan["id"] {
+		t.Errorf("id = %v, want %v", captured["id"], rawSpan["id"])
+	}
+	if captured["traceId"] != rawSpan["trace_id"] {
+		t.Errorf("traceId = %v, want %v", captured["traceId"], rawSpan["trace_id"])
+	}
 	if spanData["name"] != "ProcessOrder" {
 		t.Errorf("name = %v, want ProcessOrder", spanData["name"])
 	}

@@ -78,3 +78,31 @@ func TestWithSpanContext_GoroutineIsolation(t *testing.T) {
 		t.Errorf("goroutine with fresh context saw span %q, expected none", result)
 	}
 }
+
+func TestCurrentTrace_TraceID(t *testing.T) {
+	ctx := withSpanContext(context.Background(), "trace-1", "span-1")
+
+	if got := GetCurrentTrace(ctx).TraceID(); got != "trace-1" {
+		t.Errorf("TraceID() = %q, want trace-1", got)
+	}
+	var trace *CurrentTrace
+	if got := trace.TraceID(); got != "" {
+		t.Errorf("nil TraceID() = %q, want empty", got)
+	}
+}
+
+func TestCurrentSpan_IDs(t *testing.T) {
+	ctx := withSpanContext(context.Background(), "trace-1", "span-1")
+	span := GetCurrentSpan(ctx)
+
+	if got := span.ID(); got != "span-1" {
+		t.Errorf("ID() = %q, want span-1", got)
+	}
+	if got := span.TraceID(); got != "trace-1" {
+		t.Errorf("TraceID() = %q, want trace-1", got)
+	}
+	var noSpan *CurrentSpan
+	if noSpan.ID() != "" || noSpan.TraceID() != "" {
+		t.Error("nil CurrentSpan should return empty IDs")
+	}
+}

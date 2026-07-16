@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,6 +103,29 @@ func (h *httpClient) request(endpoint string, payload map[string]any, opts ...re
 	}
 
 	return lastErr
+}
+
+func (h *httpClient) get(ctx context.Context, endpoint string, result any) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", h.serviceURL+endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("bitfab: failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.apiKey)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bitfab: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("bitfab: HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+		return fmt.Errorf("bitfab: failed to decode response: %w", err)
+	}
+	return nil
 }
 
 // sendExternalSpan sends a span payload in the background and returns a channel

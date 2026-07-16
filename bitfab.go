@@ -31,11 +31,58 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// SpanOccurrence selects one match when multiple spans share a name.
+// The zero value defaults to the last matching span.
+type SpanOccurrence string
+
+const (
+	// FirstSpanOccurrence selects the earliest matching span.
+	FirstSpanOccurrence SpanOccurrence = "first"
+	// LastSpanOccurrence selects the latest matching span.
+	LastSpanOccurrence SpanOccurrence = "last"
+)
+
+// SpanOccurrenceAt selects a zero-based match in chronological order.
+func SpanOccurrenceAt(index int) SpanOccurrence {
+	return SpanOccurrence(strconv.Itoa(index))
+}
+
+// SpanLookup identifies a span by its Bitfab ID or name.
+// Set exactly one of ID or Name.
+type SpanLookup struct {
+	ID         string
+	Name       string
+	Occurrence SpanOccurrence
+}
+
+// CapturedSpan is one persisted span returned by GetTraceSpan.
+type CapturedSpan struct {
+	ID           string         `json:"id"`
+	TraceID      string         `json:"traceId"`
+	ParentSpanID *string        `json:"parentSpanId"`
+	Name         *string        `json:"name"`
+	Type         string         `json:"type"`
+	Input        any            `json:"input"`
+	Output       any            `json:"output"`
+	Contexts     []ContextEntry `json:"contexts"`
+	Prompt       *string        `json:"prompt"`
+	Metadata     map[string]any `json:"metadata"`
+	Metrics      map[string]any `json:"metrics"`
+	Errors       any            `json:"errors"`
+	StartedAt    *time.Time     `json:"startedAt"`
+	EndedAt      *time.Time     `json:"endedAt"`
+}
+
+var traceIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // Client is the main entry point for creating spans.
 type Client struct {
@@ -106,6 +153,47 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	return c
+}
+
+// GetTraceSpan fetches one persisted span without loading the full trace.
+// Name lookups default to the last matching span.
+func (c *Client) GetTraceSpan(ctx context.Context, traceID string, lookup SpanLookup) (*CapturedSpan, error) {
+	if !traceIDPattern.MatchString(traceID) {
+		return nil, fmt.Errorf("bitfab: invalid trace ID")
+	}
+	if (lookup.ID == "") == (lookup.Name == "") {
+		return nil, fmt.Errorf("bitfab: provide exactly one of ID or Name")
+	}
+
+	query := url.Values{}
+	if lookup.ID != "" {
+		if !traceIDPattern.MatchString(lookup.ID) {
+			return nil, fmt.Errorf("bitfab: invalid span ID")
+		}
+		query.Set("id", lookup.ID)
+	} else {
+		occurrence := lookup.Occurrence
+		if occurrence == "" {
+			occurrence = LastSpanOccurrence
+		}
+		if occurrence != FirstSpanOccurrence && occurrence != LastSpanOccurrence {
+			index, err := strconv.Atoi(string(occurrence))
+			if err != nil || index < 0 {
+				return nil, fmt.Errorf("bitfab: occurrence must be first, last, or a non-negative index")
+			}
+		}
+		query.Set("name", lookup.Name)
+		query.Set("occurrence", string(occurrence))
+	}
+
+	var response struct {
+		Span *CapturedSpan `json:"span"`
+	}
+	endpoint := "/api/sdk/traces/" + url.PathEscape(traceID) + "/span?" + query.Encode()
+	if err := c.httpClient.get(ctx, endpoint, &response); err != nil {
+		return nil, err
+	}
+	return response.Span, nil
 }
 
 // SpanFunc is the function signature for code executed inside a span.
@@ -246,6 +334,8 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			done = closedDone()
 		} else {
 			done = c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+				"id":               id.spanID,
+				"traceId":          id.traceID,
 				"type":             "sdk-function",
 				"source":           "go-sdk-function",
 				"sourceTraceId":    id.traceID,
@@ -585,6 +675,8 @@ func (s *ActiveSpan) End() {
 			done = closedDone()
 		} else {
 			done = s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+				"id":               s.spanID,
+				"traceId":          s.traceID,
 				"type":             "sdk-function",
 				"source":           "go-sdk-function",
 				"sourceTraceId":    s.traceID,
@@ -629,6 +721,7 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 	}
 
 	payload := map[string]any{
+		"id":               traceID,
 		"type":             "sdk-function",
 		"source":           "go-sdk-function",
 		"traceFunctionKey": traceFunctionKey,
