@@ -117,6 +117,131 @@ func TestSpan_BasicExecution(t *testing.T) {
 	}
 }
 
+func TestSpan_CaptureWhenNested(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	var payloads []map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			var payload map[string]any
+			json.NewDecoder(r.Body).Decode(&payload)
+			mu.Lock()
+			payloads = append(payloads, payload)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	helper := func(ctx context.Context) (any, error) {
+		return "helper result", nil
+	}
+
+	result, err := client.Span(
+		ctx,
+		"helper",
+		helper,
+		WithCaptureWhen(CaptureWhenNested),
+	)
+	if err != nil || result != "helper result" {
+		t.Fatalf("standalone helper = (%v, %v), want (helper result, nil)", result, err)
+	}
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	standaloneSpanCount := len(payloads)
+	mu.Unlock()
+	if standaloneSpanCount != 0 {
+		t.Fatalf("standalone nested-only helper sent %d spans, want 0", standaloneSpanCount)
+	}
+
+	_, err = client.Span(ctx, "root", func(ctx context.Context) (any, error) {
+		return client.Span(
+			ctx,
+			"helper",
+			helper,
+			WithCaptureWhen(CaptureWhenNested),
+		)
+	})
+	if err != nil {
+		t.Fatalf("nested helper: %v", err)
+	}
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(payloads) != 2 {
+		t.Fatalf("nested helper sent %d spans, want 2", len(payloads))
+	}
+
+	var rootSpan, helperSpan map[string]any
+	for _, payload := range payloads {
+		switch payload["traceFunctionKey"] {
+		case "root":
+			rootSpan = payload["rawSpan"].(map[string]any)
+		case "helper":
+			helperSpan = payload["rawSpan"].(map[string]any)
+		}
+	}
+	if rootSpan == nil || helperSpan == nil {
+		t.Fatalf("missing root or helper span: root=%v helper=%v", rootSpan, helperSpan)
+	}
+	if helperSpan["parent_id"] != rootSpan["id"] {
+		t.Errorf("helper parent_id = %v, want %v", helperSpan["parent_id"], rootSpan["id"])
+	}
+	if helperSpan["trace_id"] != rootSpan["trace_id"] {
+		t.Errorf("helper trace_id = %v, want %v", helperSpan["trace_id"], rootSpan["trace_id"])
+	}
+}
+
+func TestSpan_UnknownCaptureWhenWarnsOnceAndCapturesRoots(t *testing.T) {
+	clearAllTraceStates()
+	resetWarnOnce()
+	var mu sync.Mutex
+	spanCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			mu.Lock()
+			spanCount++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		result, err := client.Span(
+			ctx,
+			"unknown-capture-when-helper",
+			func(ctx context.Context) (any, error) {
+				return "helper result", nil
+			},
+			WithCaptureWhen(CaptureWhen("sometimes")),
+		)
+		if err != nil || result != "helper result" {
+			t.Fatalf("helper = (%v, %v), want (helper result, nil)", result, err)
+		}
+	}
+	client.FlushTraces(5 * time.Second)
+
+	if _, warned := warnedKeys.Load("invalid-capture-when:unknown-capture-when-helper"); !warned {
+		t.Fatal("unknown captureWhen value should warn")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if spanCount != 2 {
+		t.Fatalf("unknown captureWhen sent %d spans, want 2 root spans", spanCount)
+	}
+}
+
 func TestSpan_WithNameAndType(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
@@ -633,6 +758,43 @@ func TestStart_BasicExecution(t *testing.T) {
 	// Verify context was updated (span should not be nil)
 	if currentSpan(ctx) == nil {
 		t.Error("expected span in context after Start")
+	}
+}
+
+func TestStart_CaptureWhenNestedWithoutParentReturnsNoOp(t *testing.T) {
+	var mu sync.Mutex
+	spanCount := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "externalSpans") {
+			mu.Lock()
+			spanCount++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	childCtx, span := client.Start(
+		ctx,
+		"helper",
+		"Helper",
+		WithCaptureWhen(CaptureWhenNested),
+	)
+	span.SetOutput("ignored")
+	span.End()
+	client.FlushTraces(5 * time.Second)
+
+	if currentSpan(childCtx) != nil {
+		t.Error("nested-only Start without a parent should return the original context")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if spanCount != 0 {
+		t.Errorf("nested-only Start sent %d spans, want 0", spanCount)
 	}
 }
 

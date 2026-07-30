@@ -51,6 +51,16 @@ const (
 	LastSpanOccurrence SpanOccurrence = "last"
 )
 
+// CaptureWhen controls whether a span may become the root of a new trace.
+type CaptureWhen string
+
+const (
+	// CaptureWhenAlways captures the span even when it starts a new trace.
+	CaptureWhenAlways CaptureWhen = "always"
+	// CaptureWhenNested captures the span only when another Bitfab span is active.
+	CaptureWhenNested CaptureWhen = "nested"
+)
+
 // SpanOccurrenceAt selects a zero-based match in chronological order.
 func SpanOccurrenceAt(index int) SpanOccurrence {
 	return SpanOccurrence(strconv.Itoa(index))
@@ -207,6 +217,7 @@ type spanConfig struct {
 	spanType     string
 	functionName string
 	input        any
+	captureWhen  CaptureWhen
 }
 
 // WithName sets an explicit span name. Defaults to the traceFunctionKey if not set.
@@ -238,6 +249,33 @@ func WithInput(args ...any) SpanOption {
 	}
 }
 
+// WithCaptureWhen controls whether a span may start a new trace.
+// CaptureWhenNested is useful for helpers that should only appear inside an
+// existing Bitfab trace. The function still runs normally when no parent exists.
+// Unknown values warn once and default to CaptureWhenAlways.
+func WithCaptureWhen(captureWhen CaptureWhen) SpanOption {
+	return func(c *spanConfig) { c.captureWhen = captureWhen }
+}
+
+func normalizeCaptureWhen(captureWhen CaptureWhen, traceFunctionKey string) CaptureWhen {
+	switch captureWhen {
+	case CaptureWhenAlways, CaptureWhenNested:
+		return captureWhen
+	default:
+		warnOnce(
+			"invalid-capture-when:"+traceFunctionKey,
+			fmt.Sprintf(
+				"unknown captureWhen value %q; defaulting to %q. Valid values: %q, %q.",
+				captureWhen,
+				CaptureWhenAlways,
+				CaptureWhenAlways,
+				CaptureWhenNested,
+			),
+		)
+		return CaptureWhenAlways
+	}
+}
+
 // Span executes fn inside a traced span. The span is sent to the Bitfab API
 // in the background after fn completes. Nested spans are automatically tracked
 // through the context.
@@ -251,11 +289,16 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	}
 
 	cfg := spanConfig{
-		name:     traceFunctionKey,
-		spanType: "custom",
+		name:        traceFunctionKey,
+		spanType:    "custom",
+		captureWhen: CaptureWhenAlways,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	cfg.captureWhen = normalizeCaptureWhen(cfg.captureWhen, traceFunctionKey)
+	if cfg.captureWhen == CaptureWhenNested && currentSpan(ctx) == nil {
+		return fn(ctx)
 	}
 
 	// An invalid span type must not fail the user's call. Degrade to "custom"
@@ -465,11 +508,16 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 	}
 
 	cfg := spanConfig{
-		name:     spanName,
-		spanType: "custom",
+		name:        spanName,
+		spanType:    "custom",
+		captureWhen: CaptureWhenAlways,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	cfg.captureWhen = normalizeCaptureWhen(cfg.captureWhen, traceFunctionKey)
+	if cfg.captureWhen == CaptureWhenNested && currentSpan(ctx) == nil {
+		return ctx, &ActiveSpan{}
 	}
 
 	if !validSpanTypes[cfg.spanType] {
