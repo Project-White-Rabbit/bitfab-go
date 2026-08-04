@@ -43,6 +43,24 @@ func marshalPayloadSafe(payload map[string]any) ([]byte, []string) {
 	return body, dropped
 }
 
+// marshalSpanBody encodes a span payload, marking a lossy capture on its errors
+// first when there was one.
+//
+// A clean capture is the overwhelmingly common case and needs exactly one
+// encode: the Marshal that proves the payload is encodable is the body that
+// ships. Only a capture that was actually lossy - a value the cap stubbed for
+// size (extraDropped), or a stray Marshal rejects - pays for the finalize walk
+// and a second encode, and there the extra work buys the degraded marking that
+// keeps the span from being replayed as if it were faithful.
+func marshalSpanBody(payload map[string]any, extraDropped ...string) ([]byte, []string) {
+	if len(extraDropped) == 0 {
+		if body, err := json.Marshal(payload); err == nil {
+			return body, nil
+		}
+	}
+	return marshalPayloadSafe(finalizeSpanPayload(payload, extraDropped...))
+}
+
 // serializationDegradedStep is the error step that marks a span non-replayable
 // when its capture was lossy.
 const serializationDegradedStep = "serialization_degraded"

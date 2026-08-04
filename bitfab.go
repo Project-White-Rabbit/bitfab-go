@@ -376,7 +376,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		if ts := getTraceState(id.traceID); ts != nil && ts.isDropped() {
 			done = closedDone()
 		} else {
-			done = c.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+			done = c.httpClient.sendExternalSpan(map[string]any{
 				"id":               id.spanID,
 				"traceId":          id.traceID,
 				"type":             "sdk-function",
@@ -384,7 +384,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 				"sourceTraceId":    id.traceID,
 				"traceFunctionKey": traceFunctionKey,
 				"rawSpan":          rawSpan,
-			}, dropped...))
+			}, dropped...)
 		}
 
 		if id.isRootSpan {
@@ -722,7 +722,7 @@ func (s *ActiveSpan) End() {
 		if ts := getTraceState(s.traceID); ts != nil && ts.isDropped() {
 			done = closedDone()
 		} else {
-			done = s.client.httpClient.sendExternalSpan(finalizeSpanPayload(map[string]any{
+			done = s.client.httpClient.sendExternalSpan(map[string]any{
 				"id":               s.spanID,
 				"traceId":          s.traceID,
 				"type":             "sdk-function",
@@ -730,7 +730,7 @@ func (s *ActiveSpan) End() {
 				"sourceTraceId":    s.traceID,
 				"traceFunctionKey": s.traceFunctionKey,
 				"rawSpan":          rawSpan,
-			}, dropped...))
+			}, dropped...)
 		}
 
 		if s.isRootSpan {

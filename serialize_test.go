@@ -2,6 +2,10 @@ package bitfab
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -521,5 +525,143 @@ func TestFinalizeSpanPayloadMarksLossy(t *testing.T) {
 	// The whole finalized payload must now JSON-encode without error.
 	if _, err := json.Marshal(out); err != nil {
 		t.Fatalf("finalized payload should be JSON-safe: %v", err)
+	}
+}
+
+// TestMarshalSpanBodyCleanEncodesOnce verifies the encode that proves a clean
+// payload is encodable is the body that ships: same bytes as a plain Marshal,
+// with no degraded marking added.
+func TestMarshalSpanBodyCleanEncodesOnce(t *testing.T) {
+	payload := map[string]any{
+		"type":   "sdk-function",
+		"source": "go-sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": []any{"hi"}, "output": "ok"},
+		},
+	}
+
+	body, dropped := marshalSpanBody(payload)
+
+	if len(dropped) != 0 {
+		t.Fatalf("clean payload should report no drops, got %v", dropped)
+	}
+	want, _ := json.Marshal(payload)
+	if string(body) != string(want) {
+		t.Fatalf("body = %s, want %s", body, want)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if _, ok := out["errors"]; ok {
+		t.Fatalf("clean payload should have no errors, got %v", out["errors"])
+	}
+}
+
+// TestMarshalSpanBodyMarksCapStubbedValue verifies a capture the size cap had
+// to stub still reaches the wire marked non-replayable, even though the payload
+// itself encodes cleanly and would otherwise take the one-encode fast path.
+func TestMarshalSpanBodyMarksCapStubbedValue(t *testing.T) {
+	payload := map[string]any{
+		"type": "sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": "<unserializable: too_large_9_bytes>"},
+		},
+	}
+
+	body, _ := marshalSpanBody(payload, "too_large")
+
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	errs, ok := out["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("a cap-stubbed capture must be marked degraded, got %v", out["errors"])
+	}
+	if first, _ := errs[0].(map[string]any); first["step"] != serializationDegradedStep {
+		t.Fatalf("expected step %q, got %v", serializationDegradedStep, errs[0])
+	}
+}
+
+// TestMarshalSpanBodyStubsStrayAndMarks verifies a stray that Marshal rejects
+// still ships: stubbed in place, siblings intact, span marked non-replayable.
+func TestMarshalSpanBodyStubsStrayAndMarks(t *testing.T) {
+	payload := map[string]any{
+		"type": "sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": []any{make(chan int)}, "output": "ok"},
+		},
+	}
+
+	body, _ := marshalSpanBody(payload)
+
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("body is not valid JSON: %v", err)
+	}
+	if out["type"] != "sdk-function" {
+		t.Fatalf("control fields lost: %v", out)
+	}
+	spanData := out["rawSpan"].(map[string]any)["span_data"].(map[string]any)
+	if spanData["output"] != "ok" {
+		t.Fatalf("sibling value lost: %v", spanData)
+	}
+	if errs, ok := out["errors"].([]any); !ok || len(errs) == 0 {
+		t.Fatalf("a stray must be marked degraded, got %v", out["errors"])
+	}
+}
+
+// countingMarshaler records how many times the payload it sits in was encoded.
+type countingMarshaler struct{ encodes *int }
+
+func (c countingMarshaler) MarshalJSON() ([]byte, error) {
+	*c.encodes++
+	return []byte(`"captured"`), nil
+}
+
+// TestMarshalSpanBodyEncodesCleanPayloadExactlyOnce is the regression guard
+// for the probe-then-encode split: a clean span payload must be encoded once,
+// not once to check that it encodes and again to produce the body.
+func TestMarshalSpanBodyEncodesCleanPayloadExactlyOnce(t *testing.T) {
+	encodes := 0
+	payload := map[string]any{
+		"type": "sdk-function",
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{"input": countingMarshaler{&encodes}},
+		},
+	}
+
+	body, dropped := marshalSpanBody(payload)
+
+	if encodes != 1 {
+		t.Fatalf("clean payload encoded %d times, want exactly 1", encodes)
+	}
+	if len(dropped) != 0 {
+		t.Fatalf("clean payload should report no drops, got %v", dropped)
+	}
+	if !strings.Contains(string(body), `"captured"`) {
+		t.Fatalf("the single encode must be the body that ships, got %s", body)
+	}
+}
+
+// TestSendReusesTheEncodedBody verifies the send path transmits the bytes it was
+// handed rather than re-encoding a payload.
+func TestSendReusesTheEncodedBody(t *testing.T) {
+	var received []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	hc := newHTTPClient("test-key", server.URL)
+	body := []byte(`{"proof":"reused","spacing":[1,  2]}`)
+
+	if err := hc.send("/api/sdk/externalSpans", body); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+	if string(received) != string(body) {
+		t.Fatalf("wire body = %s, want the bytes handed to send: %s", received, body)
 	}
 }

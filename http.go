@@ -31,6 +31,33 @@ func newHTTPClient(apiKey, serviceURL string) *httpClient {
 
 // request makes a POST request to the Bitfab API.
 func (h *httpClient) request(endpoint string, payload map[string]any, opts ...requestOption) error {
+	// Encode defensively so a stray non-encodable value can never abort the
+	// send and silently drop the span. Strays are stubbed in place; a degraded
+	// payload warns loudly that the trace may not be replayable.
+	body, dropped := marshalPayloadSafe(payload)
+	warnForStubbedBody(dropped)
+	return h.send(endpoint, body, opts...)
+}
+
+func warnForStubbedBody(dropped []string) {
+	if len(dropped) == 0 {
+		return
+	}
+	warnOnce(
+		"request-body-stubbed",
+		fmt.Sprintf(
+			"a request body held non-serializable value(s) (e.g. %s); "+
+				"they were stubbed so the span still sends, but the trace may be "+
+				"incomplete or not replayable",
+			strings.Join(uniqueStrings(dropped), ", "),
+		),
+	)
+}
+
+// send POSTs an already-encoded body, retrying per the request options. Callers
+// that encode their own body (the span path, which must mark a lossy capture
+// before encoding) use this so the payload is never encoded twice.
+func (h *httpClient) send(endpoint string, body []byte, opts ...requestOption) error {
 	cfg := requestConfig{
 		timeout:    0, // use default client timeout
 		maxRetries: 1,
@@ -38,22 +65,6 @@ func (h *httpClient) request(endpoint string, payload map[string]any, opts ...re
 	}
 	for _, opt := range opts {
 		opt(&cfg)
-	}
-
-	// Encode defensively so a stray non-encodable value can never abort the
-	// send and silently drop the span. Strays are stubbed in place; a degraded
-	// payload warns loudly that the trace may not be replayable.
-	body, dropped := marshalPayloadSafe(payload)
-	if len(dropped) > 0 {
-		warnOnce(
-			"request-body-stubbed",
-			fmt.Sprintf(
-				"a request body held non-serializable value(s) (e.g. %s); "+
-					"they were stubbed so the span still sends, but the trace may be "+
-					"incomplete or not replayable",
-				strings.Join(uniqueStrings(dropped), ", "),
-			),
-		)
 	}
 
 	var lastErr error
@@ -131,7 +142,11 @@ func (h *httpClient) get(ctx context.Context, endpoint string, result any) error
 // sendExternalSpan sends a span payload in the background and returns a channel
 // that is closed when the HTTP request completes. This allows callers to await
 // span delivery before sending trace completion.
-func (h *httpClient) sendExternalSpan(payload map[string]any) <-chan struct{} {
+//
+// extraDropped carries losses detected during capture (a value the size cap
+// stubbed) so the span can be marked non-replayable. Encoding happens in the
+// background goroutine, off the user's thread.
+func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) <-chan struct{} {
 	merged := make(map[string]any, len(payload)+1)
 	for k, v := range payload {
 		merged[k] = v
@@ -148,7 +163,9 @@ func (h *httpClient) sendExternalSpan(payload map[string]any) <-chan struct{} {
 				warnOnce("panic-background-request", fmt.Sprintf("a background request panicked and was recovered: %v", r))
 			}
 		}()
-		if err := h.request("/api/sdk/externalSpans", merged, withTimeout(30*time.Second)); err != nil {
+		body, dropped := marshalSpanBody(merged, extraDropped...)
+		warnForStubbedBody(dropped)
+		if err := h.send("/api/sdk/externalSpans", body, withTimeout(30*time.Second)); err != nil {
 			warnOnce("send-external-span-failed", fmt.Sprintf("failed to send a span to the backend (further occurrences suppressed): %v", err))
 		}
 	}()
