@@ -96,13 +96,11 @@ var traceIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a
 
 // Client is the main entry point for creating spans.
 type Client struct {
-	apiKey       string
-	serviceURL   string
-	enabled      bool
-	strict       bool
-	httpClient   *httpClient
-	pendingSpans map[string][]<-chan struct{}
-	pendingMu    sync.Mutex
+	apiKey     string
+	serviceURL string
+	enabled    bool
+	strict     bool
+	httpClient *httpClient
 }
 
 // Option configures a Client.
@@ -143,10 +141,9 @@ func WithStrict(strict bool) Option {
 // construction-before-env trap to defer around.
 func NewClient(apiKey string, opts ...Option) *Client {
 	c := &Client{
-		apiKey:       apiKey,
-		serviceURL:   DefaultServiceURL,
-		enabled:      true,
-		pendingSpans: make(map[string][]<-chan struct{}),
+		apiKey:     apiKey,
+		serviceURL: DefaultServiceURL,
+		enabled:    true,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -372,11 +369,8 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		// completion still rides out with dropped: true (see
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
-		var done <-chan struct{}
-		if ts := getTraceState(id.traceID); ts != nil && ts.isDropped() {
-			done = closedDone()
-		} else {
-			done = c.httpClient.sendExternalSpan(map[string]any{
+		if ts := getTraceState(id.traceID); ts == nil || !ts.isDropped() {
+			c.httpClient.sendExternalSpan(map[string]any{
 				"id":               id.spanID,
 				"traceId":          id.traceID,
 				"type":             "sdk-function",
@@ -388,11 +382,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		}
 
 		if id.isRootSpan {
-			c.completeRootTrace(traceFunctionKey, id.traceID, startedAt, endedAt, done)
-		} else {
-			c.pendingMu.Lock()
-			c.pendingSpans[id.traceID] = append(c.pendingSpans[id.traceID], done)
-			c.pendingMu.Unlock()
+			c.sendTraceCompletion(traceFunctionKey, id.traceID, startedAt, endedAt)
 		}
 	}()
 
@@ -418,9 +408,6 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 		if r := recover(); r != nil {
 			if registered != "" {
 				deleteTraceState(registered)
-				c.pendingMu.Lock()
-				delete(c.pendingSpans, registered)
-				c.pendingMu.Unlock()
 			}
 			warnOnce(
 				"span-setup",
@@ -447,9 +434,6 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 	if isRootSpan && getTraceState(traceID) == nil {
 		createTraceState(traceID)
 		registered = traceID
-		c.pendingMu.Lock()
-		c.pendingSpans[traceID] = []<-chan struct{}{}
-		c.pendingMu.Unlock()
 	}
 
 	return spanIdentity{
@@ -458,43 +442,6 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 		parentSpanID: parentSpanID,
 		isRootSpan:   isRootSpan,
 	}, true
-}
-
-// completeRootTrace drains the trace's pending child spans and sends trace
-// completion. It runs in a tracked background goroutine so the user's traced
-// call returns immediately instead of blocking for up to (N+1)*5s on child
-// span network I/O. FlushTraces still waits for it because the goroutine is
-// tracked by the http client's wait group.
-// closedDone returns an already-closed channel, used in place of the
-// sendExternalSpan channel when a span's upload is suppressed (the trace was
-// dropped). Waiters on it proceed immediately instead of blocking.
-func closedDone() <-chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
-}
-
-func (c *Client) completeRootTrace(traceFunctionKey, traceID, startedAt, endedAt string, done <-chan struct{}) {
-	c.httpClient.runBackground(func() {
-		c.pendingMu.Lock()
-		pending := c.pendingSpans[traceID]
-		delete(c.pendingSpans, traceID)
-		c.pendingMu.Unlock()
-
-		for _, ch := range pending {
-			select {
-			case <-ch:
-			case <-time.After(5 * time.Second):
-			}
-		}
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-
-		c.sendTraceCompletion(traceFunctionKey, traceID, startedAt, endedAt)
-	})
 }
 
 // Start begins a new span and returns the updated context and an ActiveSpan handle.
@@ -552,10 +499,17 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 	return childCtx, span
 }
 
-// FlushTraces waits for all pending background span deliveries to complete,
-// up to the given timeout.
-func (c *Client) FlushTraces(timeout time.Duration) {
-	c.httpClient.flush(timeout)
+// FlushTraces drains this client's pending span deliveries within timeout.
+// It reports false when an export failed or the deadline expired.
+func (c *Client) FlushTraces(timeout time.Duration) bool {
+	return c.httpClient.flush(timeout)
+}
+
+// Close flushes this client's pending spans and permanently shuts down its
+// OpenTelemetry worker. It is idempotent, and reports false when an export
+// failed or the deadline expired. A closed client no longer records spans.
+func (c *Client) Close(timeout time.Duration) bool {
+	return c.httpClient.close(timeout)
 }
 
 // GetFunction returns a Function bound to the given traceFunctionKey.
@@ -718,11 +672,8 @@ func (s *ActiveSpan) End() {
 		// completion still rides out with dropped: true (see
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
-		var done <-chan struct{}
-		if ts := getTraceState(s.traceID); ts != nil && ts.isDropped() {
-			done = closedDone()
-		} else {
-			done = s.client.httpClient.sendExternalSpan(map[string]any{
+		if ts := getTraceState(s.traceID); ts == nil || !ts.isDropped() {
+			s.client.httpClient.sendExternalSpan(map[string]any{
 				"id":               s.spanID,
 				"traceId":          s.traceID,
 				"type":             "sdk-function",
@@ -734,11 +685,7 @@ func (s *ActiveSpan) End() {
 		}
 
 		if s.isRootSpan {
-			s.client.completeRootTrace(s.traceFunctionKey, s.traceID, s.startedAt, endedAt, done)
-		} else {
-			s.client.pendingMu.Lock()
-			s.client.pendingSpans[s.traceID] = append(s.client.pendingSpans[s.traceID], done)
-			s.client.pendingMu.Unlock()
+			s.client.sendTraceCompletion(s.traceFunctionKey, s.traceID, s.startedAt, endedAt)
 		}
 	})
 }

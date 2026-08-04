@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,10 @@ type httpClient struct {
 	apiKey     string
 	serviceURL string
 	client     *http.Client
-	wg         sync.WaitGroup
+
+	transportMu sync.Mutex
+	transport   traceTransport
+	closed      bool
 }
 
 func newHTTPClient(apiKey, serviceURL string) *httpClient {
@@ -29,14 +33,15 @@ func newHTTPClient(apiKey, serviceURL string) *httpClient {
 	}
 }
 
-// request makes a POST request to the Bitfab API.
-func (h *httpClient) request(endpoint string, payload map[string]any, opts ...requestOption) error {
-	// Encode defensively so a stray non-encodable value can never abort the
-	// send and silently drop the span. Strays are stubbed in place; a degraded
-	// payload warns loudly that the trace may not be replayable.
-	body, dropped := marshalPayloadSafe(payload)
-	warnForStubbedBody(dropped)
-	return h.send(endpoint, body, opts...)
+// httpStatusError is a non-2xx response. The OTLP exporter reads the status to
+// decide whether a failed request is worth retrying.
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("bitfab: HTTP %d: %s", e.StatusCode, e.Body)
 }
 
 func warnForStubbedBody(dropped []string) {
@@ -54,66 +59,97 @@ func warnForStubbedBody(dropped []string) {
 	)
 }
 
-// send POSTs an already-encoded body, retrying per the request options. Callers
-// that encode their own body (the span path, which must mark a lossy capture
-// before encoding) use this so the payload is never encoded twice.
-func (h *httpClient) send(endpoint string, body []byte, opts ...requestOption) error {
-	cfg := requestConfig{
-		timeout:    0, // use default client timeout
-		maxRetries: 1,
-		retryDelay: 100 * time.Millisecond,
+// apiResponseError is a 2xx response whose body reports an error. The server
+// understood the request and rejected it, so retrying cannot help.
+type apiResponseError struct {
+	Message string
+}
+
+func (e *apiResponseError) Error() string {
+	return e.Message
+}
+
+func statusCode(err error) int {
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
 	}
-	for _, opt := range opts {
-		opt(&cfg)
+	return 0
+}
+
+func isRetryableStatus(err error) bool {
+	var apiErr *apiResponseError
+	if errors.As(err, &apiErr) {
+		return false
+	}
+	status := statusCode(err)
+	if status == 0 {
+		return true
+	}
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooEarly ||
+		status == http.StatusTooManyRequests ||
+		status >= 500
+}
+
+// request makes a single POST request to the Bitfab API and returns the parsed
+// JSON response.
+func (h *httpClient) request(
+	ctx context.Context,
+	endpoint string,
+	payload map[string]any,
+	timeout time.Duration,
+) (map[string]any, error) {
+	// Encode defensively so a stray non-encodable value can never abort the
+	// send and silently drop the span. Strays are stubbed in place; a degraded
+	// payload warns loudly that the trace may not be replayable.
+	body, dropped := marshalPayloadSafe(payload)
+	warnForStubbedBody(dropped)
+	return h.send(ctx, endpoint, body, timeout)
+}
+
+// send POSTs an already-encoded body and returns the parsed JSON response.
+// Callers that encode their own body use this so a payload is never encoded
+// twice.
+func (h *httpClient) send(
+	ctx context.Context,
+	endpoint string,
+	body []byte,
+	timeout time.Duration,
+) (map[string]any, error) {
+	client := h.client
+	if timeout > 0 {
+		client = &http.Client{Timeout: timeout}
 	}
 
-	var lastErr error
-	for attempt := 0; attempt < cfg.maxRetries; attempt++ {
-		if attempt > 0 {
-			time.Sleep(cfg.retryDelay)
-		}
+	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("bitfab: failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.apiKey)
 
-		client := h.client
-		if cfg.timeout > 0 {
-			client = &http.Client{Timeout: cfg.timeout}
-		}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-		req, err := http.NewRequest("POST", h.serviceURL+endpoint, bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("bitfab: failed to create request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+h.apiKey)
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("bitfab: HTTP %d: %s", resp.StatusCode, string(respBody))
-			continue
-		}
-
-		// Check for error in response body
-		var result map[string]any
-		if json.Unmarshal(respBody, &result) == nil {
-			if errMsg, ok := result["error"].(string); ok {
-				if url, ok := result["url"].(string); ok {
-					return fmt.Errorf("%s Configure it at: %s%s", errMsg, h.serviceURL, url)
-				}
-				return fmt.Errorf("%s", errMsg)
+	result := map[string]any{}
+	if json.Unmarshal(respBody, &result) == nil {
+		if errMsg, ok := result["error"].(string); ok {
+			if url, ok := result["url"].(string); ok {
+				return nil, &apiResponseError{Message: fmt.Sprintf("%s Configure it at: %s%s", errMsg, h.serviceURL, url)}
 			}
+			return nil, &apiResponseError{Message: errMsg}
 		}
-
-		return nil
 	}
-
-	return lastErr
+	return result, nil
 }
 
 func (h *httpClient) get(ctx context.Context, endpoint string, result any) error {
@@ -131,7 +167,7 @@ func (h *httpClient) get(ctx context.Context, endpoint string, result any) error
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("bitfab: HTTP %d: %s", resp.StatusCode, string(body))
+		return &httpStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 		return fmt.Errorf("bitfab: failed to decode response: %w", err)
@@ -139,101 +175,89 @@ func (h *httpClient) get(ctx context.Context, endpoint string, result any) error
 	return nil
 }
 
-// sendExternalSpan sends a span payload in the background and returns a channel
-// that is closed when the HTTP request completes. This allows callers to await
-// span delivery before sending trace completion.
-//
-// extraDropped carries losses detected during capture (a value the size cap
-// stubbed) so the span can be marked non-replayable. Encoding happens in the
-// background goroutine, off the user's thread.
-func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) <-chan struct{} {
+// traceTransportOrNil returns this client's transport, building it on first use
+// so a client that never sends a span starts no OpenTelemetry worker.
+func (h *httpClient) traceTransportOrNil() traceTransport {
+	h.transportMu.Lock()
+	defer h.transportMu.Unlock()
+	if h.closed {
+		return nil
+	}
+	if h.transport == nil {
+		h.transport = createTraceTransport(
+			func() string { return h.apiKey },
+			h.sendTransportRequest,
+		)
+	}
+	return h.transport
+}
+
+func (h *httpClient) sendTransportRequest(
+	endpoint string,
+	payload map[string]any,
+	timeout time.Duration,
+) (map[string]any, error) {
+	return h.request(context.Background(), endpoint, payload, timeout)
+}
+
+// submit queues a payload on this client's trace transport. extraDropped
+// carries losses detected during capture (a value the size cap stubbed) so the
+// span can be marked non-replayable. The body encoded here is handed to the
+// transport so the carrier attribute never re-encodes it.
+func (h *httpClient) submit(operation traceOperation, payload map[string]any, extraDropped ...string) {
 	merged := make(map[string]any, len(payload)+1)
 	for k, v := range payload {
 		merged[k] = v
 	}
 	merged["sdkVersion"] = Version
 
-	done := make(chan struct{})
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		defer close(done)
-		defer func() {
-			if r := recover(); r != nil {
-				warnOnce("panic-background-request", fmt.Sprintf("a background request panicked and was recovered: %v", r))
-			}
-		}()
-		body, dropped := marshalSpanBody(merged, extraDropped...)
-		warnForStubbedBody(dropped)
-		if err := h.send("/api/sdk/externalSpans", body, withTimeout(30*time.Second)); err != nil {
-			warnOnce("send-external-span-failed", fmt.Sprintf("failed to send a span to the backend (further occurrences suppressed): %v", err))
-		}
-	}()
-	return done
+	body, dropped := marshalSpanBody(merged, extraDropped...)
+	warnForStubbedBody(dropped)
+
+	transport := h.traceTransportOrNil()
+	if transport == nil {
+		warnOnce("otel-submit-after-close", "Bitfab client is closed; dropping spans")
+		return
+	}
+	transport.submit(operation, merged, body)
 }
 
-// sendExternalTrace sends a trace payload in the background (fire-and-forget).
+// sendExternalSpan queues a span payload on this client's trace transport.
+func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
+	h.submit(operationExternalSpan, payload, extraDropped...)
+}
+
+// sendExternalTrace queues a trace payload on this client's trace transport.
 func (h *httpClient) sendExternalTrace(payload map[string]any) {
-	merged := make(map[string]any, len(payload)+1)
-	for k, v := range payload {
-		merged[k] = v
+	h.submit(operationExternalTrace, payload)
+}
+
+// flush drains this client's transport within timeout. It reports false when an
+// export failed or the deadline expired.
+func (h *httpClient) flush(timeout time.Duration) bool {
+	h.transportMu.Lock()
+	transport := h.transport
+	h.transportMu.Unlock()
+	if transport == nil {
+		return true
 	}
-	merged["sdkVersion"] = Version
-
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				warnOnce("panic-background-request", fmt.Sprintf("a background request panicked and was recovered: %v", r))
-			}
-		}()
-		if err := h.request("/api/sdk/externalTraces", merged, withTimeout(10*time.Second)); err != nil {
-			warnOnce("send-external-trace-failed", fmt.Sprintf("failed to send a trace to the backend (further occurrences suppressed): %v", err))
-		}
-	}()
+	return transport.flush(timeout)
 }
 
-// runBackground runs fn in a tracked background goroutine that never crashes the
-// host on panic. flush() waits for these via the wait group, so work moved off
-// the user's hot path (e.g. draining a root trace's child spans) still completes
-// before FlushTraces returns.
-func (h *httpClient) runBackground(fn func()) {
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				warnOnce("panic-background-task", fmt.Sprintf("a background task panicked and was recovered: %v", r))
-			}
-		}()
-		fn()
-	}()
-}
-
-// flush waits for all pending background goroutines to complete.
-func (h *httpClient) flush(timeout time.Duration) {
-	done := make(chan struct{})
-	go func() {
-		h.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(timeout):
+// close flushes and permanently shuts down this client's transport. Idempotent.
+func (h *httpClient) close(timeout time.Duration) bool {
+	h.transportMu.Lock()
+	if h.closed {
+		h.transportMu.Unlock()
+		return true
 	}
-}
+	h.closed = true
+	transport := h.transport
+	h.transport = nil
+	h.transportMu.Unlock()
 
-// requestOption configures a single request.
-type requestOption func(*requestConfig)
-
-type requestConfig struct {
-	timeout    time.Duration
-	maxRetries int
-	retryDelay time.Duration
-}
-
-func withTimeout(d time.Duration) requestOption {
-	return func(c *requestConfig) { c.timeout = d }
+	if transport == nil {
+		return true
+	}
+	return transport.shutdown(timeout)
 }

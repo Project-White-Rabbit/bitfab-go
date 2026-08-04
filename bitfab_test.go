@@ -122,7 +122,7 @@ func TestSpan_CaptureWhenNested(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "externalSpans") {
 			var payload map[string]any
 			json.NewDecoder(r.Body).Decode(&payload)
@@ -132,7 +132,7 @@ func TestSpan_CaptureWhenNested(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -204,7 +204,7 @@ func TestSpan_UnknownCaptureWhenWarnsOnceAndCapturesRoots(t *testing.T) {
 	var mu sync.Mutex
 	spanCount := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "externalSpans") {
 			mu.Lock()
 			spanCount++
@@ -212,7 +212,7 @@ func TestSpan_UnknownCaptureWhenWarnsOnceAndCapturesRoots(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -246,7 +246,7 @@ func TestSpan_WithNameAndType(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -257,7 +257,7 @@ func TestSpan_WithNameAndType(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -306,7 +306,7 @@ func TestSpan_CapturesError(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -317,7 +317,7 @@ func TestSpan_CapturesError(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -373,7 +373,7 @@ func TestSpan_NestedSpans_ShareTraceID(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -384,7 +384,7 @@ func TestSpan_NestedSpans_ShareTraceID(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -417,7 +417,7 @@ func TestSpan_NestedSpans_HaveParentID(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -428,7 +428,7 @@ func TestSpan_NestedSpans_HaveParentID(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -478,7 +478,7 @@ func TestSpan_IndependentCalls_DifferentTraceIDs(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -489,7 +489,7 @@ func TestSpan_IndependentCalls_DifferentTraceIDs(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -522,7 +522,7 @@ func TestGetFunction_Span(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -533,7 +533,7 @@ func TestGetFunction_Span(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -585,7 +585,7 @@ func TestSpan_CapturesOutput(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -596,7 +596,7 @@ func TestSpan_CapturesOutput(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -623,7 +623,7 @@ func TestSpan_WithInput(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -634,7 +634,7 @@ func TestSpan_WithInput(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -667,7 +667,7 @@ func TestSpan_WithInputSingleArg(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -678,7 +678,7 @@ func TestSpan_WithInputSingleArg(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -704,7 +704,7 @@ func TestStart_BasicExecution(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -715,7 +715,7 @@ func TestStart_BasicExecution(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -765,7 +765,7 @@ func TestStart_CaptureWhenNestedWithoutParentReturnsNoOp(t *testing.T) {
 	var mu sync.Mutex
 	spanCount := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "externalSpans") {
 			mu.Lock()
 			spanCount++
@@ -773,7 +773,7 @@ func TestStart_CaptureWhenNestedWithoutParentReturnsNoOp(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -802,7 +802,7 @@ func TestStart_CapturesError(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -813,7 +813,7 @@ func TestStart_CapturesError(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -839,7 +839,7 @@ func TestStart_IdempotentEnd(t *testing.T) {
 	var mu sync.Mutex
 	var spanCount int
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		// Only count span requests, not trace requests
 		if strings.Contains(r.URL.Path, "externalSpans") {
 			mu.Lock()
@@ -848,7 +848,7 @@ func TestStart_IdempotentEnd(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -873,7 +873,7 @@ func TestStart_NestedSpans(t *testing.T) {
 	var mu sync.Mutex
 	var payloads []map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -884,7 +884,7 @@ func TestStart_NestedSpans(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -940,7 +940,7 @@ func TestFunction_Start(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -951,7 +951,7 @@ func TestFunction_Start(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1119,7 +1119,7 @@ func TestSpan_WithMetadata(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -1130,7 +1130,7 @@ func TestSpan_WithMetadata(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1158,7 +1158,7 @@ func TestSpan_NoContext(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -1169,7 +1169,7 @@ func TestSpan_NoContext(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1195,7 +1195,7 @@ func TestStart_WithContext(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -1206,7 +1206,7 @@ func TestStart_WithContext(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1241,7 +1241,7 @@ func TestStart_ContextAccumulation(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
@@ -1252,7 +1252,7 @@ func TestStart_ContextAccumulation(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1420,7 +1420,7 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1430,7 +1430,7 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1461,7 +1461,7 @@ func TestTraceCompletion_Drop(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1471,7 +1471,7 @@ func TestTraceCompletion_Drop(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1505,7 +1505,7 @@ func TestTraceDrop_SuppressesLaterSpanUploads(t *testing.T) {
 	spanUploads := 0
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		mu.Lock()
@@ -1518,7 +1518,7 @@ func TestTraceDrop_SuppressesLaterSpanUploads(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1563,7 +1563,7 @@ func TestTraceNoDrop_DoesNotSuppressSpanUploads(t *testing.T) {
 	var mu sync.Mutex
 	spanUploads := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		mu.Lock()
@@ -1573,7 +1573,7 @@ func TestTraceNoDrop_DoesNotSuppressSpanUploads(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1602,7 +1602,7 @@ func TestTraceCompletion_NoDrop(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1612,7 +1612,7 @@ func TestTraceCompletion_NoDrop(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1695,7 +1695,7 @@ func TestTraceCompletion_Metadata(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1705,7 +1705,7 @@ func TestTraceCompletion_Metadata(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1740,7 +1740,7 @@ func TestTraceCompletion_Contexts(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1750,7 +1750,7 @@ func TestTraceCompletion_Contexts(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1790,7 +1790,7 @@ func TestTraceCompletion_AllMethods(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1800,7 +1800,7 @@ func TestTraceCompletion_AllMethods(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1841,7 +1841,7 @@ func TestTraceCompletion_OnlyForRootSpans(t *testing.T) {
 	var mu sync.Mutex
 	var spanCount, traceCount int
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		if strings.Contains(r.URL.Path, "externalSpans") {
 			spanCount++
@@ -1852,7 +1852,7 @@ func TestTraceCompletion_OnlyForRootSpans(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1882,7 +1882,7 @@ func TestTraceCompletion_HasEndedAt(t *testing.T) {
 	var mu sync.Mutex
 	var tracePayload map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalTraces") {
@@ -1892,7 +1892,7 @@ func TestTraceCompletion_HasEndedAt(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1921,7 +1921,7 @@ func TestStart_SetPrompt(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -1931,7 +1931,7 @@ func TestStart_SetPrompt(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1957,7 +1957,7 @@ func TestStart_PromptOmittedWhenNotCalled(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -1967,7 +1967,7 @@ func TestStart_PromptOmittedWhenNotCalled(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -1993,7 +1993,7 @@ func TestStart_SetPromptLastCallWins(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -2003,7 +2003,7 @@ func TestStart_SetPromptLastCallWins(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -2036,7 +2036,7 @@ func TestSetPrompt_EmptyStringIgnored(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -2046,7 +2046,7 @@ func TestSetPrompt_EmptyStringIgnored(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -2075,7 +2075,7 @@ func TestSpan_MarksNonReplayableOnLossyInput(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -2085,7 +2085,7 @@ func TestSpan_MarksNonReplayableOnLossyInput(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
@@ -2123,7 +2123,7 @@ func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
 	var mu sync.Mutex
 	var captured map[string]any
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		if strings.Contains(r.URL.Path, "externalSpans") {
@@ -2133,7 +2133,7 @@ func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
 		}
 		w.WriteHeader(200)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	}))
+	})
 	defer server.Close()
 
 	client := newTestClient(server.URL)
