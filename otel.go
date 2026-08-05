@@ -1,11 +1,11 @@
 package bitfab
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +14,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -25,14 +24,12 @@ const (
 	otelPayloadAttribute   = "bitfab.payload"
 	otelTracesEndpoint     = "/api/sdk/otel/v1/traces"
 
-	otelCollectorEndpointEnv = "BITFAB_OTEL_EXPORTER_ENDPOINT"
 	otelMaxRequestBytesEnv   = "BITFAB_OTEL_MAX_REQUEST_BYTES"
 	otelExportConcurrencyEnv = "BITFAB_OTEL_EXPORT_CONCURRENCY"
 
 	otelMaxRequestBytes           = 3_000_000
 	otelMaxQueueSize              = 8_192
 	otelDirectMaxExportBatch      = 512
-	otelCollectorMaxExportBatch   = 32
 	otelDirectMaxRequestBatchSize = 8
 	otelDefaultExportConcurrency  = 32
 	otelMaxExportConcurrency      = 64
@@ -94,11 +91,9 @@ type otelTransport struct {
 	tracker  *deliveryTrackingExporter
 }
 
-func createOtelTransport(apiKey apiKeyResolver, directSender directBatchSender) *otelTransport {
+func createOtelTransport(directSender directBatchSender) *otelTransport {
 	return newOtelTransport(otelTransportConfig{
-		apiKey:              apiKey,
 		directSender:        directSender,
-		collectorEndpoint:   strings.TrimSpace(os.Getenv(otelCollectorEndpointEnv)),
 		maxRequestBytes:     otelMaxRequestBytesFromEnv(),
 		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
 		exportConcurrency:   otelExportConcurrencyFromEnv(),
@@ -108,9 +103,7 @@ func createOtelTransport(apiKey apiKeyResolver, directSender directBatchSender) 
 }
 
 type otelTransportConfig struct {
-	apiKey              apiKeyResolver
 	directSender        directBatchSender
-	collectorEndpoint   string
 	maxRequestBytes     int
 	maxRequestBatchSize int
 	exportConcurrency   int
@@ -122,11 +115,7 @@ type otelTransportConfig struct {
 func newOtelTransport(cfg otelTransportConfig) *otelTransport {
 	maxExportBatchSize := cfg.maxExportBatchSize
 	if maxExportBatchSize <= 0 {
-		if cfg.collectorEndpoint == "" {
-			maxExportBatchSize = otelDirectMaxExportBatch
-		} else {
-			maxExportBatchSize = otelCollectorMaxExportBatch
-		}
+		maxExportBatchSize = otelDirectMaxExportBatch
 	}
 
 	tracker := &deliveryTrackingExporter{exporter: newOtelExporter(cfg)}
@@ -172,96 +161,12 @@ func newOtelTransport(cfg otelTransportConfig) *otelTransport {
 }
 
 func newOtelExporter(cfg otelTransportConfig) sdktrace.SpanExporter {
-	if cfg.collectorEndpoint == "" {
-		return &bitfabSpanExporter{
-			directSender:        cfg.directSender,
-			maxRequestBytes:     cfg.maxRequestBytes,
-			maxRequestBatchSize: cfg.maxRequestBatchSize,
-			exportConcurrency:   cfg.exportConcurrency,
-		}
-	}
-
-	endpoint := strings.TrimRight(cfg.collectorEndpoint, "/")
-	if !strings.HasSuffix(endpoint, "/v1/traces") {
-		endpoint += "/v1/traces"
-	}
-
-	directExporter := &bitfabSpanExporter{
+	return &bitfabSpanExporter{
 		directSender:        cfg.directSender,
 		maxRequestBytes:     cfg.maxRequestBytes,
 		maxRequestBatchSize: cfg.maxRequestBatchSize,
 		exportConcurrency:   cfg.exportConcurrency,
 	}
-
-	// otlptracehttp.New only logs an unparseable endpoint and hands back an
-	// exporter aimed at its own default host, so an endpoint typo would send
-	// every span into the void. Reject it here and keep delivering directly.
-	if err := validateCollectorEndpoint(endpoint); err != nil {
-		warnOnce(
-			"otel-collector-endpoint-invalid",
-			fmt.Sprintf(
-				"%s is not a usable OTLP/HTTP endpoint (%v); falling back to direct delivery",
-				otelCollectorEndpointEnv, err,
-			),
-		)
-		return directExporter
-	}
-
-	exporter, err := otlptracehttp.New(
-		context.Background(),
-		otlptracehttp.WithEndpointURL(endpoint),
-		otlptracehttp.WithTimeout(otelExportTimeout),
-		otlptracehttp.WithMaxRequestSize(cfg.maxRequestBytes),
-		otlptracehttp.WithHTTPClient(&http.Client{
-			Timeout:   otelExportTimeout,
-			Transport: &dynamicAuthTransport{apiKey: cfg.apiKey},
-		}),
-	)
-	if err != nil {
-		warnOnce(
-			"otel-collector-exporter-failed",
-			fmt.Sprintf("failed to build the OpenTelemetry collector exporter (%v); falling back to direct delivery", err),
-		)
-		return directExporter
-	}
-
-	return &sizeLimitedExporter{exporter: exporter, maxRequestBytes: cfg.maxRequestBytes}
-}
-
-func validateCollectorEndpoint(endpoint string) error {
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return err
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("scheme must be http or https, got %q", parsed.Scheme)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("missing host")
-	}
-	return nil
-}
-
-// dynamicAuthTransport keeps the API key late-bound. The official exporter
-// takes static headers at construction, so the key is stamped per request here
-// instead of being frozen when the client's transport is first built.
-type dynamicAuthTransport struct {
-	apiKey apiKeyResolver
-	base   http.RoundTripper
-}
-
-func (t *dynamicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	key := ""
-	if t.apiKey != nil {
-		key = t.apiKey()
-	}
-	cloned := req.Clone(req.Context())
-	cloned.Header.Set("Authorization", "Bearer "+key)
-	base := t.base
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	return base.RoundTrip(cloned)
 }
 
 func (t *otelTransport) submit(operation traceOperation, payload map[string]any, encoded []byte) {
@@ -427,59 +332,6 @@ func (d *deliveryTrackingExporter) takeFailedExports() int {
 	return failed
 }
 
-// sizeLimitedExporter partitions a collector export so no single protobuf
-// request exceeds the byte target. Protobuf is strictly smaller than the
-// equivalent JSON for these payloads, so each carrier's encoded JSON size is a
-// conservative bound. The official exporter's protobuf transformer is internal
-// to that module and cannot be reached to measure the real encoded size.
-type sizeLimitedExporter struct {
-	exporter        sdktrace.SpanExporter
-	maxRequestBytes int
-}
-
-func (s *sizeLimitedExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
-	if len(spans) == 0 {
-		return nil
-	}
-
-	var batches [][]sdktrace.ReadOnlySpan
-	var current []sdktrace.ReadOnlySpan
-	currentSize := 0
-	for _, span := range spans {
-		size := encodedSpanSize(span)
-		if len(current) > 0 && currentSize+size > s.maxRequestBytes {
-			batches = append(batches, current)
-			current = nil
-			currentSize = 0
-		}
-		current = append(current, span)
-		currentSize += size
-	}
-	if len(current) > 0 {
-		batches = append(batches, current)
-	}
-
-	var firstErr error
-	for _, batch := range batches {
-		if err := s.exporter.ExportSpans(ctx, batch); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-func (s *sizeLimitedExporter) Shutdown(ctx context.Context) error {
-	return s.exporter.Shutdown(ctx)
-}
-
-func encodedSpanSize(span sdktrace.ReadOnlySpan) int {
-	encoded, err := json.Marshal(spanToOtlp(span))
-	if err != nil {
-		return 0
-	}
-	return len(encoded)
-}
-
 type bitfabSpanExporter struct {
 	directSender        directBatchSender
 	maxRequestBytes     int
@@ -492,12 +344,22 @@ func (e *bitfabSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.R
 		return nil
 	}
 
-	encoded := make([]map[string]any, 0, len(spans))
+	encoded := make([]encodedSpan, 0, len(spans))
 	for _, span := range spans {
-		encoded = append(encoded, spanToOtlp(span))
+		span, err := encodeSpan(span)
+		if err != nil {
+			warnOnce("otel-encode-failed", fmt.Sprintf("failed to encode an OpenTelemetry span batch (%v)", err))
+			return err
+		}
+		encoded = append(encoded, span)
+	}
+	envelope, err := requestEnvelope(spans[0])
+	if err != nil {
+		warnOnce("otel-encode-failed", fmt.Sprintf("failed to encode an OpenTelemetry span batch (%v)", err))
+		return err
 	}
 
-	batches := e.buildRequestBatches(spans[0], encoded)
+	batches := e.buildRequestBatches(envelope, encoded)
 	results := make([]error, len(batches))
 
 	workers := e.exportConcurrency
@@ -519,7 +381,7 @@ func (e *bitfabSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.R
 		go func() {
 			defer wg.Done()
 			for index := range next {
-				results[index] = e.sendRecovered(ctx, spans[0], batches[index])
+				results[index] = e.sendRecovered(ctx, envelope, batches[index])
 			}
 		}()
 	}
@@ -553,8 +415,8 @@ dispatch:
 
 func (e *bitfabSpanExporter) sendRecovered(
 	ctx context.Context,
-	first sdktrace.ReadOnlySpan,
-	spans []map[string]any,
+	envelope otlpEnvelope,
+	batch requestBatch,
 ) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -562,7 +424,7 @@ func (e *bitfabSpanExporter) sendRecovered(
 			err = fmt.Errorf("bitfab: export panicked: %v", r)
 		}
 	}()
-	return e.send(ctx, first, spans)
+	return e.send(ctx, envelope, batch)
 }
 
 func (e *bitfabSpanExporter) Shutdown(context.Context) error {
@@ -570,52 +432,52 @@ func (e *bitfabSpanExporter) Shutdown(context.Context) error {
 }
 
 func (e *bitfabSpanExporter) buildRequestBatches(
-	first sdktrace.ReadOnlySpan,
-	spans []map[string]any,
-) [][]map[string]any {
-	var batches [][]map[string]any
-	var current []map[string]any
+	envelope otlpEnvelope,
+	spans []encodedSpan,
+) []requestBatch {
+	var batches []requestBatch
+	var current []encodedSpan
+	size := envelope.size
 
 	for _, span := range spans {
-		if len(current) >= e.maxRequestBatchSize {
-			batches = append(batches, current)
+		addition := span.size
+		if len(current) > 0 {
+			addition += spanSeparatorBytes
+		}
+		if len(current) > 0 && (len(current) >= e.maxRequestBatchSize || size+addition > e.maxRequestBytes) {
+			batches = append(batches, requestBatch{spans: current, size: size})
 			current = nil
+			size = envelope.size
+			addition = span.size
 		}
-
-		candidate := append(append([]map[string]any{}, current...), span)
-		if len(current) > 0 && encodedRequestSize(first, candidate) > e.maxRequestBytes {
-			batches = append(batches, current)
-			current = []map[string]any{span}
-		} else {
-			current = candidate
-		}
+		current = append(current, span)
+		size += addition
 	}
 
 	if len(current) > 0 {
-		batches = append(batches, current)
+		batches = append(batches, requestBatch{spans: current, size: size})
 	}
 	return batches
 }
 
 func (e *bitfabSpanExporter) send(
 	ctx context.Context,
-	first sdktrace.ReadOnlySpan,
-	spans []map[string]any,
+	envelope otlpEnvelope,
+	batch requestBatch,
 ) error {
-	payload := buildOtlpRequest(first, spans)
-	if encodedSize(payload) > e.maxRequestBytes {
+	if batch.size > e.maxRequestBytes {
 		warnOnce(
 			"otel-span-too-large",
 			"a single span exceeded the configured request-size target and could not be exported",
 		)
 		return fmt.Errorf("bitfab: span exceeds the configured request-size target")
 	}
-	return e.sendWithRetries(ctx, payload, len(spans))
+	return e.sendWithRetries(ctx, encodeRequest(envelope, batch.spans), len(batch.spans))
 }
 
 func (e *bitfabSpanExporter) sendWithRetries(
 	ctx context.Context,
-	payload map[string]any,
+	body []byte,
 	spanCount int,
 ) error {
 	var lastErr error
@@ -628,7 +490,7 @@ func (e *bitfabSpanExporter) sendWithRetries(
 			}
 		}
 
-		response, err := e.directSender(otelTracesEndpoint, payload, otelExportTimeout)
+		response, err := e.directSender(otelTracesEndpoint, body, otelExportTimeout)
 		if err == nil {
 			if rejected, message, ok := otlpPartialSuccess(response); ok {
 				warnOnce(
@@ -714,16 +576,75 @@ func buildOtlpRequest(first sdktrace.ReadOnlySpan, spans []map[string]any) map[s
 	}
 }
 
-func encodedRequestSize(first sdktrace.ReadOnlySpan, spans []map[string]any) int {
-	return encodedSize(buildOtlpRequest(first, spans))
+// encodedSpan is a span encoded exactly as it goes on the wire, carrying its
+// byte count. Encoding once and remembering the size is what keeps request
+// packing linear: sizing a candidate batch by re-encoding the whole request
+// re-escapes every carrier's bitfab.payload string on every span considered.
+type encodedSpan struct {
+	body []byte
+	size int
 }
 
-func encodedSize(value any) int {
-	encoded, err := json.Marshal(value)
+// otlpEnvelope is the invariant head and tail of an OTLP request for one export
+// window, so a body can be assembled by concatenating pre-encoded spans.
+type otlpEnvelope struct {
+	head []byte
+	tail []byte
+	size int
+}
+
+type requestBatch struct {
+	spans []encodedSpan
+	size  int
+}
+
+// spanSeparatorBytes is the comma joining adjacent spans in the span list.
+const spanSeparatorBytes = 1
+
+func encodeSpan(span sdktrace.ReadOnlySpan) (encodedSpan, error) {
+	body, err := json.Marshal(spanToOtlp(span))
 	if err != nil {
-		return 0
+		return encodedSpan{}, err
 	}
-	return len(encoded)
+	return encodedSpan{body: body, size: len(body)}, nil
+}
+
+// requestEnvelope splits an encoded request around its empty span list, so the
+// head and tail are byte-identical to what marshalling the assembled request
+// would produce without depending on Go's map key ordering.
+func requestEnvelope(first sdktrace.ReadOnlySpan) (otlpEnvelope, error) {
+	encoded, err := json.Marshal(buildOtlpRequest(first, []map[string]any{}))
+	if err != nil {
+		return otlpEnvelope{}, err
+	}
+	marker := []byte(`"spans":[]`)
+	index := bytes.Index(encoded, marker)
+	if index < 0 {
+		return otlpEnvelope{}, fmt.Errorf("bitfab: no span list in the encoded OTLP request")
+	}
+	cut := index + len(marker) - 1
+	head := encoded[:cut]
+	tail := encoded[cut:]
+	return otlpEnvelope{head: head, tail: tail, size: len(head) + len(tail)}, nil
+}
+
+func encodeRequest(envelope otlpEnvelope, spans []encodedSpan) []byte {
+	size := envelope.size
+	for index, span := range spans {
+		size += span.size
+		if index > 0 {
+			size += spanSeparatorBytes
+		}
+	}
+	body := make([]byte, 0, size)
+	body = append(body, envelope.head...)
+	for index, span := range spans {
+		if index > 0 {
+			body = append(body, ',')
+		}
+		body = append(body, span.body...)
+	}
+	return append(body, envelope.tail...)
 }
 
 func spanToOtlp(span sdktrace.ReadOnlySpan) map[string]any {

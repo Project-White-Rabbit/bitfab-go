@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +18,7 @@ import (
 
 type recordedRequest struct {
 	endpoint string
+	body     []byte
 	payload  map[string]any
 }
 
@@ -32,10 +31,18 @@ type fakeSender struct {
 	delay     time.Duration
 }
 
-func (f *fakeSender) send(endpoint string, payload map[string]any, _ time.Duration) (map[string]any, error) {
+func (f *fakeSender) send(endpoint string, body []byte, _ time.Duration) (map[string]any, error) {
+	// Decoding here is an assertion in itself: the exporter assembles the
+	// request by concatenating pre-encoded spans, so every test that sends
+	// doubles as a check that what it assembled is still valid JSON.
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		panic(fmt.Sprintf("exporter produced invalid JSON: %v", err))
+	}
+
 	f.mu.Lock()
 	index := len(f.requests)
-	f.requests = append(f.requests, recordedRequest{endpoint: endpoint, payload: payload})
+	f.requests = append(f.requests, recordedRequest{endpoint: endpoint, body: body, payload: payload})
 	f.inFlight++
 	if f.inFlight > f.maxFlight {
 		f.maxFlight = f.inFlight
@@ -73,7 +80,6 @@ func (f *fakeSender) peakConcurrency() int {
 func newTestTransport(t *testing.T, sender *fakeSender, mutate func(*otelTransportConfig)) *otelTransport {
 	t.Helper()
 	cfg := otelTransportConfig{
-		apiKey:              func() string { return "test-key" },
 		directSender:        sender.send,
 		maxRequestBytes:     otelMaxRequestBytes,
 		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
@@ -278,12 +284,71 @@ func TestOtel_DirectRequestsAreByteBounded(t *testing.T) {
 		t.Fatalf("requests = %d, want the batch split by size", len(requests))
 	}
 	for _, request := range requests {
-		if size := encodedSize(request.payload); size > limit {
+		if size := len(request.body); size > limit {
 			t.Errorf("request encoded to %d bytes, want at most %d", size, limit)
 		}
 	}
 	if total := len(carriersIn(t, requests)); total != 6 {
 		t.Errorf("delivered %d carriers, want all 6", total)
+	}
+}
+
+// The envelope is cut from a marshalled empty request rather than written by
+// hand, so this pins that the cut kept the resource and scope intact.
+func TestOtel_RequestCarriesResourceAndScope(t *testing.T) {
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.flush(10 * time.Second)
+
+	requests := sender.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	resourceSpans := requests[0].payload["resourceSpans"].([]any)[0].(map[string]any)
+	attributes := map[string]string{}
+	for _, raw := range resourceSpans["resource"].(map[string]any)["attributes"].([]any) {
+		attribute := raw.(map[string]any)
+		value := attribute["value"].(map[string]any)
+		attributes[attribute["key"].(string)] = value["stringValue"].(string)
+	}
+	if attributes["service.name"] != "bitfab-go-sdk" || attributes["service.version"] != Version {
+		t.Errorf("resource attributes = %#v, want the SDK name and version", attributes)
+	}
+
+	scope := resourceSpans["scopeSpans"].([]any)[0].(map[string]any)["scope"].(map[string]any)
+	if scope["name"] != "bitfab" || scope["version"] != Version {
+		t.Errorf("scope = %#v, want bitfab/%s", scope, Version)
+	}
+}
+
+// The exporter packs batches against a running byte count built from per-span
+// encodes, then assembles the body by concatenation. If the two ever disagree
+// the byte bound stops meaning anything and oversized requests reach ingestion,
+// so the assembled body must equal marshalling the whole request.
+func TestOtel_AssembledBodyMatchesMarshallingTheRequest(t *testing.T) {
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+
+	for i := range 3 {
+		transport.submit(operationExternalSpan, map[string]any{
+			"index": i,
+			"note":  "unicode ✓",
+		}, nil)
+	}
+	transport.flush(10 * time.Second)
+
+	requests := sender.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	want, err := json.Marshal(requests[0].payload)
+	if err != nil {
+		t.Fatalf("re-marshalling the decoded request failed: %v", err)
+	}
+	if string(requests[0].body) != string(want) {
+		t.Errorf("assembled body diverged from marshalling the request object")
 	}
 }
 
@@ -509,7 +574,6 @@ func TestOtel_SubmitAfterShutdownIsDropped(t *testing.T) {
 	resetWarnOnce()
 	sender := &fakeSender{}
 	cfg := otelTransportConfig{
-		apiKey:              func() string { return "test-key" },
 		directSender:        sender.send,
 		maxRequestBytes:     otelMaxRequestBytes,
 		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
@@ -537,7 +601,6 @@ func TestOtel_SubmitAfterShutdownIsDropped(t *testing.T) {
 func TestOtel_ShutdownIsIdempotent(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newOtelTransport(otelTransportConfig{
-		apiKey:              func() string { return "test-key" },
 		directSender:        sender.send,
 		maxRequestBytes:     otelMaxRequestBytes,
 		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
@@ -605,87 +668,6 @@ func TestOtel_ExportConcurrencyFromEnv(t *testing.T) {
 				t.Errorf("otelExportConcurrencyFromEnv = %d, want %d", got, testCase.want)
 			}
 		})
-	}
-}
-
-func TestOtel_CollectorModeReplacesDirectDelivery(t *testing.T) {
-	var mu sync.Mutex
-	var paths []string
-	var auths []string
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		paths = append(paths, r.URL.Path)
-		auths = append(auths, r.Header.Get("Authorization"))
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
-	defer collector.Close()
-
-	sender := &fakeSender{}
-	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
-		cfg.collectorEndpoint = collector.URL
-	})
-
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
-	transport.flush(10 * time.Second)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(paths) == 0 {
-		t.Fatal("the collector received nothing")
-	}
-	if paths[0] != "/v1/traces" {
-		t.Errorf("collector path = %q, want /v1/traces appended", paths[0])
-	}
-	if auths[0] != "Bearer test-key" {
-		t.Errorf("Authorization = %q, want Bearer test-key", auths[0])
-	}
-	if len(sender.recorded()) != 0 {
-		t.Error("a configured collector must replace direct delivery, not duplicate it")
-	}
-}
-
-func TestOtel_CollectorEndpointKeepsAnExplicitTracesPath(t *testing.T) {
-	var mu sync.Mutex
-	var paths []string
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		paths = append(paths, r.URL.Path)
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
-	defer collector.Close()
-
-	sender := &fakeSender{}
-	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
-		cfg.collectorEndpoint = collector.URL + "/v1/traces"
-	})
-
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
-	transport.flush(10 * time.Second)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(paths) == 0 || paths[0] != "/v1/traces" {
-		t.Errorf("collector paths = %#v, want a single /v1/traces", paths)
-	}
-}
-
-func TestOtel_CollectorFailureFallsBackToDirect(t *testing.T) {
-	resetWarnOnce()
-	sender := &fakeSender{}
-	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
-		cfg.collectorEndpoint = "://not-a-url"
-	})
-
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
-	transport.flush(10 * time.Second)
-
-	if len(sender.recorded()) != 1 {
-		t.Fatalf(
-			"direct requests = %d, want 1: an unusable collector endpoint must not silently drop spans",
-			len(sender.recorded()),
-		)
 	}
 }
 

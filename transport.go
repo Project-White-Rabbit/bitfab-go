@@ -2,8 +2,8 @@ package bitfab
 
 import "time"
 
-func createTraceTransport(apiKey apiKeyResolver, directSender directBatchSender) traceTransport {
-	return createOtelTransport(apiKey, directSender)
+func createTraceTransport(directSender directBatchSender) traceTransport {
+	return createOtelTransport(directSender)
 }
 
 func flushTraceTransports(timeout time.Duration) bool {

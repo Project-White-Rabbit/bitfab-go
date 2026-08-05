@@ -10,14 +10,15 @@ const (
 	operationInternalTrace traceOperation = "internal_trace"
 )
 
-// directBatchSender posts one fully-built request body to a Bitfab endpoint and
-// returns the parsed JSON response. Supplied by httpClient so the transport
+// directBatchSender posts one fully-encoded request body to a Bitfab endpoint
+// and returns the parsed JSON response. Supplied by httpClient so the transport
 // reuses the client's auth, base URL, and error semantics rather than opening
 // its own network path.
-type directBatchSender func(endpoint string, payload map[string]any, timeout time.Duration) (map[string]any, error)
-
-// apiKeyResolver resolves the API key at send time, never at construction.
-type apiKeyResolver func() string
+//
+// The body arrives already encoded: the exporter assembles it from per-span
+// encodes it has to produce anyway to size a request, so handing over a map
+// here would encode the same batch a second time.
+type directBatchSender func(endpoint string, body []byte, timeout time.Duration) (map[string]any, error)
 
 // traceTransport is the boundary every instrumentation path crosses to hand a
 // Bitfab payload to the network.

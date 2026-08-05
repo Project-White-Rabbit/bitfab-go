@@ -184,20 +184,17 @@ func (h *httpClient) traceTransportOrNil() traceTransport {
 		return nil
 	}
 	if h.transport == nil {
-		h.transport = createTraceTransport(
-			func() string { return h.apiKey },
-			h.sendTransportRequest,
-		)
+		h.transport = createTraceTransport(h.sendTransportRequest)
 	}
 	return h.transport
 }
 
 func (h *httpClient) sendTransportRequest(
 	endpoint string,
-	payload map[string]any,
+	body []byte,
 	timeout time.Duration,
 ) (map[string]any, error) {
-	return h.request(context.Background(), endpoint, payload, timeout)
+	return h.send(context.Background(), endpoint, body, timeout)
 }
 
 // submit queues a payload on this client's trace transport. extraDropped
