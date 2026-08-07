@@ -52,13 +52,37 @@ func marshalPayloadSafe(payload map[string]any) ([]byte, []string) {
 // size (extraDropped), or a stray Marshal rejects - pays for the finalize walk
 // and a second encode, and there the extra work buys the degraded marking that
 // keeps the span from being replayed as if it were faithful.
-func marshalSpanBody(payload map[string]any, extraDropped ...string) ([]byte, []string) {
+// The payload is returned alongside the body because the budget may have had to
+// trim it, and the transport reads the payload for span naming and timestamps.
+func marshalSpanBody(payload map[string]any, extraDropped ...string) (map[string]any, []byte, []string) {
 	if len(extraDropped) == 0 {
 		if body, err := json.Marshal(payload); err == nil {
-			return body, nil
+			return applyPayloadBudget(payload, body, nil)
 		}
 	}
-	return marshalPayloadSafe(finalizeSpanPayload(payload, extraDropped...))
+	finalized := finalizeSpanPayload(payload, extraDropped...)
+	body, dropped := marshalPayloadSafe(finalized)
+	return applyPayloadBudget(finalized, body, dropped)
+}
+
+func applyPayloadBudget(
+	payload map[string]any,
+	body []byte,
+	dropped []string,
+) (map[string]any, []byte, []string) {
+	budgeted, budgetedBody, _ := enforcePayloadBudget(
+		payload,
+		body,
+		func(value map[string]any) ([]byte, error) {
+			encoded, _ := marshalPayloadSafe(value)
+			return encoded, nil
+		},
+	)
+	// `dropped` names values that could not be encoded, which drives the
+	// "non-serializable value(s)" warning. A budget trim is a size decision, not
+	// an encoding failure, and already has its own warning and payload_budget
+	// error entry, so it must not be reported as one.
+	return budgeted, budgetedBody, dropped
 }
 
 // serializationDegradedStep is the error step that marks a span non-replayable

@@ -13,10 +13,13 @@ import (
 // MaxSerializedValueBytes caps the JSON size of a single captured span value
 // (an input or an output). A large-but-valid value (a big in-memory buffer, a
 // map with millions of entries) marshals fine but would spike host memory on
-// the user's thread and get the span rejected server-side, silently dropping
-// it. Past this ceiling the value is replaced with a stub so the span still
+// the user's thread, so this is the cheap early-out that stops a pathological
+// value from being carried any further. It is deliberately the same number as
+// the whole-span budget: one legitimately large value may use the entire
+// budget, and enforcePayloadBudget is what enforces the total once every field
+// is in. Past this ceiling the value is replaced with a stub so the span still
 // ships with the rest of its data intact.
-const MaxSerializedValueBytes = 512_000
+const MaxSerializedValueBytes = MaxSpanCarrierBytes
 
 // randomUUID returns a v4 UUID string without ever panicking.
 //

@@ -122,12 +122,17 @@ func (h *httpClient) send(
 		client = &http.Client{Timeout: timeout}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(body))
+	encodedBody, contentEncoding := encodeRequestBody(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(encodedBody))
 	if err != nil {
 		return nil, fmt.Errorf("bitfab: failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+h.apiKey)
+	if contentEncoding != "" {
+		req.Header.Set("Content-Encoding", contentEncoding)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -208,7 +213,7 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, ex
 	}
 	merged["sdkVersion"] = Version
 
-	body, dropped := marshalSpanBody(merged, extraDropped...)
+	merged, body, dropped := marshalSpanBody(merged, extraDropped...)
 	warnForStubbedBody(dropped)
 
 	transport := h.traceTransportOrNil()

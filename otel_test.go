@@ -218,6 +218,42 @@ func TestOtel_CarrierStatusReflectsPayloadError(t *testing.T) {
 	}
 }
 
+// A payload the SDK degraded on its own (a budget trim, a stubbed value) is an
+// incomplete capture, not a failed operation. Marking those carriers errored
+// would turn every oversized span into an error in the user's dashboards, which
+// is exactly the traffic the budget exists to keep shipping.
+func TestOtel_SdkDegradationDoesNotMarkTheCarrierErrored(t *testing.T) {
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+
+	transport.submit(operationExternalSpan, map[string]any{
+		"rawSpan": map[string]any{"span_data": map[string]any{"name": "trimmed"}},
+		"errors": []any{
+			map[string]any{"source": "sdk", "step": payloadBudgetStep, "error": "trimmed a field"},
+		},
+	}, nil)
+	transport.submit(operationExternalSpan, map[string]any{
+		"rawSpan": map[string]any{"span_data": map[string]any{"name": "mixed"}},
+		"errors": []any{
+			map[string]any{"source": "sdk", "step": payloadBudgetStep, "error": "trimmed a field"},
+			map[string]any{"source": "user", "error": "a real failure"},
+		},
+	}, nil)
+	transport.flush(5 * time.Second)
+
+	byName := map[string]int{}
+	for _, carrier := range carriersIn(t, sender.recorded()) {
+		byName[carrier.name] = carrier.statusCode
+	}
+	if byName["trimmed"] != 0 {
+		t.Errorf("budget-trimmed span status = %d, want 0 (unset)", byName["trimmed"])
+	}
+	// A genuine error alongside the SDK's own note still marks the span.
+	if byName["mixed"] != 2 {
+		t.Errorf("span with a real error status = %d, want 2 (OTLP error)", byName["mixed"])
+	}
+}
+
 func TestOtel_StatusCodeMappingIsNotIdentity(t *testing.T) {
 	if got := otlpStatus(sdktrace.Status{Code: codes.Ok})["code"]; got != 1 {
 		t.Errorf("codes.Ok maps to %v, want OTLP 1", got)
@@ -767,5 +803,41 @@ func TestOtel_UnserializablePayloadStillShips(t *testing.T) {
 	}
 	if carriers[0].payload["traceFunctionKey"] != "generateAnswer" {
 		t.Errorf("payload = %#v, want the serializable fields preserved", carriers[0].payload)
+	}
+}
+
+// The reason the payload budget exists. A carrier that cannot fit a request
+// alone is dropped outright, so any payload the SDK will accept must still
+// produce a deliverable carrier at the default byte bound - including quote- and
+// backslash-dense content, which inflates most when the payload string is
+// re-escaped into the request body.
+func TestOtel_DeliversASpanNoMatterHowLargeItsPayloadWas(t *testing.T) {
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+
+	heavy := strings.Repeat(`C:\path\to "file" `, 250_000)
+	payload, _, _ := marshalSpanBody(map[string]any{
+		"id": "huge",
+		"rawSpan": map[string]any{
+			"id": "huge",
+			"span_data": map[string]any{
+				"name":   "huge",
+				"type":   "function",
+				"input":  map[string]any{"doc": heavy},
+				"output": map[string]any{"doc": heavy},
+			},
+		},
+	})
+	transport.submit(operationExternalSpan, payload, nil)
+	transport.flush(5 * time.Second)
+
+	carriers := carriersIn(t, sender.recorded())
+	if len(carriers) != 1 {
+		t.Fatalf("delivered %d carriers, want 1 (0 means the exporter dropped it)", len(carriers))
+	}
+	for _, request := range sender.recorded() {
+		if len(request.body) > otelMaxRequestBytes {
+			t.Fatalf("request is %d bytes, want <= %d", len(request.body), otelMaxRequestBytes)
+		}
 	}
 }

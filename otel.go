@@ -794,7 +794,19 @@ func payloadHasError(payload map[string]any) bool {
 	case nil:
 		return false
 	case []any:
-		return len(errors) > 0
+		// Entries the SDK wrote about itself (a budget trim, a stubbed value)
+		// report an incomplete capture, not a failed operation, so they must not
+		// mark the carrier errored: a large payload is normal traffic, and
+		// flagging it would turn every oversized span into an error in the
+		// user's dashboards. The payload still carries the entry, which is what
+		// tells the server the trace is incomplete.
+		for _, entry := range errors {
+			if m, ok := entry.(map[string]any); ok && m["source"] == "sdk" {
+				continue
+			}
+			return true
+		}
+		return false
 	case string:
 		return errors != ""
 	case bool:

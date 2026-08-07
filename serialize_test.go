@@ -541,7 +541,7 @@ func TestMarshalSpanBodyCleanEncodesOnce(t *testing.T) {
 		},
 	}
 
-	body, dropped := marshalSpanBody(payload)
+	_, body, dropped := marshalSpanBody(payload)
 
 	if len(dropped) != 0 {
 		t.Fatalf("clean payload should report no drops, got %v", dropped)
@@ -570,7 +570,7 @@ func TestMarshalSpanBodyMarksCapStubbedValue(t *testing.T) {
 		},
 	}
 
-	body, _ := marshalSpanBody(payload, "too_large")
+	_, body, _ := marshalSpanBody(payload, "too_large")
 
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -595,7 +595,7 @@ func TestMarshalSpanBodyStubsStrayAndMarks(t *testing.T) {
 		},
 	}
 
-	body, _ := marshalSpanBody(payload)
+	_, body, _ := marshalSpanBody(payload)
 
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -633,7 +633,7 @@ func TestMarshalSpanBodyEncodesCleanPayloadExactlyOnce(t *testing.T) {
 		},
 	}
 
-	body, dropped := marshalSpanBody(payload)
+	_, body, dropped := marshalSpanBody(payload)
 
 	if encodes != 1 {
 		t.Fatalf("clean payload encoded %d times, want exactly 1", encodes)
