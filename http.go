@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,8 @@ func newHTTPClient(apiKey, serviceURL string) *httpClient {
 type httpStatusError struct {
 	StatusCode int
 	Body       string
+	// How long the server asked us to wait, when it said so.
+	RetryAfter time.Duration
 }
 
 func (e *httpStatusError) Error() string {
@@ -77,19 +80,58 @@ func statusCode(err error) int {
 	return 0
 }
 
+// Retry-After comes in two forms: whole seconds, or an HTTP date. Anything
+// else, including a date already in the past, means the server did not give us
+// a wait we can act on.
+func parseRetryAfter(header string) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseFloat(header, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds * float64(time.Second))
+	}
+	when, err := http.ParseTime(header)
+	if err != nil {
+		return 0
+	}
+	if wait := time.Until(when); wait > 0 {
+		return wait
+	}
+	return 0
+}
+
+func retryAfter(err error) time.Duration {
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.RetryAfter
+	}
+	return 0
+}
+
+// OTLP's retryable set, plus 500. Every other 4xx is the server's verdict on
+// the payload and will be the same next time.
+//
+// 500 is a deliberate deviation: OTLP treats it as the app being broken, which
+// assumes a collector that fails deterministically. Bitfab ingestion answers
+// every unhandled error with 500, so a connection blip or a cold start arrives
+// here indistinguishable from a real fault, and giving up on the first one
+// drops spans a second attempt would deliver.
 func isRetryableStatus(err error) bool {
 	var apiErr *apiResponseError
 	if errors.As(err, &apiErr) {
 		return false
 	}
-	status := statusCode(err)
-	if status == 0 {
+	switch statusCode(err) {
+	case 0, http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
+	default:
+		return false
 	}
-	return status == http.StatusRequestTimeout ||
-		status == http.StatusTooEarly ||
-		status == http.StatusTooManyRequests ||
-		status >= 500
 }
 
 // request makes a single POST request to the Bitfab API and returns the parsed
@@ -149,7 +191,11 @@ func (h *httpClient) sendPrepared(
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	result := map[string]any{}
@@ -179,7 +225,11 @@ func (h *httpClient) get(ctx context.Context, endpoint string, result any) error
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return &httpStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+		return &httpStatusError{
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
 		return fmt.Errorf("bitfab: failed to decode response: %w", err)

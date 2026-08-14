@@ -81,10 +81,17 @@ func TestIsRetryableStatus(t *testing.T) {
 		want bool
 	}{
 		{errors.New("dial tcp: connection refused"), true},
-		{&httpStatusError{StatusCode: 408}, true},
-		{&httpStatusError{StatusCode: 425}, true},
 		{&httpStatusError{StatusCode: 429}, true},
+		{&httpStatusError{StatusCode: 502}, true},
 		{&httpStatusError{StatusCode: 503}, true},
+		{&httpStatusError{StatusCode: 504}, true},
+		// Ours rather than OTLP's: Bitfab ingestion answers every unhandled
+		// error with 500, so a connection blip is indistinguishable here from a
+		// permanent fault.
+		{&httpStatusError{StatusCode: 500}, true},
+		{&httpStatusError{StatusCode: 501}, false},
+		{&httpStatusError{StatusCode: 408}, false},
+		{&httpStatusError{StatusCode: 425}, false},
 		{&httpStatusError{StatusCode: 400}, false},
 		{&httpStatusError{StatusCode: 401}, false},
 		{&httpStatusError{StatusCode: 413}, false},

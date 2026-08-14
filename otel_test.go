@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -616,6 +617,114 @@ func TestOtel_DoesNotRetryPermanentFailures(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Errorf("attempts = %d, want 1 (no retry on 400)", got)
+	}
+}
+
+func TestOtel_RetryWaitPrefersTheServersInstruction(t *testing.T) {
+	budget := otelExportTimeout
+	for attempt := range 3 {
+		wait, keepTrying := retryWait(&httpStatusError{StatusCode: 503}, attempt, budget)
+		if !keepTrying {
+			t.Fatalf("attempt %d: must keep trying without an instruction", attempt)
+		}
+		ceiling := min(otelRetryBaseDelay<<attempt, otelRetryBackoffCeiling)
+		if wait < ceiling/2 || wait >= ceiling {
+			t.Errorf("attempt %d: wait = %s, want jittered within [%s, %s)", attempt, wait, ceiling/2, ceiling)
+		}
+	}
+
+	asked := &httpStatusError{StatusCode: 429, RetryAfter: 2 * time.Second}
+	if wait, keepTrying := retryWait(asked, 0, budget); !keepTrying || wait != 2*time.Second {
+		t.Errorf("retryWait honoring Retry-After = %s/%v, want 2s/true", wait, keepTrying)
+	}
+
+	// Past a fixed ceiling but servable, so it is honored: OTLP says to honor
+	// Retry-After and calls data dropped while throttled the outcome to avoid.
+	servable := &httpStatusError{StatusCode: 429, RetryAfter: 8 * time.Second}
+	if wait, keepTrying := retryWait(servable, 0, budget); !keepTrying || wait != 8*time.Second {
+		t.Errorf("retryWait honoring a servable 8s wait = %s/%v, want 8s/true", wait, keepTrying)
+	}
+
+	// Refused only for outlasting what the budget can serve, since the processor
+	// kills an export that outlives it.
+	if _, keepTrying := retryWait(servable, 0, 4*time.Second); keepTrying {
+		t.Error("a wait the budget cannot serve must stop the retries, not shorten them")
+	}
+}
+
+// The refused request is one of several in a window. Delaying only that one
+// leaves the rest hitting a server that just asked for room.
+func TestOtel_ThrottleHoldsSiblingRequests(t *testing.T) {
+	var attempts atomic.Int32
+	sender := &fakeSender{
+		respond: func(int, map[string]any) (map[string]any, error) {
+			if attempts.Add(1) == 1 {
+				return nil, &httpStatusError{StatusCode: 429, RetryAfter: 30 * time.Second}
+			}
+			return map[string]any{}, nil
+		},
+	}
+	transport := newTestTransport(t, sender, nil)
+
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationExternalSpan, map[string]any{"index": 2}, nil)
+	if transport.flush(10 * time.Second) {
+		t.Error("flush must report failure while a throttle is active")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (the throttle must hold the sibling back)", got)
+	}
+}
+
+// The other SDKs bail before the wait once attempts are exhausted; sleeping
+// after the final attempt only delays the failure reaching flush callers.
+//
+// The final attempt is refused with a Retry-After far longer than the jittered
+// backoffs between attempts, so a trailing wait is unmistakable in the elapsed
+// time rather than lost in the noise of the earlier two.
+func TestOtel_DoesNotWaitAfterTheFinalAttempt(t *testing.T) {
+	var attempts atomic.Int32
+	sender := &fakeSender{
+		respond: func(int, map[string]any) (map[string]any, error) {
+			if attempts.Add(1) == otelMaxAttempts {
+				return nil, &httpStatusError{StatusCode: 429, RetryAfter: 3 * time.Second}
+			}
+			return nil, &httpStatusError{StatusCode: 503, Body: "unavailable"}
+		},
+	}
+	transport := newTestTransport(t, sender, nil)
+
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	start := time.Now()
+	if transport.flush(10 * time.Second) {
+		t.Error("flush must report failure once the attempts are exhausted")
+	}
+	elapsed := time.Since(start)
+	if got := attempts.Load(); got != otelMaxAttempts {
+		t.Errorf("attempts = %d, want %d", got, otelMaxAttempts)
+	}
+	if elapsed >= time.Second {
+		t.Errorf("elapsed = %s, want well under the final attempt's 3s Retry-After", elapsed)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	if got := parseRetryAfter("2"); got != 2*time.Second {
+		t.Errorf("parseRetryAfter(\"2\") = %s, want 2s", got)
+	}
+	if got := parseRetryAfter(""); got != 0 {
+		t.Errorf("parseRetryAfter(\"\") = %s, want 0", got)
+	}
+	if got := parseRetryAfter("not-a-wait"); got != 0 {
+		t.Errorf("parseRetryAfter of nonsense = %s, want 0", got)
+	}
+	// An HTTP-date already in the past is not a wait we can act on.
+	if got := parseRetryAfter(time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)); got != 0 {
+		t.Errorf("parseRetryAfter of a past date = %s, want 0", got)
+	}
+	future := parseRetryAfter(time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat))
+	if future <= 0 || future > 30*time.Second {
+		t.Errorf("parseRetryAfter of a future date = %s, want within 30s", future)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strconv"
@@ -35,10 +36,15 @@ const (
 	otelDefaultExportConcurrency  = 32
 	otelMaxExportConcurrency      = 64
 
-	otelScheduleDelay = 5 * time.Second
-	otelExportTimeout = 30 * time.Second
-	otelRetryDelay    = 100 * time.Millisecond
-	otelMaxAttempts   = 3
+	otelScheduleDelay  = 5 * time.Second
+	otelExportTimeout  = 30 * time.Second
+	otelRetryBaseDelay = 100 * time.Millisecond
+	// Ceiling on the exponential growth of our OWN backoff. It does not bound a
+	// wait the server asked for: OTLP says to honor Retry-After, and calls data
+	// dropped while throttled the outcome to avoid. What bounds an honored wait
+	// is the export budget, since the processor kills a longer export.
+	otelRetryBackoffCeiling = 5 * time.Second
+	otelMaxAttempts         = 3
 )
 
 var (
@@ -338,6 +344,79 @@ type bitfabSpanExporter struct {
 	maxRequestBytes     int
 	maxRequestBatchSize int
 	exportConcurrency   int
+
+	throttleMu     sync.Mutex
+	throttledUntil time.Time
+}
+
+// How long to wait before the next send attempt. The second return is false
+// when we should stop trying.
+//
+// A server that sent Retry-After has told us when it wants us back, so that
+// wait is honored exactly. Clamping it would return early, which is the single
+// thing the server asked us not to do; when the wait is longer than we are
+// willing to hold a batch, the honest answer is to give up rather than come
+// back sooner and add load to something already struggling.
+//
+// Absent an instruction, back off exponentially so a struggling server is not
+// hit on a fixed cadence, and jitter it so every client in a fleet does not
+// return in lockstep.
+// Half the budget, not all of it: a wait is only worth taking if what is left
+// afterwards can still carry the request. Spending the whole budget waiting
+// means being killed mid-wait, losing the batch anyway.
+func retryWait(err error, attempt int, remaining time.Duration) (time.Duration, bool) {
+	affordable := remaining / 2
+	if requested := retryAfter(err); requested > 0 {
+		if requested >= affordable {
+			return 0, false
+		}
+		return requested, true
+	}
+	backoff := min(otelRetryBaseDelay<<attempt, otelRetryBackoffCeiling)
+	jittered := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)))
+	if jittered >= affordable {
+		return 0, false
+	}
+	return jittered, true
+}
+
+// Remember a throttle the server asked for, so the requests fanned out
+// alongside this one respect it too. Delaying only the request that was refused
+// leaves the others in the window hitting a server that just asked for room.
+func (e *bitfabSpanExporter) recordThrottle(err error) {
+	requested := retryAfter(err)
+	if requested <= 0 {
+		return
+	}
+	e.throttleMu.Lock()
+	defer e.throttleMu.Unlock()
+	if until := time.Now().Add(requested); until.After(e.throttledUntil) {
+		e.throttledUntil = until
+	}
+}
+
+// Waits out an active throttle, or reports the batch undeliverable when the
+// throttle outlasts what we are willing to hold it for. Either way nothing is
+// sent while the server has asked us to stay away.
+func (e *bitfabSpanExporter) awaitThrottle(ctx context.Context, deadline time.Time) error {
+	e.throttleMu.Lock()
+	remaining := time.Until(e.throttledUntil)
+	e.throttleMu.Unlock()
+	if remaining <= 0 {
+		return nil
+	}
+	// Waited out, not refused: OTLP asks the client to hold off until the window
+	// passes. Only a throttle outliving what the budget can serve is refused,
+	// because the processor would kill the wait before it could send.
+	if remaining >= time.Until(deadline)/2 {
+		return fmt.Errorf("bitfab: OTLP ingestion is throttled for another %s, longer than the export budget", remaining.Round(time.Millisecond))
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(remaining):
+		return nil
+	}
 }
 
 func (e *bitfabSpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
@@ -498,17 +577,16 @@ func (e *bitfabSpanExporter) sendWithRetries(
 	request preparedRequest,
 	spanCount int,
 ) error {
+	// One budget for the whole exchange, waits included: the processor kills the
+	// export at this deadline, so a wait past it cannot be served.
+	deadline := time.Now().Add(otelExportTimeout)
 	var lastErr error
 	for attempt := range otelMaxAttempts {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(otelRetryDelay):
-			}
+		if err := e.awaitThrottle(ctx, deadline); err != nil {
+			return err
 		}
 
-		response, err := e.directSender(otelTracesEndpoint, request, otelExportTimeout)
+		response, err := e.directSender(otelTracesEndpoint, request, max(0, time.Until(deadline)))
 		if err == nil {
 			if rejected, message, ok := otlpPartialSuccess(response); ok {
 				warnOnce(
@@ -521,6 +599,7 @@ func (e *bitfabSpanExporter) sendWithRetries(
 		}
 
 		lastErr = err
+		e.recordThrottle(err)
 		if statusCode(err) == http.StatusRequestEntityTooLarge {
 			if spanCount == 1 {
 				warnOnce(
@@ -537,6 +616,18 @@ func (e *bitfabSpanExporter) sendWithRetries(
 		}
 		if !isRetryableStatus(err) {
 			return err
+		}
+		if attempt == otelMaxAttempts-1 {
+			break
+		}
+		wait, keepTrying := retryWait(err, attempt, time.Until(deadline))
+		if !keepTrying {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
 		}
 	}
 	return lastErr
