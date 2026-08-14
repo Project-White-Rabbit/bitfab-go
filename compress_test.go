@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,6 +81,22 @@ func TestEncodeRequestBodySkipsCompressionWhenDisabled(t *testing.T) {
 
 	if string(body) != string(original) {
 		t.Error("body was modified while compression was disabled")
+	}
+	if encoding != "" {
+		t.Errorf("encoding = %q, want empty", encoding)
+	}
+}
+
+func TestEncodeRequestBodyKeepsRawBodyWhenGzipWouldMakeItLarger(t *testing.T) {
+	original := make([]byte, minCompressedBytes)
+	if _, err := rand.New(rand.NewSource(1)).Read(original); err != nil {
+		t.Fatalf("failed to build fixture: %v", err)
+	}
+
+	body, encoding := encodeRequestBody(original)
+
+	if string(body) != string(original) {
+		t.Error("body was modified when gzip expanded it")
 	}
 	if encoding != "" {
 		t.Errorf("encoding = %q, want empty", encoding)

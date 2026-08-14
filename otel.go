@@ -28,6 +28,7 @@ const (
 	otelExportConcurrencyEnv = "BITFAB_OTEL_EXPORT_CONCURRENCY"
 
 	otelMaxRequestBytes           = 3_000_000
+	otelMaxDecompressedBytes      = 8_000_000
 	otelMaxQueueSize              = 8_192
 	otelDirectMaxExportBatch      = 512
 	otelDirectMaxRequestBatchSize = 8
@@ -465,19 +466,36 @@ func (e *bitfabSpanExporter) send(
 	envelope otlpEnvelope,
 	batch requestBatch,
 ) error {
-	if batch.size > e.maxRequestBytes {
-		warnOnce(
-			"otel-span-too-large",
-			"a single span exceeded the configured request-size target and could not be exported",
-		)
-		return fmt.Errorf("bitfab: span exceeds the configured request-size target")
+	requestSpans := batch.spans
+	requestRawBytes := batch.size
+	alreadyTrimmed := false
+	for {
+		if requestRawBytes <= otelMaxDecompressedBytes {
+			prepared := prepareRequestBody(encodeRequest(envelope, requestSpans))
+			if prepared.wireBytes <= e.maxRequestBytes {
+				return e.sendWithRetries(ctx, prepared, len(batch.spans))
+			}
+		}
+
+		if len(batch.spans) != 1 {
+			return fmt.Errorf("bitfab: span batch exceeds the configured request-size target")
+		}
+		if alreadyTrimmed {
+			return fmt.Errorf("bitfab: span exceeds the configured request-size target after trimming")
+		}
+		trimmed, ok := trimEncodedSpan(batch.spans[0])
+		if !ok {
+			return fmt.Errorf("bitfab: span exceeds the configured request-size target and could not be trimmed")
+		}
+		requestSpans = []encodedSpan{trimmed}
+		requestRawBytes = envelope.size + trimmed.size
+		alreadyTrimmed = true
 	}
-	return e.sendWithRetries(ctx, encodeRequest(envelope, batch.spans), len(batch.spans))
 }
 
 func (e *bitfabSpanExporter) sendWithRetries(
 	ctx context.Context,
-	body []byte,
+	request preparedRequest,
 	spanCount int,
 ) error {
 	var lastErr error
@@ -490,7 +508,7 @@ func (e *bitfabSpanExporter) sendWithRetries(
 			}
 		}
 
-		response, err := e.directSender(otelTracesEndpoint, body, otelExportTimeout)
+		response, err := e.directSender(otelTracesEndpoint, request, otelExportTimeout)
 		if err == nil {
 			if rejected, message, ok := otlpPartialSuccess(response); ok {
 				warnOnce(
@@ -607,6 +625,43 @@ func encodeSpan(span sdktrace.ReadOnlySpan) (encodedSpan, error) {
 		return encodedSpan{}, err
 	}
 	return encodedSpan{body: body, size: len(body)}, nil
+}
+
+func trimEncodedSpan(span encodedSpan) (encodedSpan, bool) {
+	var carrier map[string]any
+	if err := json.Unmarshal(span.body, &carrier); err != nil {
+		return encodedSpan{}, false
+	}
+	attributes, ok := carrier["attributes"].([]any)
+	if !ok {
+		return encodedSpan{}, false
+	}
+	for _, rawAttribute := range attributes {
+		attribute, ok := rawAttribute.(map[string]any)
+		if !ok || attribute["key"] != otelPayloadAttribute {
+			continue
+		}
+		value, ok := attribute["value"].(map[string]any)
+		if !ok {
+			return encodedSpan{}, false
+		}
+		payloadBody, ok := value["stringValue"].(string)
+		if !ok {
+			return encodedSpan{}, false
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(payloadBody), &payload); err != nil {
+			return encodedSpan{}, false
+		}
+		_, trimmedBody, _ := marshalSpanBody(payload)
+		value["stringValue"] = string(trimmedBody)
+		body, err := json.Marshal(carrier)
+		if err != nil {
+			return encodedSpan{}, false
+		}
+		return encodedSpan{body: body, size: len(body)}, true
+	}
+	return encodedSpan{}, false
 }
 
 // requestEnvelope splits an encoded request around its empty span list, so the

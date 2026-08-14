@@ -61,6 +61,14 @@ func TestCapValue_PassesSmallValuesThrough(t *testing.T) {
 	}
 }
 
+func TestCapValue_PreservesLargeCompressibleValue(t *testing.T) {
+	big := strings.Repeat("x", 4_000_000)
+	got, ok := capValue(big).(string)
+	if !ok || len(got) != len(big) {
+		t.Fatalf("large compressible value was replaced, got %T of length %d", got, len(got))
+	}
+}
+
 func TestCapValue_StubsOversizedValue(t *testing.T) {
 	big := strings.Repeat("x", MaxSerializedValueBytes+1)
 	got := capValue(big)

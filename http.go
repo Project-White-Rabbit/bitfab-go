@@ -117,21 +117,28 @@ func (h *httpClient) send(
 	body []byte,
 	timeout time.Duration,
 ) (map[string]any, error) {
+	return h.sendPrepared(ctx, endpoint, prepareRequestBody(body), timeout)
+}
+
+func (h *httpClient) sendPrepared(
+	ctx context.Context,
+	endpoint string,
+	prepared preparedRequest,
+	timeout time.Duration,
+) (map[string]any, error) {
 	client := h.client
 	if timeout > 0 {
 		client = &http.Client{Timeout: timeout}
 	}
 
-	encodedBody, contentEncoding := encodeRequestBody(body)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(encodedBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, fmt.Errorf("bitfab: failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+h.apiKey)
-	if contentEncoding != "" {
-		req.Header.Set("Content-Encoding", contentEncoding)
+	if prepared.contentEncoding != "" {
+		req.Header.Set("Content-Encoding", prepared.contentEncoding)
 	}
 
 	resp, err := client.Do(req)
@@ -196,10 +203,10 @@ func (h *httpClient) traceTransportOrNil() traceTransport {
 
 func (h *httpClient) sendTransportRequest(
 	endpoint string,
-	body []byte,
+	request preparedRequest,
 	timeout time.Duration,
 ) (map[string]any, error) {
-	return h.send(context.Background(), endpoint, body, timeout)
+	return h.sendPrepared(context.Background(), endpoint, request, timeout)
 }
 
 // submit queues a payload on this client's trace transport. extraDropped
@@ -213,7 +220,11 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, ex
 	}
 	merged["sdkVersion"] = Version
 
-	merged, body, dropped := marshalSpanBody(merged, extraDropped...)
+	merged, body, dropped := marshalSpanBodyWithLimit(
+		merged,
+		maxCompressibleSpanCarrierBytes,
+		extraDropped...,
+	)
 	warnForStubbedBody(dropped)
 
 	transport := h.traceTransportOrNil()

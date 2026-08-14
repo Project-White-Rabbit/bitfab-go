@@ -1,9 +1,12 @@
 package bitfab
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +23,7 @@ type recordedRequest struct {
 	endpoint string
 	body     []byte
 	payload  map[string]any
+	prepared preparedRequest
 }
 
 type fakeSender struct {
@@ -31,10 +35,24 @@ type fakeSender struct {
 	delay     time.Duration
 }
 
-func (f *fakeSender) send(endpoint string, body []byte, _ time.Duration) (map[string]any, error) {
+func (f *fakeSender) send(endpoint string, prepared preparedRequest, _ time.Duration) (map[string]any, error) {
 	// Decoding here is an assertion in itself: the exporter assembles the
 	// request by concatenating pre-encoded spans, so every test that sends
 	// doubles as a check that what it assembled is still valid JSON.
+	body := prepared.body
+	if prepared.contentEncoding == "gzip" {
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			panic(fmt.Sprintf("exporter produced invalid gzip: %v", err))
+		}
+		body, err = io.ReadAll(reader)
+		if err != nil {
+			panic(fmt.Sprintf("reading exporter gzip failed: %v", err))
+		}
+		if err := reader.Close(); err != nil {
+			panic(fmt.Sprintf("closing exporter gzip failed: %v", err))
+		}
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		panic(fmt.Sprintf("exporter produced invalid JSON: %v", err))
@@ -42,7 +60,7 @@ func (f *fakeSender) send(endpoint string, body []byte, _ time.Duration) (map[st
 
 	f.mu.Lock()
 	index := len(f.requests)
-	f.requests = append(f.requests, recordedRequest{endpoint: endpoint, body: body, payload: payload})
+	f.requests = append(f.requests, recordedRequest{endpoint: endpoint, body: body, payload: payload, prepared: prepared})
 	f.inFlight++
 	if f.inFlight > f.maxFlight {
 		f.maxFlight = f.inFlight
@@ -392,7 +410,7 @@ func TestOtel_OversizedSingleCarrierIsRejected(t *testing.T) {
 	resetWarnOnce()
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
-		cfg.maxRequestBytes = 2_000
+		cfg.maxRequestBytes = 200
 	})
 
 	transport.submit(operationExternalSpan, map[string]any{"blob": strings.Repeat("x", 10_000)}, nil)
@@ -401,6 +419,60 @@ func TestOtel_OversizedSingleCarrierIsRejected(t *testing.T) {
 	}
 	if len(sender.recorded()) != 0 {
 		t.Error("an oversized carrier must be rejected before it is sent")
+	}
+}
+
+func TestOtel_RawOversizedCarrierIsTrimmedBeforePreparation(t *testing.T) {
+	sender := &fakeSender{}
+	exporter := &bitfabSpanExporter{
+		directSender:        sender.send,
+		maxRequestBytes:     otelMaxRequestBytes,
+		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
+		exportConcurrency:   1,
+	}
+	payload, err := json.Marshal(map[string]any{
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{
+				"name":  "draft",
+				"type":  "llm",
+				"input": strings.Repeat("x", 8_100_000),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	carrier, err := json.Marshal(map[string]any{
+		"attributes": []any{
+			map[string]any{
+				"key":   otelPayloadAttribute,
+				"value": map[string]any{"stringValue": string(payload)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal carrier: %v", err)
+	}
+	envelope := otlpEnvelope{
+		head: []byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[`),
+		tail: []byte(`]}]}]}`),
+	}
+	envelope.size = len(envelope.head) + len(envelope.tail)
+	span := encodedSpan{body: carrier, size: len(carrier)}
+
+	if err := exporter.send(
+		context.Background(),
+		envelope,
+		requestBatch{spans: []encodedSpan{span}, size: envelope.size + span.size},
+	); err != nil {
+		t.Fatalf("send raw-oversized carrier: %v", err)
+	}
+	requests := sender.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if requests[0].prepared.rawBytes >= otelMaxDecompressedBytes {
+		t.Errorf("prepared raw bytes = %d, want trimmed below %d", requests[0].prepared.rawBytes, otelMaxDecompressedBytes)
 	}
 }
 
@@ -806,28 +878,22 @@ func TestOtel_UnserializablePayloadStillShips(t *testing.T) {
 	}
 }
 
-// The reason the payload budget exists. A carrier that cannot fit a request
-// alone is dropped outright, so any payload the SDK will accept must still
-// produce a deliverable carrier at the default byte bound - including quote- and
-// backslash-dense content, which inflates most when the payload string is
-// re-escaped into the request body.
-func TestOtel_DeliversASpanNoMatterHowLargeItsPayloadWas(t *testing.T) {
+func TestOtel_DeliversCompressibleSpanAboveRawTargetIntact(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	heavy := strings.Repeat(`C:\path\to "file" `, 250_000)
-	payload, _, _ := marshalSpanBody(map[string]any{
+	payload := map[string]any{
 		"id": "huge",
 		"rawSpan": map[string]any{
 			"id": "huge",
 			"span_data": map[string]any{
 				"name":   "huge",
 				"type":   "function",
-				"input":  map[string]any{"doc": heavy},
-				"output": map[string]any{"doc": heavy},
+				"input":  strings.Repeat("x", 4_000_000),
+				"output": "ok",
 			},
 		},
-	})
+	}
 	transport.submit(operationExternalSpan, payload, nil)
 	transport.flush(5 * time.Second)
 
@@ -835,9 +901,33 @@ func TestOtel_DeliversASpanNoMatterHowLargeItsPayloadWas(t *testing.T) {
 	if len(carriers) != 1 {
 		t.Fatalf("delivered %d carriers, want 1 (0 means the exporter dropped it)", len(carriers))
 	}
-	for _, request := range sender.recorded() {
-		if len(request.body) > otelMaxRequestBytes {
-			t.Fatalf("request is %d bytes, want <= %d", len(request.body), otelMaxRequestBytes)
-		}
+	request := sender.recorded()[0]
+	if request.prepared.rawBytes <= otelMaxRequestBytes || request.prepared.wireBytes > otelMaxRequestBytes {
+		t.Fatalf("prepared sizes = raw %d, wire %d", request.prepared.rawBytes, request.prepared.wireBytes)
+	}
+	input := carriers[0].payload["rawSpan"].(map[string]any)["span_data"].(map[string]any)["input"].(string)
+	if len(input) != 4_000_000 {
+		t.Fatalf("input length = %d, want 4000000", len(input))
+	}
+}
+
+func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
+	t.Setenv(disableCompressionEnv, "1")
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+	transport.submit(operationExternalSpan, map[string]any{
+		"rawSpan": map[string]any{
+			"span_data": map[string]any{
+				"name":  "huge",
+				"input": strings.Repeat("x", 4_000_000),
+			},
+		},
+	}, nil)
+	transport.flush(5 * time.Second)
+
+	carriers := carriersIn(t, sender.recorded())
+	input := carriers[0].payload["rawSpan"].(map[string]any)["span_data"].(map[string]any)["input"].(string)
+	if !strings.Contains(input, "too_large_") {
+		t.Fatalf("input = %q, want size placeholder", input)
 	}
 }

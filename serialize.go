@@ -55,24 +55,34 @@ func marshalPayloadSafe(payload map[string]any) ([]byte, []string) {
 // The payload is returned alongside the body because the budget may have had to
 // trim it, and the transport reads the payload for span naming and timestamps.
 func marshalSpanBody(payload map[string]any, extraDropped ...string) (map[string]any, []byte, []string) {
+	return marshalSpanBodyWithLimit(payload, MaxSpanCarrierBytes, extraDropped...)
+}
+
+func marshalSpanBodyWithLimit(
+	payload map[string]any,
+	maxCarrierBytes int,
+	extraDropped ...string,
+) (map[string]any, []byte, []string) {
 	if len(extraDropped) == 0 {
 		if body, err := json.Marshal(payload); err == nil {
-			return applyPayloadBudget(payload, body, nil)
+			return applyPayloadBudget(payload, body, nil, maxCarrierBytes)
 		}
 	}
 	finalized := finalizeSpanPayload(payload, extraDropped...)
 	body, dropped := marshalPayloadSafe(finalized)
-	return applyPayloadBudget(finalized, body, dropped)
+	return applyPayloadBudget(finalized, body, dropped, maxCarrierBytes)
 }
 
 func applyPayloadBudget(
 	payload map[string]any,
 	body []byte,
 	dropped []string,
+	maxCarrierBytes int,
 ) (map[string]any, []byte, []string) {
-	budgeted, budgetedBody, _ := enforcePayloadBudget(
+	budgeted, budgetedBody, _ := enforcePayloadBudgetWithLimit(
 		payload,
 		body,
+		maxCarrierBytes,
 		func(value map[string]any) ([]byte, error) {
 			encoded, _ := marshalPayloadSafe(value)
 			return encoded, nil

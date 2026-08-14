@@ -18,7 +18,7 @@ const (
 // The body arrives already encoded: the exporter assembles it from per-span
 // encodes it has to produce anyway to size a request, so handing over a map
 // here would encode the same batch a second time.
-type directBatchSender func(endpoint string, body []byte, timeout time.Duration) (map[string]any, error)
+type directBatchSender func(endpoint string, request preparedRequest, timeout time.Duration) (map[string]any, error)
 
 // traceTransport is the boundary every instrumentation path crosses to hand a
 // Bitfab payload to the network.

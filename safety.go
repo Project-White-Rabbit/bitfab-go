@@ -19,7 +19,7 @@ import (
 // budget, and enforcePayloadBudget is what enforces the total once every field
 // is in. Past this ceiling the value is replaced with a stub so the span still
 // ships with the rest of its data intact.
-const MaxSerializedValueBytes = MaxSpanCarrierBytes
+const MaxSerializedValueBytes = maxCompressibleSpanCarrierBytes
 
 // randomUUID returns a v4 UUID string without ever panicking.
 //

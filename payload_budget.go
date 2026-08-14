@@ -26,9 +26,11 @@ import (
 // sized exactly to a 2.4 MB cap, prose produced a 2.4 MB carrier but
 // backslash-dense content produced 4.8 MB, which the exporter dropped.
 //
-// 2.8 MB leaves room beneath the 3 MB request ceiling for the span and request
-// envelopes wrapped around the attribute.
+// The normal 2.8 MB fallback leaves room beneath the 3 MB wire target. Trace
+// transport may first preserve a carrier up to 7.8 MB when its single-span
+// request compresses below that target and stays under the 8 MB raw ceiling.
 const MaxSpanCarrierBytes = 2_800_000
+const maxCompressibleSpanCarrierBytes = 7_800_000
 
 // carrierByteLength is the byte length body occupies once re-escaped as a JSON
 // string value.
@@ -50,14 +52,18 @@ func carrierByteLength(body []byte) int {
 // always fits and anything past the budget never does. Ordinary spans settle on
 // the first comparison and never pay for the scan.
 func fitsCarrierBudget(body []byte) bool {
+	return fitsCarrierBudgetWithLimit(body, MaxSpanCarrierBytes)
+}
+
+func fitsCarrierBudgetWithLimit(body []byte, maxBytes int) bool {
 	size := len(body)
-	if size*2+2 <= MaxSpanCarrierBytes {
+	if size*2+2 <= maxBytes {
 		return true
 	}
-	if size+2 > MaxSpanCarrierBytes {
+	if size+2 > maxBytes {
 		return false
 	}
-	return carrierByteLength(body) <= MaxSpanCarrierBytes
+	return carrierByteLength(body) <= maxBytes
 }
 
 // structuralSpanKeys are the span fields that identify the span rather than
@@ -90,14 +96,23 @@ func enforcePayloadBudget(
 	body []byte,
 	encode func(map[string]any) ([]byte, error),
 ) (map[string]any, []byte, []string) {
-	if fitsCarrierBudget(body) {
+	return enforcePayloadBudgetWithLimit(payload, body, MaxSpanCarrierBytes, encode)
+}
+
+func enforcePayloadBudgetWithLimit(
+	payload map[string]any,
+	body []byte,
+	maxBytes int,
+	encode func(map[string]any) ([]byte, error),
+) (map[string]any, []byte, []string) {
+	if fitsCarrierBudgetWithLimit(body, maxBytes) {
 		return payload, body, nil
 	}
-	trimmedPayload, trimmed := trimPayloadToBudget(payload, encode)
+	trimmedPayload, trimmed := trimPayloadToBudgetWithLimit(payload, maxBytes, encode)
 	if trimmedPayload == nil {
 		return payload, body, nil
 	}
-	markPayloadTrimmed(trimmedPayload, trimmed)
+	markPayloadTrimmed(trimmedPayload, trimmed, maxBytes)
 	trimmedBody, err := encode(trimmedPayload)
 	if err != nil {
 		return payload, body, nil
@@ -106,7 +121,7 @@ func enforcePayloadBudget(
 		"payload:over-budget",
 		fmt.Sprintf(
 			"a span payload exceeded %d bytes; its largest field(s) (%s) were replaced with placeholders so the span still ships. The span is incomplete and may not be replayable.",
-			MaxSpanCarrierBytes,
+			maxBytes,
 			strings.Join(uniqueStrings(trimmed), ", "),
 		),
 	)
@@ -119,6 +134,14 @@ func enforcePayloadBudget(
 // beats silently emptying a span.
 func trimPayloadToBudget(
 	payload map[string]any,
+	encode func(map[string]any) ([]byte, error),
+) (map[string]any, []string) {
+	return trimPayloadToBudgetWithLimit(payload, MaxSpanCarrierBytes, encode)
+}
+
+func trimPayloadToBudgetWithLimit(
+	payload map[string]any,
+	maxBytes int,
 	encode func(map[string]any) ([]byte, error),
 ) (map[string]any, []string) {
 	copied, containers := cloneTrimmable(payload)
@@ -137,7 +160,7 @@ func trimPayloadToBudget(
 		if err != nil {
 			return nil, nil
 		}
-		if fitsCarrierBudget(body) {
+		if fitsCarrierBudgetWithLimit(body, maxBytes) {
 			return copied, trimmed
 		}
 	}
@@ -213,13 +236,13 @@ func collectTrimCandidates(containers []map[string]any) []trimCandidate {
 
 // markPayloadTrimmed records the trim in the payload's own errors, which is what
 // the server reads to flag a trace as incomplete.
-func markPayloadTrimmed(payload map[string]any, trimmed []string) {
+func markPayloadTrimmed(payload map[string]any, trimmed []string, maxBytes int) {
 	entry := map[string]any{
 		"source": "sdk",
 		"step":   payloadBudgetStep,
 		"error": fmt.Sprintf(
 			"trimmed oversized field(s) to fit the %d-byte span carrier budget: %s",
-			MaxSpanCarrierBytes,
+			maxBytes,
 			strings.Join(uniqueStrings(trimmed), ", "),
 		),
 	}
