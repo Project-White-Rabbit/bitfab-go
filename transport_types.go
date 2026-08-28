@@ -20,6 +20,19 @@ const (
 // here would encode the same batch a second time.
 type directBatchSender func(endpoint string, request preparedRequest, timeout time.Duration) (map[string]any, error)
 
+// carrierRef identifies one application trace carrier for delivery accounting.
+// An empty spanID denotes the closing external-trace carrier.
+type carrierRef struct {
+	traceID string
+	spanID  string
+}
+
+type carrierMeta struct {
+	ref *carrierRef
+}
+
+type deliveredCarrierListener func(refs []carrierRef)
+
 // traceTransport is the boundary every instrumentation path crosses to hand a
 // Bitfab payload to the network.
 type traceTransport interface {
@@ -27,7 +40,7 @@ type traceTransport interface {
 	// reused verbatim as the carrier attribute so a span is never encoded
 	// twice; nil asks the transport to encode payload itself. Never panics;
 	// delivery failures degrade silently.
-	submit(operation traceOperation, payload map[string]any, encoded []byte)
+	submit(operation traceOperation, payload map[string]any, encoded []byte, meta ...carrierMeta)
 	// flush drains the queue within timeout. False on export failure or timeout.
 	flush(timeout time.Duration) bool
 	// shutdown flushes, then permanently stops this transport.

@@ -33,6 +33,20 @@ func TestNewClient_WithServiceURL(t *testing.T) {
 	}
 }
 
+func TestNowISOTimestampIsStrictlyIncreasingAtMicrosecondPrecision(t *testing.T) {
+	previous := ""
+	for range 100 {
+		current := nowISOTimestamp()
+		if !strings.HasSuffix(current, "Z") || len(current) != len("2026-08-24T12:00:00.000000Z") {
+			t.Fatalf("timestamp = %q", current)
+		}
+		if previous != "" && current <= previous {
+			t.Fatalf("timestamps did not increase: %q then %q", previous, current)
+		}
+		previous = current
+	}
+}
+
 func TestGetTraceSpan_DefaultsToLast(t *testing.T) {
 	traceID := "11111111-1111-4111-8111-111111111111"
 	spanID := "22222222-2222-4222-8222-222222222222"

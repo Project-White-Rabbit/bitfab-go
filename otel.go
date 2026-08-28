@@ -90,6 +90,59 @@ func otelExportConcurrencyFromEnv() int {
 	return otelDefaultExportConcurrency
 }
 
+type carrierRefContextKey struct{}
+
+type carrierReadOnlySpan struct {
+	sdktrace.ReadOnlySpan
+	ref *carrierRef
+}
+
+func (span carrierReadOnlySpan) bitfabCarrierRef() *carrierRef {
+	return span.ref
+}
+
+type carrierSpanProcessor struct {
+	next sdktrace.SpanProcessor
+	mu   sync.Mutex
+	refs map[trace.SpanID]carrierRef
+}
+
+func newCarrierSpanProcessor(next sdktrace.SpanProcessor) *carrierSpanProcessor {
+	return &carrierSpanProcessor{
+		next: next,
+		refs: make(map[trace.SpanID]carrierRef),
+	}
+}
+
+func (processor *carrierSpanProcessor) OnStart(parent context.Context, span sdktrace.ReadWriteSpan) {
+	if ref, ok := parent.Value(carrierRefContextKey{}).(*carrierRef); ok && ref != nil {
+		processor.mu.Lock()
+		processor.refs[span.SpanContext().SpanID()] = *ref
+		processor.mu.Unlock()
+	}
+	processor.next.OnStart(parent, span)
+}
+
+func (processor *carrierSpanProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
+	processor.mu.Lock()
+	ref, ok := processor.refs[span.SpanContext().SpanID()]
+	delete(processor.refs, span.SpanContext().SpanID())
+	processor.mu.Unlock()
+	if ok {
+		processor.next.OnEnd(carrierReadOnlySpan{ReadOnlySpan: span, ref: &ref})
+		return
+	}
+	processor.next.OnEnd(span)
+}
+
+func (processor *carrierSpanProcessor) Shutdown(ctx context.Context) error {
+	return processor.next.Shutdown(ctx)
+}
+
+func (processor *carrierSpanProcessor) ForceFlush(ctx context.Context) error {
+	return processor.next.ForceFlush(ctx)
+}
+
 type otelTransport struct {
 	mu       sync.Mutex
 	closed   bool
@@ -98,9 +151,14 @@ type otelTransport struct {
 	tracker  *deliveryTrackingExporter
 }
 
-func createOtelTransport(directSender directBatchSender) *otelTransport {
+func createOtelTransport(directSender directBatchSender, listeners ...deliveredCarrierListener) *otelTransport {
+	var onDelivered deliveredCarrierListener
+	if len(listeners) > 0 {
+		onDelivered = listeners[0]
+	}
 	return newOtelTransport(otelTransportConfig{
 		directSender:        directSender,
+		onDelivered:         onDelivered,
 		maxRequestBytes:     otelMaxRequestBytesFromEnv(),
 		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
 		exportConcurrency:   otelExportConcurrencyFromEnv(),
@@ -111,6 +169,7 @@ func createOtelTransport(directSender directBatchSender) *otelTransport {
 
 type otelTransportConfig struct {
 	directSender        directBatchSender
+	onDelivered         deliveredCarrierListener
 	maxRequestBytes     int
 	maxRequestBatchSize int
 	exportConcurrency   int
@@ -126,6 +185,14 @@ func newOtelTransport(cfg otelTransportConfig) *otelTransport {
 	}
 
 	tracker := &deliveryTrackingExporter{exporter: newOtelExporter(cfg)}
+	batchProcessor := sdktrace.NewBatchSpanProcessor(
+		tracker,
+		sdktrace.WithMaxQueueSize(cfg.maxQueueSize),
+		sdktrace.WithBatchTimeout(cfg.scheduleDelay),
+		sdktrace.WithMaxExportBatchSize(maxExportBatchSize),
+		sdktrace.WithExportTimeout(otelExportTimeout),
+	)
+	processor := newCarrierSpanProcessor(batchProcessor)
 
 	// Every provider option is supplied explicitly. Left to its defaults the
 	// provider would read OTEL_* environment variables, so a host application's
@@ -145,13 +212,7 @@ func newOtelTransport(cfg otelTransportConfig) *otelTransport {
 			AttributePerEventCountLimit: 0,
 			AttributePerLinkCountLimit:  0,
 		}),
-		sdktrace.WithBatcher(
-			tracker,
-			sdktrace.WithMaxQueueSize(cfg.maxQueueSize),
-			sdktrace.WithBatchTimeout(cfg.scheduleDelay),
-			sdktrace.WithMaxExportBatchSize(maxExportBatchSize),
-			sdktrace.WithExportTimeout(otelExportTimeout),
-		),
+		sdktrace.WithSpanProcessor(processor),
 	)
 
 	transport := &otelTransport{
@@ -170,13 +231,14 @@ func newOtelTransport(cfg otelTransportConfig) *otelTransport {
 func newOtelExporter(cfg otelTransportConfig) sdktrace.SpanExporter {
 	return &bitfabSpanExporter{
 		directSender:        cfg.directSender,
+		onDelivered:         cfg.onDelivered,
 		maxRequestBytes:     cfg.maxRequestBytes,
 		maxRequestBatchSize: cfg.maxRequestBatchSize,
 		exportConcurrency:   cfg.exportConcurrency,
 	}
 }
 
-func (t *otelTransport) submit(operation traceOperation, payload map[string]any, encoded []byte) {
+func (t *otelTransport) submit(operation traceOperation, payload map[string]any, encoded []byte, metas ...carrierMeta) {
 	defer func() {
 		if r := recover(); r != nil {
 			warnOnce("otel-submit-panic", fmt.Sprintf("queueing a span panicked and was recovered: %v", r))
@@ -205,8 +267,12 @@ func (t *otelTransport) submit(operation traceOperation, payload map[string]any,
 	// context.Background rather than a caller context: a carrier is transport
 	// bookkeeping, so a cancelled or already-traced host context must not
 	// decide whether it is recorded or where it is parented.
+	carrierCtx := context.Background()
+	if len(metas) > 0 && metas[0].ref != nil {
+		carrierCtx = context.WithValue(carrierCtx, carrierRefContextKey{}, metas[0].ref)
+	}
 	_, span := tracer.Start(
-		context.Background(),
+		carrierCtx,
 		otelSpanName(operation, payload),
 		trace.WithTimestamp(otelTimestamp(payload, "started_at")),
 		trace.WithAttributes(
@@ -341,6 +407,7 @@ func (d *deliveryTrackingExporter) takeFailedExports() int {
 
 type bitfabSpanExporter struct {
 	directSender        directBatchSender
+	onDelivered         deliveredCarrierListener
 	maxRequestBytes     int
 	maxRequestBatchSize int
 	exportConcurrency   int
@@ -552,7 +619,11 @@ func (e *bitfabSpanExporter) send(
 		if requestRawBytes <= otelMaxDecompressedBytes {
 			prepared := prepareRequestBody(encodeRequest(envelope, requestSpans))
 			if prepared.wireBytes <= e.maxRequestBytes {
-				return e.sendWithRetries(ctx, prepared, len(batch.spans))
+				if err := e.sendWithRetries(ctx, prepared, len(batch.spans)); err != nil {
+					return err
+				}
+				e.reportDelivered(batch.spans)
+				return nil
 			}
 		}
 
@@ -570,6 +641,27 @@ func (e *bitfabSpanExporter) send(
 		requestRawBytes = envelope.size + trimmed.size
 		alreadyTrimmed = true
 	}
+}
+
+func (e *bitfabSpanExporter) reportDelivered(spans []encodedSpan) {
+	if e.onDelivered == nil {
+		return
+	}
+	refs := make([]carrierRef, 0, len(spans))
+	for _, span := range spans {
+		if span.ref != nil {
+			refs = append(refs, *span.ref)
+		}
+	}
+	if len(refs) == 0 {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			warnOnce("otel-delivery-listener-panic", fmt.Sprintf("a delivery listener panicked and was recovered: %v", recovered))
+		}
+	}()
+	e.onDelivered(refs)
 }
 
 func (e *bitfabSpanExporter) sendWithRetries(
@@ -692,6 +784,7 @@ func buildOtlpRequest(first sdktrace.ReadOnlySpan, spans []map[string]any) map[s
 type encodedSpan struct {
 	body []byte
 	size int
+	ref  *carrierRef
 }
 
 // otlpEnvelope is the invariant head and tail of an OTLP request for one export
@@ -715,7 +808,11 @@ func encodeSpan(span sdktrace.ReadOnlySpan) (encodedSpan, error) {
 	if err != nil {
 		return encodedSpan{}, err
 	}
-	return encodedSpan{body: body, size: len(body)}, nil
+	var ref *carrierRef
+	if carrier, ok := span.(interface{ bitfabCarrierRef() *carrierRef }); ok {
+		ref = carrier.bitfabCarrierRef()
+	}
+	return encodedSpan{body: body, size: len(body), ref: ref}, nil
 }
 
 func trimEncodedSpan(span encodedSpan) (encodedSpan, bool) {
@@ -750,7 +847,7 @@ func trimEncodedSpan(span encodedSpan) (encodedSpan, bool) {
 		if err != nil {
 			return encodedSpan{}, false
 		}
-		return encodedSpan{body: body, size: len(body)}, true
+		return encodedSpan{body: body, size: len(body), ref: span.ref}, true
 	}
 	return encodedSpan{}, false
 }

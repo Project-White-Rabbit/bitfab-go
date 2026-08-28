@@ -3,7 +3,6 @@ package bitfab
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // spanStackKey is the context key for the span stack.
@@ -40,13 +39,17 @@ type ContextEntry = map[string]any
 
 // TraceState holds trace-level state that is sent when the trace completes.
 type TraceState struct {
-	TraceID   string
-	SessionID string
-	Metadata  map[string]any
-	Contexts  []ContextEntry
-	StartedAt string
-	Dropped   bool
-	mu        sync.Mutex
+	TraceID            string
+	SessionID          string
+	TestRunID          string
+	InputSourceTraceID string
+	DBSnapshotRef      *DBSnapshotRef
+	Metadata           map[string]any
+	Contexts           []ContextEntry
+	StartedAt          string
+	Dropped            bool
+	replay             *replayContext
+	mu                 sync.Mutex
 }
 
 // traceStateStore is the global store for active trace states.
@@ -82,7 +85,7 @@ func createTraceState(traceID string) *TraceState {
 	}
 	ts := &TraceState{
 		TraceID:   traceID,
-		StartedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		StartedAt: nowISOTimestamp(),
 	}
 	traceStateStore.states[traceID] = ts
 	return ts

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -748,6 +749,56 @@ func TestOtel_DoesNotRetryPayloadTooLarge(t *testing.T) {
 	}
 }
 
+func TestOtel_DeliveryListenerReceivesOnlySuccessfulCarrierRefs(t *testing.T) {
+	sender := &fakeSender{}
+	var delivered []carrierRef
+	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
+		config.onDelivered = func(refs []carrierRef) {
+			delivered = append(delivered, refs...)
+		}
+	})
+	spanRef := carrierRef{traceID: "trace-1", spanID: "span-1"}
+	closingRef := carrierRef{traceID: "trace-1"}
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &spanRef})
+	transport.submit(operationExternalTrace, map[string]any{"index": 2}, nil, carrierMeta{ref: &closingRef})
+	if !transport.flush(10 * time.Second) {
+		t.Fatal("flush reported failure")
+	}
+	if !reflect.DeepEqual(delivered, []carrierRef{spanRef, closingRef}) {
+		t.Fatalf("delivered refs = %#v", delivered)
+	}
+
+	failing := &fakeSender{respond: func(int, map[string]any) (map[string]any, error) {
+		return nil, &httpStatusError{StatusCode: http.StatusBadRequest}
+	}}
+	transport = newTestTransport(t, failing, func(config *otelTransportConfig) {
+		config.onDelivered = func(refs []carrierRef) {
+			delivered = append(delivered, refs...)
+		}
+	})
+	failedRef := carrierRef{traceID: "trace-2", spanID: "span-2"}
+	transport.submit(operationExternalSpan, map[string]any{"index": 3}, nil, carrierMeta{ref: &failedRef})
+	if transport.flush(10 * time.Second) {
+		t.Fatal("failed request should fail the flush")
+	}
+	if !reflect.DeepEqual(delivered, []carrierRef{spanRef, closingRef}) {
+		t.Fatalf("failed carrier was acknowledged: %#v", delivered)
+	}
+}
+
+func TestOtel_DeliveryListenerPanicDoesNotFailExport(t *testing.T) {
+	resetWarnOnce()
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
+		config.onDelivered = func([]carrierRef) { panic("listener crashed") }
+	})
+	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
+	if !transport.flush(10 * time.Second) {
+		t.Fatal("delivery listener panic must not fail an accepted export")
+	}
+}
+
 func TestOtel_PartialSuccessFailsTheExport(t *testing.T) {
 	resetWarnOnce()
 	sender := &fakeSender{
@@ -760,14 +811,21 @@ func TestOtel_PartialSuccessFailsTheExport(t *testing.T) {
 			}, nil
 		},
 	}
-	transport := newTestTransport(t, sender, nil)
+	var delivered []carrierRef
+	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
+		config.onDelivered = func(refs []carrierRef) { delivered = append(delivered, refs...) }
+	})
+	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure when ingestion rejects carriers")
 	}
 	if len(sender.recorded()) != 1 {
 		t.Errorf("requests = %d, want 1 (partial success is not retried)", len(sender.recorded()))
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("partially rejected carrier was acknowledged: %#v", delivered)
 	}
 }
 
@@ -1023,7 +1081,11 @@ func TestOtel_DeliversCompressibleSpanAboveRawTargetIntact(t *testing.T) {
 func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
 	t.Setenv(disableCompressionEnv, "1")
 	sender := &fakeSender{}
-	transport := newTestTransport(t, sender, nil)
+	var delivered []carrierRef
+	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
+		config.onDelivered = func(refs []carrierRef) { delivered = append(delivered, refs...) }
+	})
+	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 	transport.submit(operationExternalSpan, map[string]any{
 		"rawSpan": map[string]any{
 			"span_data": map[string]any{
@@ -1031,12 +1093,15 @@ func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
 				"input": strings.Repeat("x", 4_000_000),
 			},
 		},
-	}, nil)
+	}, nil, carrierMeta{ref: &ref})
 	transport.flush(5 * time.Second)
 
 	carriers := carriersIn(t, sender.recorded())
 	input := carriers[0].payload["rawSpan"].(map[string]any)["span_data"].(map[string]any)["input"].(string)
 	if !strings.Contains(input, "too_large_") {
 		t.Fatalf("input = %q, want size placeholder", input)
+	}
+	if !reflect.DeepEqual(delivered, []carrierRef{ref}) {
+		t.Fatalf("trimmed carrier refs = %#v, want %#v", delivered, []carrierRef{ref})
 	}
 }

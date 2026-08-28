@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,6 +125,49 @@ func TestHTTPClient_SendExternalSpan_GoesThroughOtel(t *testing.T) {
 	}
 	if payloads[0]["test"] != true {
 		t.Errorf("payload = %#v, want test true", payloads[0])
+	}
+}
+
+func TestHTTPClient_TracksCarrierAcknowledgementsAndServerTraceID(t *testing.T) {
+	sink := &carrierSink{}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == otelTracesEndpoint {
+			body, _ := io.ReadAll(request.Body)
+			sink.add(decodeOtlpCarriers(t, body))
+		}
+		writer.WriteHeader(http.StatusOK)
+		json.NewEncoder(writer).Encode(map[string]any{
+			"traceIds": map[string]string{"local-trace": "server-trace"},
+		})
+	}))
+	defer server.Close()
+
+	hc := newHTTPClient("test-key", server.URL)
+	hc.trackTraceDeliveries([]string{"local-trace"})
+	hc.sendExternalSpan(map[string]any{
+		"traceId":       "local-trace",
+		"sourceTraceId": "local-trace",
+		"rawSpan":       map[string]any{"id": "span-1"},
+	})
+	hc.sendExternalTrace(map[string]any{
+		"sourceTraceId": "local-trace",
+		"externalTrace": map[string]any{"id": "local-trace"},
+		"completed":     true,
+	})
+	if !hc.flush(5 * time.Second) {
+		t.Fatal("flush reported failure")
+	}
+	if got := hc.peekServerTraceID("local-trace"); got != "server-trace" {
+		t.Fatalf("server trace id = %q, want server-trace", got)
+	}
+	report := hc.takeTraceDeliveries([]string{"local-trace"})["local-trace"]
+	if report.spanCount != 1 || !report.closed || !report.delivered || report.serverTraceID != "server-trace" {
+		t.Fatalf("delivery report = %#v", report)
+	}
+	for _, carrier := range sink.all() {
+		if _, leaked := carrier.payload["carrierRef"]; leaked {
+			t.Fatalf("carrier bookkeeping leaked onto the wire: %#v", carrier.payload)
+		}
 	}
 }
 

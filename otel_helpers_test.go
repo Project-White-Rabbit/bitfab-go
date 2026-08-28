@@ -188,6 +188,7 @@ func newLegacyCarrierServer(t *testing.T, handle http.HandlerFunc) *httptest.Ser
 		}
 
 		body, _ := io.ReadAll(r.Body)
+		traceIDs := map[string]string{}
 		for _, carrier := range decodeOtlpCarriers(t, body) {
 			encoded, err := json.Marshal(carrier.payload)
 			if err != nil {
@@ -197,9 +198,14 @@ func newLegacyCarrierServer(t *testing.T, handle http.HandlerFunc) *httptest.Ser
 			replay.URL.Path = legacyEndpointFor(carrier.operation)
 			replay.Body = io.NopCloser(bytes.NewReader(encoded))
 			handle(httptest.NewRecorder(), replay)
+			if carrier.operation == string(operationExternalTrace) {
+				if ref := carrierRefForPayload(carrier.payload); ref != nil {
+					traceIDs[ref.traceID] = "server-" + ref.traceID
+				}
+			}
 		}
 
 		w.WriteHeader(200)
-		json.NewEncoder(w).Encode(map[string]any{})
+		json.NewEncoder(w).Encode(map[string]any{"traceIds": traceIDs})
 	}))
 }

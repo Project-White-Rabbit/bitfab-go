@@ -33,10 +33,12 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,13 +96,30 @@ type CapturedSpan struct {
 
 var traceIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
+var lastTimestampMicros atomic.Int64
+
+func nowISOTimestamp() string {
+	candidate := time.Now().UTC().UnixMicro()
+	for {
+		previous := lastTimestampMicros.Load()
+		if candidate <= previous {
+			candidate = previous + 1
+		}
+		if lastTimestampMicros.CompareAndSwap(previous, candidate) {
+			return time.UnixMicro(candidate).UTC().Format("2006-01-02T15:04:05.000000Z")
+		}
+	}
+}
+
 // Client is the main entry point for creating spans.
 type Client struct {
-	apiKey     string
-	serviceURL string
-	enabled    bool
-	strict     bool
-	httpClient *httpClient
+	apiKey          string
+	serviceURL      string
+	enabled         bool
+	strict          bool
+	httpClient      *httpClient
+	mockOverridesMu sync.RWMutex
+	mockOverrides   []MockOverride
 }
 
 // Option configures a Client.
@@ -210,11 +229,13 @@ type SpanFunc func(ctx context.Context) (any, error)
 type SpanOption func(*spanConfig)
 
 type spanConfig struct {
-	name         string
-	spanType     string
-	functionName string
-	input        any
-	captureWhen  CaptureWhen
+	name           string
+	spanType       string
+	functionName   string
+	input          any
+	captureWhen    CaptureWhen
+	mockOnReplay   bool
+	mockOutputType reflect.Type
 }
 
 // WithName sets an explicit span name. Defaults to the traceFunctionKey if not set.
@@ -252,6 +273,20 @@ func WithInput(args ...any) SpanOption {
 // Unknown values warn once and default to CaptureWhenAlways.
 func WithCaptureWhen(captureWhen CaptureWhen) SpanOption {
 	return func(c *spanConfig) { c.captureWhen = captureWhen }
+}
+
+// WithMockOnReplay marks a closure-style child Span for recorded-output
+// substitution under the default MockMarked replay strategy.
+func WithMockOnReplay(mock bool) SpanOption {
+	return func(c *spanConfig) { c.mockOnReplay = mock }
+}
+
+// WithMockOutputType decodes a recorded or overridden JSON output into T before
+// returning it from a mocked closure-style Span.
+func WithMockOutputType[T any]() SpanOption {
+	return func(c *spanConfig) {
+		c.mockOutputType = reflect.TypeOf((*T)(nil)).Elem()
+	}
 }
 
 func normalizeCaptureWhen(captureWhen CaptureWhen, traceFunctionKey string) CaptureWhen {
@@ -317,13 +352,24 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		return fn(ctx)
 	}
 
-	startedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	startedAt := nowISOTimestamp()
 
-	// Execute fn with the new span pushed onto the context stack
+	// Execute fn with the new span pushed onto the context stack, unless replay
+	// selected this child span for recorded or overridden output substitution.
 	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
-	result, fnErr := fn(childCtx)
+	result, intercepted, mockSource, mockErr := c.resolveReplayMock(
+		ctx,
+		traceFunctionKey,
+		cfg,
+		id.isRootSpan,
+	)
+	mocked := intercepted && mockErr == nil
+	fnErr := mockErr
+	if !intercepted {
+		result, fnErr = fn(childCtx)
+	}
 
-	endedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	endedAt := nowISOTimestamp()
 
 	// Build and send span data - wrapped in a closure so a panic here
 	// never crashes the host app. The user's result/error is always returned.
@@ -363,6 +409,10 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		if id.parentSpanID != "" {
 			rawSpan["parent_id"] = id.parentSpanID
 		}
+		replay := currentReplayContext(ctx)
+		if replay != nil && replay.inputSourceSpanID != "" {
+			rawSpan["input_source_span_id"] = replay.inputSourceSpanID
+		}
 
 		// If drop() was called on this trace, suppress the span PAYLOAD upload
 		// for every span that completes after the flag was set. The trace
@@ -370,7 +420,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
 		if ts := getTraceState(id.traceID); ts == nil || !ts.isDropped() {
-			c.httpClient.sendExternalSpan(map[string]any{
+			payload := map[string]any{
 				"id":               id.spanID,
 				"traceId":          id.traceID,
 				"type":             "sdk-function",
@@ -378,7 +428,16 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 				"sourceTraceId":    id.traceID,
 				"traceFunctionKey": traceFunctionKey,
 				"rawSpan":          rawSpan,
-			}, dropped...)
+			}
+			if replay != nil && replay.testRunID != "" {
+				payload["testRunId"] = replay.testRunID
+			}
+			if mocked {
+				payload["mocked"] = true
+				payload["mockTarget"] = "output"
+				payload["mockSource"] = string(mockSource)
+			}
+			c.httpClient.sendExternalSpan(payload, dropped...)
 		}
 
 		if id.isRootSpan {
@@ -422,6 +481,8 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 	traceID := randomUUID()
 	if parent != nil {
 		traceID = parent.traceID
+	} else if replay := currentReplayContext(ctx); replay != nil && replay.traceID != "" {
+		traceID = replay.traceID
 	}
 	spanID := randomUUID()
 
@@ -432,7 +493,13 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 	}
 
 	if isRootSpan && getTraceState(traceID) == nil {
-		createTraceState(traceID)
+		state := createTraceState(traceID)
+		state.DBSnapshotRef = &DBSnapshotRef{SDKWallClockBeforeFn: state.StartedAt}
+		if replay := currentReplayContext(ctx); replay != nil {
+			state.TestRunID = replay.testRunID
+			state.InputSourceTraceID = replay.inputSourceTraceID
+			state.replay = replay
+		}
 		registered = traceID
 	}
 
@@ -491,9 +558,13 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 		traceID:          id.traceID,
 		spanID:           id.spanID,
 		parentSpanID:     id.parentSpanID,
-		startedAt:        time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		startedAt:        nowISOTimestamp(),
 		cfg:              cfg,
 		isRootSpan:       id.isRootSpan,
+	}
+	if replay := currentReplayContext(ctx); replay != nil {
+		span.testRunID = replay.testRunID
+		span.inputSourceSpanID = replay.inputSourceSpanID
 	}
 
 	return childCtx, span
@@ -521,6 +592,31 @@ func (c *Client) GetFunction(traceFunctionKey string) *Function {
 	}
 }
 
+// RegisterMockOverride appends a client-scoped replay override.
+// Per-call ReplayOptions.MockOverrides take precedence over registered values.
+func (c *Client) RegisterMockOverride(override MockOverride) error {
+	if override.Match == nil {
+		return fmt.Errorf("bitfab: replay mock override requires a matcher")
+	}
+	c.mockOverridesMu.Lock()
+	defer c.mockOverridesMu.Unlock()
+	c.mockOverrides = append(c.mockOverrides, override)
+	return nil
+}
+
+// ClearMockOverrides removes every override registered on this client.
+func (c *Client) ClearMockOverrides() {
+	c.mockOverridesMu.Lock()
+	defer c.mockOverridesMu.Unlock()
+	c.mockOverrides = nil
+}
+
+func (c *Client) registeredMockOverrides() []MockOverride {
+	c.mockOverridesMu.RLock()
+	defer c.mockOverridesMu.RUnlock()
+	return append([]MockOverride(nil), c.mockOverrides...)
+}
+
 // Function is a helper that binds a traceFunctionKey for repeated span creation.
 type Function struct {
 	client           *Client
@@ -540,20 +636,22 @@ func (f *Function) Start(ctx context.Context, spanName string, opts ...SpanOptio
 // ActiveSpan represents an in-progress span created by Start.
 // Call End() to complete the span and send it to the API.
 type ActiveSpan struct {
-	client           *Client
-	traceFunctionKey string
-	traceID          string
-	spanID           string
-	parentSpanID     string
-	startedAt        string
-	cfg              spanConfig
-	input            any
-	output           any
-	spanErr          error
-	contexts         []ContextEntry
-	prompt           string
-	isRootSpan       bool
-	once             sync.Once
+	client            *Client
+	traceFunctionKey  string
+	traceID           string
+	spanID            string
+	parentSpanID      string
+	startedAt         string
+	cfg               spanConfig
+	input             any
+	output            any
+	spanErr           error
+	contexts          []ContextEntry
+	prompt            string
+	isRootSpan        bool
+	testRunID         string
+	inputSourceSpanID string
+	once              sync.Once
 }
 
 // SetInput records the span's input data. Pass one or more arguments.
@@ -625,7 +723,7 @@ func (s *ActiveSpan) End() {
 	s.once.Do(func() {
 		defer func() { recover() }() // Never crash the host app
 
-		endedAt := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+		endedAt := nowISOTimestamp()
 
 		spanData := map[string]any{
 			"name": s.cfg.name,
@@ -666,6 +764,9 @@ func (s *ActiveSpan) End() {
 		if s.parentSpanID != "" {
 			rawSpan["parent_id"] = s.parentSpanID
 		}
+		if s.inputSourceSpanID != "" {
+			rawSpan["input_source_span_id"] = s.inputSourceSpanID
+		}
 
 		// If drop() was called on this trace, suppress the span PAYLOAD upload
 		// for every span that completes after the flag was set. The trace
@@ -673,7 +774,7 @@ func (s *ActiveSpan) End() {
 		// sendTraceCompletion), so the server scrubs any sibling spans that
 		// already raced out before the flag was set.
 		if ts := getTraceState(s.traceID); ts == nil || !ts.isDropped() {
-			s.client.httpClient.sendExternalSpan(map[string]any{
+			payload := map[string]any{
 				"id":               s.spanID,
 				"traceId":          s.traceID,
 				"type":             "sdk-function",
@@ -681,7 +782,11 @@ func (s *ActiveSpan) End() {
 				"sourceTraceId":    s.traceID,
 				"traceFunctionKey": s.traceFunctionKey,
 				"rawSpan":          rawSpan,
-			}, dropped...)
+			}
+			if s.testRunID != "" {
+				payload["testRunId"] = s.testRunID
+			}
+			s.client.httpClient.sendExternalSpan(payload, dropped...)
 		}
 
 		if s.isRootSpan {
@@ -713,6 +818,15 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		if len(ts.Contexts) > 0 {
 			rawTrace["contexts"] = ts.Contexts
 		}
+		if ts.InputSourceTraceID != "" {
+			rawTrace["input_source_trace_id"] = ts.InputSourceTraceID
+		}
+		if ts.DBSnapshotRef != nil {
+			rawTrace["db_snapshot_ref"] = ts.DBSnapshotRef
+		}
+		if usage := dbSnapshotUsage(ts.replay); usage != nil {
+			rawTrace["db_snapshot_usage"] = usage
+		}
 	}
 
 	payload := map[string]any{
@@ -726,6 +840,9 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 
 	if ts != nil && ts.SessionID != "" {
 		payload["sessionId"] = ts.SessionID
+	}
+	if ts != nil && ts.TestRunID != "" {
+		payload["testRunId"] = ts.TestRunID
 	}
 
 	if ts != nil && ts.isDropped() {

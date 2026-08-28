@@ -11,8 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+var carrierSubmissionSequence atomic.Uint64
 
 type httpClient struct {
 	apiKey     string
@@ -22,6 +25,24 @@ type httpClient struct {
 	transportMu sync.Mutex
 	transport   traceTransport
 	closed      bool
+
+	deliveryMu      sync.Mutex
+	traceDeliveries map[string]*traceDelivery
+}
+
+type traceDelivery struct {
+	submittedSpanIDs map[string]struct{}
+	ackedSpanIDs     map[string]struct{}
+	closed           bool
+	closingAcked     bool
+	serverTraceID    string
+}
+
+type deliveryReport struct {
+	spanCount     int
+	closed        bool
+	delivered     bool
+	serverTraceID string
 }
 
 func newHTTPClient(apiKey, serviceURL string) *httpClient {
@@ -246,7 +267,7 @@ func (h *httpClient) traceTransportOrNil() traceTransport {
 		return nil
 	}
 	if h.transport == nil {
-		h.transport = createTraceTransport(h.sendTransportRequest)
+		h.transport = createTraceTransport(h.sendTransportRequest, h.recordDeliveredCarriers)
 	}
 	return h.transport
 }
@@ -256,14 +277,18 @@ func (h *httpClient) sendTransportRequest(
 	request preparedRequest,
 	timeout time.Duration,
 ) (map[string]any, error) {
-	return h.sendPrepared(context.Background(), endpoint, request, timeout)
+	response, err := h.sendPrepared(context.Background(), endpoint, request, timeout)
+	if err == nil {
+		h.recordServerTraceIDs(response)
+	}
+	return response, err
 }
 
 // submit queues a payload on this client's trace transport. extraDropped
 // carries losses detected during capture (a value the size cap stubbed) so the
 // span can be marked non-replayable. The body encoded here is handed to the
 // transport so the carrier attribute never re-encodes it.
-func (h *httpClient) submit(operation traceOperation, payload map[string]any, extraDropped ...string) {
+func (h *httpClient) submit(operation traceOperation, payload map[string]any, meta carrierMeta, extraDropped ...string) {
 	merged := make(map[string]any, len(payload)+1)
 	for k, v := range payload {
 		merged[k] = v
@@ -282,17 +307,179 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, ex
 		warnOnce("otel-submit-after-close", "Bitfab client is closed; dropping spans")
 		return
 	}
-	transport.submit(operation, merged, body)
+	transport.submit(operation, merged, body, meta)
 }
 
 // sendExternalSpan queues a span payload on this client's trace transport.
 func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
-	h.submit(operationExternalSpan, payload, extraDropped...)
+	ref := carrierRefForPayload(payload)
+	h.recordSubmittedCarrier(ref)
+	h.submit(operationExternalSpan, payload, carrierMeta{ref: ref}, extraDropped...)
+}
+
+func carrierRefForPayload(payload map[string]any) *carrierRef {
+	traceID, _ := payload["sourceTraceId"].(string)
+	if traceID == "" {
+		for _, field := range []string{"externalTrace", "rawTrace"} {
+			rawTrace, _ := payload[field].(map[string]any)
+			if rawTrace != nil {
+				traceID, _ = rawTrace["id"].(string)
+			}
+			if traceID != "" {
+				break
+			}
+		}
+	}
+	if traceID == "" {
+		return nil
+	}
+	ref := &carrierRef{traceID: traceID}
+	if rawSpan, _ := payload["rawSpan"].(map[string]any); rawSpan != nil {
+		ref.spanID, _ = rawSpan["id"].(string)
+		if ref.spanID == "" {
+			ref.spanID = fmt.Sprintf("submission-%d", carrierSubmissionSequence.Add(1))
+		}
+	}
+	return ref
+}
+
+func (h *httpClient) recordSubmittedCarrier(ref *carrierRef) {
+	if ref == nil {
+		return
+	}
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	delivery := h.traceDeliveries[ref.traceID]
+	if delivery == nil {
+		return
+	}
+	if ref.spanID == "" {
+		delivery.closed = true
+		return
+	}
+	delivery.submittedSpanIDs[ref.spanID] = struct{}{}
+}
+
+func (h *httpClient) recordDeliveredCarriers(refs []carrierRef) {
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	for _, ref := range refs {
+		delivery := h.traceDeliveries[ref.traceID]
+		if delivery == nil {
+			continue
+		}
+		if ref.spanID == "" {
+			delivery.closingAcked = true
+		} else {
+			delivery.ackedSpanIDs[ref.spanID] = struct{}{}
+		}
+	}
+}
+
+func (h *httpClient) recordServerTraceIDs(response map[string]any) {
+	if response == nil {
+		return
+	}
+	raw, ok := response["traceIds"]
+	if !ok {
+		return
+	}
+	traceIDs := make(map[string]string)
+	switch values := raw.(type) {
+	case map[string]any:
+		for sourceTraceID, value := range values {
+			if serverTraceID, ok := value.(string); ok {
+				traceIDs[sourceTraceID] = serverTraceID
+			}
+		}
+	case map[string]string:
+		traceIDs = values
+	}
+	if len(traceIDs) == 0 {
+		return
+	}
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	for sourceTraceID, serverTraceID := range traceIDs {
+		if delivery := h.traceDeliveries[sourceTraceID]; delivery != nil {
+			delivery.serverTraceID = serverTraceID
+		}
+	}
+}
+
+func (h *httpClient) trackTraceDeliveries(traceIDs []string) {
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	if h.traceDeliveries == nil {
+		h.traceDeliveries = make(map[string]*traceDelivery, len(traceIDs))
+	}
+	for _, traceID := range traceIDs {
+		if h.traceDeliveries[traceID] == nil {
+			h.traceDeliveries[traceID] = &traceDelivery{
+				submittedSpanIDs: make(map[string]struct{}),
+				ackedSpanIDs:     make(map[string]struct{}),
+			}
+		}
+	}
+}
+
+func (h *httpClient) peekServerTraceID(traceID string) string {
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	if delivery := h.traceDeliveries[traceID]; delivery != nil {
+		return delivery.serverTraceID
+	}
+	return ""
+}
+
+func (h *httpClient) hasClosedDeliveries(traceIDs []string) bool {
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	for _, traceID := range traceIDs {
+		if delivery := h.traceDeliveries[traceID]; delivery != nil && delivery.closed {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryReport {
+	h.deliveryMu.Lock()
+	defer h.deliveryMu.Unlock()
+	reports := make(map[string]deliveryReport, len(traceIDs))
+	for _, traceID := range traceIDs {
+		delivery := h.traceDeliveries[traceID]
+		if delivery == nil {
+			continue
+		}
+		delete(h.traceDeliveries, traceID)
+		delivered := delivery.closingAcked
+		if delivered {
+			for spanID := range delivery.submittedSpanIDs {
+				if _, ok := delivery.ackedSpanIDs[spanID]; !ok {
+					delivered = false
+					break
+				}
+			}
+		}
+		reports[traceID] = deliveryReport{
+			spanCount:     len(delivery.submittedSpanIDs),
+			closed:        delivery.closed,
+			delivered:     delivered,
+			serverTraceID: delivery.serverTraceID,
+		}
+	}
+	return reports
 }
 
 // sendExternalTrace queues a trace payload on this client's trace transport.
 func (h *httpClient) sendExternalTrace(payload map[string]any) {
-	h.submit(operationExternalTrace, payload)
+	ref := carrierRefForPayload(payload)
+	if completed, _ := payload["completed"].(bool); !completed {
+		ref = nil
+	}
+	h.recordSubmittedCarrier(ref)
+	h.submit(operationExternalTrace, payload, carrierMeta{ref: ref})
 }
 
 // flush drains this client's transport within timeout. It reports false when an
