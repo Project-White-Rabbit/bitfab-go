@@ -120,6 +120,9 @@ type Client struct {
 	httpClient      *httpClient
 	mockOverridesMu sync.RWMutex
 	mockOverrides   []MockOverride
+
+	// Datasets creates, reads, and modifies the organization's datasets.
+	Datasets *DatasetsClient
 }
 
 // Option configures a Client.
@@ -178,6 +181,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		c.enabled = false
 	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
+	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
 	return c
 }
 
