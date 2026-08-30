@@ -41,6 +41,7 @@ type ContextEntry = map[string]any
 type TraceState struct {
 	TraceID            string
 	SessionID          string
+	Name               string
 	TestRunID          string
 	InputSourceTraceID string
 	DBSnapshotRef      *DBSnapshotRef
@@ -169,6 +170,20 @@ func (ct *CurrentTrace) SetSessionID(sessionID string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.SessionID = sessionID
+}
+
+func (ct *CurrentTrace) SetName(name string) {
+	defer func() { recover() }()
+	if ct == nil || ct.traceID == "" || name == "" {
+		return
+	}
+	ts := getTraceState(ct.traceID)
+	if ts == nil {
+		ts = createTraceState(ct.traceID)
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.Name = name
 }
 
 // SetMetadata sets metadata for this trace.

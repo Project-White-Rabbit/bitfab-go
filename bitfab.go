@@ -816,6 +816,9 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 	}
 
 	if ts != nil {
+		if ts.Name != "" {
+			rawTrace["name"] = ts.Name
+		}
 		if ts.Metadata != nil {
 			rawTrace["metadata"] = ts.Metadata
 		}

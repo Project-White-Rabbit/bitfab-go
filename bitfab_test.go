@@ -1470,6 +1470,46 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 	}
 }
 
+func TestTraceCompletion_Name(t *testing.T) {
+	clearAllTraceStates()
+	var mu sync.Mutex
+	var tracePayload map[string]any
+
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if strings.Contains(r.URL.Path, "externalTraces") {
+			mu.Lock()
+			tracePayload = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+
+	client.Span(ctx, "triage", func(ctx context.Context) (any, error) {
+		GetCurrentTrace(ctx).SetName("Ticket 4521")
+		return "done", nil
+	})
+
+	client.FlushTraces(5 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if tracePayload == nil {
+		t.Fatal("no trace payload captured")
+	}
+	rawTrace, _ := tracePayload["externalTrace"].(map[string]any)
+	if rawTrace["name"] != "Ticket 4521" {
+		t.Errorf("externalTrace.name = %v, want Ticket 4521", rawTrace["name"])
+	}
+}
+
 func TestTraceCompletion_Drop(t *testing.T) {
 	clearAllTraceStates()
 	var mu sync.Mutex
