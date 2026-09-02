@@ -87,14 +87,21 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 			}
 			traceIDs := state.traceIDs()
 			tokens := map[string]any{}
+			traceOutlines := map[string]any{}
 			for _, traceID := range traceIDs {
 				tokens[traceID] = map[string]any{"input": 4, "output": 2, "cached": 0, "total": 6}
+				traceOutlines[traceID] = replayTestOutline(traceID, "replay-root")
 			}
 			writeReplayTestJSON(t, w, map[string]any{
-				"id":         "run-1",
-				"status":     "completed",
-				"traceIds":   traceIDs,
-				"tokens":     tokens,
+				"id":            "run-1",
+				"status":        "completed",
+				"traceIds":      traceIDs,
+				"tokens":        tokens,
+				"traceOutlines": traceOutlines,
+				"originalTraceOutlines": map[string]any{
+					"original-trace-1": replayTestOutline("original-trace-1", "original-root-1"),
+					"original-trace-2": replayTestOutline("original-trace-2", "original-root-2"),
+				},
 				"traceCount": len(traceIDs),
 			})
 		default:
@@ -114,6 +121,44 @@ func (state *replayTestServerState) traceIDs() map[string]string {
 		}
 	}
 	return traceIDs
+}
+
+func replayTestOutline(traceID string, rootSpanID string) map[string]any {
+	return map[string]any{
+		"traceId":          traceID,
+		"name":             nil,
+		"status":           "completed",
+		"traceFunctionKey": "typed-workflow",
+		"durationMs":       12,
+		"spanCount":        2,
+		"spans": []any{
+			map[string]any{
+				"spanId":           rootSpanID,
+				"name":             "typed-workflow",
+				"type":             "function",
+				"traceFunctionKey": "typed-workflow",
+				"durationMs":       12,
+				"tokens":           nil,
+				"model":            nil,
+				"errors":           nil,
+				"mocked":           false,
+				"children": []any{
+					map[string]any{
+						"spanId":           rootSpanID + "-child",
+						"name":             "lookup",
+						"type":             "llm",
+						"traceFunctionKey": "typed-workflow",
+						"durationMs":       4,
+						"tokens":           map[string]any{"input": 4, "output": 2, "cached": 0, "total": 6},
+						"model":            "old-model",
+						"errors":           []any{map[string]any{"source": "code", "error": "boom"}},
+						"mocked":           true,
+						"children":         []any{},
+					},
+				},
+			},
+		},
+	}
 }
 
 func writeReplayTestJSON(t *testing.T, writer http.ResponseWriter, value any) {
@@ -195,6 +240,16 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 		if item.Tokens == nil || item.Tokens.Total == nil || *item.Tokens.Total != 6 {
 			t.Errorf("tokens = %#v, want replay total 6", item.Tokens)
 		}
+		if item.TraceOutline == nil || item.TraceID == nil || item.TraceOutline.TraceID != *item.TraceID || item.TraceOutline.SpanCount != 2 {
+			t.Errorf("trace outline = %#v, want outline for %v", item.TraceOutline, item.TraceID)
+		} else if len(item.TraceOutline.Spans) != 1 || item.TraceOutline.Spans[0].SpanID != "replay-root" || len(item.TraceOutline.Spans[0].Children) != 1 || !item.TraceOutline.Spans[0].Children[0].Mocked {
+			t.Errorf("trace outline spans = %#v", item.TraceOutline.Spans)
+		}
+		if item.OriginalTraceOutline == nil || item.OriginalTraceOutline.TraceID != item.OriginalTraceID {
+			t.Errorf("original trace outline = %#v, want outline for %s", item.OriginalTraceOutline, item.OriginalTraceID)
+		} else if len(item.OriginalTraceOutline.Spans) != 1 || item.OriginalTraceOutline.Spans[0].SpanID != "original-root-"+strings.TrimPrefix(item.OriginalTraceID, "original-trace-") {
+			t.Errorf("original trace outline spans = %#v", item.OriginalTraceOutline.Spans)
+		}
 	}
 	if len(started) != 2 || len(finished) != 2 || finished[1].Completed != 2 {
 		t.Fatalf("callbacks started=%d finished=%#v", len(started), finished)
@@ -202,6 +257,9 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 	for _, progress := range finished {
 		if progress.Item.TraceID == nil || !strings.HasPrefix(*progress.Item.TraceID, "server-") {
 			t.Errorf("finish callback trace ID = %v, want server mapping", progress.Item.TraceID)
+		}
+		if progress.Item.TraceOutline != nil || progress.Item.OriginalTraceOutline != nil {
+			t.Errorf("finish callback outlines = %#v / %#v, want nil until completion", progress.Item.TraceOutline, progress.Item.OriginalTraceOutline)
 		}
 	}
 	serialized, err := os.ReadFile(resultPath)
