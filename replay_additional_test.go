@@ -430,3 +430,54 @@ func TestWriteReplayResultFileReportsDirectoryFailure(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestResolveDatasetIDsAcceptsEitherSpelling(t *testing.T) {
+	single, err := resolveDatasetIDs("dataset-a", nil)
+	if err != nil {
+		t.Fatalf("single dataset: %v", err)
+	}
+	if len(single) != 1 || single[0] != "dataset-a" {
+		t.Fatalf("expected [dataset-a], got %v", single)
+	}
+
+	many, err := resolveDatasetIDs("", []string{"dataset-a", "dataset-b", "dataset-a"})
+	if err != nil {
+		t.Fatalf("several datasets: %v", err)
+	}
+	if len(many) != 2 || many[0] != "dataset-a" || many[1] != "dataset-b" {
+		t.Fatalf("expected deduped [dataset-a dataset-b], got %v", many)
+	}
+
+	none, err := resolveDatasetIDs("", nil)
+	if err != nil || none != nil {
+		t.Fatalf("expected no datasets, got %v (%v)", none, err)
+	}
+
+	if _, err := resolveDatasetIDs("dataset-a", []string{"dataset-b"}); err == nil {
+		t.Fatal("expected both spellings to be rejected")
+	}
+
+	if _, err := resolveDatasetIDs("", []string{}); err == nil {
+		t.Fatal("expected an empty dataset list to be rejected")
+	}
+}
+
+func TestStartReplayPayloadCarriesDatasetIDs(t *testing.T) {
+	options, err := normalizeReplayOptions(&ReplayOptions{
+		DatasetIDs: []string{"dataset-a", "dataset-b"},
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(options.DatasetIDs) != 2 {
+		t.Fatalf("expected two datasets, got %v", options.DatasetIDs)
+	}
+
+	legacy, err := normalizeReplayOptions(&ReplayOptions{DatasetID: "dataset-a"})
+	if err != nil {
+		t.Fatalf("resolve legacy: %v", err)
+	}
+	if len(legacy.DatasetIDs) != 1 || legacy.DatasetIDs[0] != "dataset-a" {
+		t.Fatalf("expected DatasetID to fold into DatasetIDs, got %v", legacy.DatasetIDs)
+	}
+}

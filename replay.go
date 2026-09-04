@@ -197,6 +197,7 @@ type ReplayOptions struct {
 	DBBranch                 *DBBranchOptions
 	ExperimentGroupID        string
 	DatasetID                string
+	DatasetIDs               []string
 	GraderIDs                []string
 	AdaptInputs              ReplayInputAdapter
 	OnItemStart              func(ReplayItemStartProgress)
@@ -622,6 +623,11 @@ func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 	if err != nil {
 		return ReplayOptions{}, err
 	}
+	resolved.DatasetIDs, err = resolveDatasetIDs(resolved.DatasetID, resolved.DatasetIDs)
+	if err != nil {
+		return ReplayOptions{}, err
+	}
+	resolved.DatasetID = ""
 	if resolved.TraceIDs != nil {
 		if len(resolved.TraceIDs) == 0 {
 			return ReplayOptions{}, fmt.Errorf("bitfab: replay trace IDs must contain at least one ID")
@@ -634,6 +640,31 @@ func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 		}
 	}
 	return resolved, nil
+}
+
+func resolveDatasetIDs(datasetID string, datasetIDs []string) ([]string, error) {
+	if datasetID != "" && len(datasetIDs) > 0 {
+		return nil, fmt.Errorf("bitfab: replay DatasetID and DatasetIDs are the same selector: set one dataset on DatasetID, or several on DatasetIDs")
+	}
+	if datasetID != "" {
+		return []string{datasetID}, nil
+	}
+	if datasetIDs == nil {
+		return nil, nil
+	}
+	if len(datasetIDs) == 0 {
+		return nil, fmt.Errorf("bitfab: replay dataset IDs must contain at least one ID")
+	}
+	seen := make(map[string]struct{}, len(datasetIDs))
+	unique := make([]string, 0, len(datasetIDs))
+	for _, id := range datasetIDs {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique, nil
 }
 
 func (c *Client) replayURL(path string) string {
@@ -683,8 +714,10 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if options.ExperimentGroupID != "" {
 		payload["experimentGroupId"] = options.ExperimentGroupID
 	}
-	if options.DatasetID != "" {
-		payload["datasetId"] = options.DatasetID
+	if len(options.DatasetIDs) == 1 {
+		payload["datasetId"] = options.DatasetIDs[0]
+	} else if len(options.DatasetIDs) > 1 {
+		payload["datasetIds"] = options.DatasetIDs
 	}
 	if options.GraderIDs != nil {
 		payload["graderIds"] = options.GraderIDs
