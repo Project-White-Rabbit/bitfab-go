@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -236,15 +235,7 @@ func workingFileSize(root string, path string) int64 {
 }
 
 func runReplayGit(ctx context.Context, cwd string, args ...string) (string, bool) {
-	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	command := exec.CommandContext(commandCtx, "git", args...)
-	command.Dir = cwd
-	output, err := command.Output()
-	if err != nil {
-		return "", false
-	}
-	return string(output), true
+	return runGit(ctx, cwd, 30*time.Second, args...)
 }
 
 func parseGitNameStatus(raw string) []gitCodeChange {

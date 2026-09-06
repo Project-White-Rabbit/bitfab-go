@@ -182,6 +182,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
+	startCommitRefResolution()
 	return c
 }
 
@@ -834,6 +835,9 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		if usage := dbSnapshotUsage(ts.replay); usage != nil {
 			rawTrace["db_snapshot_usage"] = usage
 		}
+	}
+	if ref := currentCommitRef(); ref != nil {
+		rawTrace["commit_ref"] = ref
 	}
 
 	payload := map[string]any{
