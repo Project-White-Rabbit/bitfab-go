@@ -722,6 +722,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if options.GraderIDs != nil {
 		payload["graderIds"] = options.GraderIDs
 	}
+	if gitState := resolvedGitState(ctx); gitState != nil {
+		payload["git"] = gitState
+	}
 
 	timeout := 30 * time.Second
 	if options.DBBranch != nil {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -476,6 +477,54 @@ func TestPrepareReplayCallableRejectsNonFinalError(t *testing.T) {
 	_, err := prepareReplayCallable(func() (error, string) { return nil, "result" })
 	if err == nil {
 		t.Fatal("non-final error return should fail")
+	}
+}
+
+func TestReplayReportsTheGitStateItRanFrom(t *testing.T) {
+
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	options := &ReplayOptions{DisableCodeChangeCapture: true}
+	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	git, ok := state.startBody["git"].(map[string]any)
+	if !ok {
+		t.Fatalf("start body carried no git state: %#v", state.startBody)
+	}
+	for _, field := range []string{"commitSha", "baseSha", "experimentSha"} {
+		sha, _ := git[field].(string)
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(sha) {
+			t.Errorf("git %s = %#v, want a full sha", field, git[field])
+		}
+	}
+}
+
+func TestReplayOmitsGitStateWhenSwitchedOff(t *testing.T) {
+	t.Setenv(disableGitStateEnv, "1")
+
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	options := &ReplayOptions{DisableCodeChangeCapture: true}
+	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if _, present := state.startBody["git"]; present {
+		t.Errorf("start body should omit git state: %#v", state.startBody)
 	}
 }
 
