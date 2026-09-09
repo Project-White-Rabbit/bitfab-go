@@ -195,21 +195,27 @@ func (d *DatasetsClient) Save(ctx context.Context, params SaveDatasetParams) (*S
 }
 
 // List returns the organization's datasets, scoped to one trace function
-// when params.TraceFunctionKey is set.
+// when params.TraceFunctionKey is set. Fetches all pages automatically.
 func (d *DatasetsClient) List(ctx context.Context, params ListDatasetsParams) ([]Dataset, error) {
-	endpoint := "/api/sdk/datasets"
+	query := url.Values{"limit": {"100"}}
 	if params.TraceFunctionKey != "" {
-		query := url.Values{}
 		query.Set("traceFunctionKey", params.TraceFunctionKey)
-		endpoint += "?" + query.Encode()
 	}
-	var response struct {
-		Datasets []Dataset `json:"datasets"`
+	datasets := make([]Dataset, 0)
+	for {
+		var response struct {
+			Datasets   []Dataset `json:"datasets"`
+			NextCursor *string   `json:"nextCursor"`
+		}
+		if err := d.httpClient.get(ctx, "/api/sdk/datasets?"+query.Encode(), &response); err != nil {
+			return nil, err
+		}
+		datasets = append(datasets, response.Datasets...)
+		if response.NextCursor == nil {
+			return datasets, nil
+		}
+		query.Set("cursor", *response.NextCursor)
 	}
-	if err := d.httpClient.get(ctx, endpoint, &response); err != nil {
-		return nil, err
-	}
-	return response.Datasets, nil
 }
 
 // Get fetches one dataset by id. A dataset outside this organization fails
@@ -225,13 +231,25 @@ func (d *DatasetsClient) Get(ctx context.Context, datasetID string) (*Dataset, e
 }
 
 // ListTraces returns the ids of every trace in the dataset, the same
-// membership a replay with DatasetID selects.
+// membership a replay with DatasetID selects. Fetches all pages automatically.
 func (d *DatasetsClient) ListTraces(ctx context.Context, datasetID string) (*DatasetTraceIDs, error) {
-	var result DatasetTraceIDs
-	if err := d.httpClient.get(ctx, datasetPath(datasetID, "/traces"), &result); err != nil {
-		return nil, err
+	result := DatasetTraceIDs{TraceIDs: make([]string, 0)}
+	query := url.Values{"limit": {"100"}}
+	for {
+		var page struct {
+			DatasetTraceIDs
+			NextCursor *string `json:"nextCursor"`
+		}
+		if err := d.httpClient.get(ctx, datasetPath(datasetID, "/traces")+"?"+query.Encode(), &page); err != nil {
+			return nil, err
+		}
+		result.DatasetID = page.DatasetID
+		result.TraceIDs = append(result.TraceIDs, page.TraceIDs...)
+		if page.NextCursor == nil {
+			return &result, nil
+		}
+		query.Set("cursor", *page.NextCursor)
 	}
-	return &result, nil
 }
 
 // AddTraces adds traces to the dataset (1 to 100 ids per call). Traces outside

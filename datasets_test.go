@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -148,10 +149,10 @@ func TestDatasets_ListAndGet(t *testing.T) {
 	}
 
 	requests := server.recorded()
-	if requests[0].query != "" {
+	if requests[0].query != "limit=100" {
 		t.Errorf("unscoped list query = %q", requests[0].query)
 	}
-	if requests[1].query != "traceFunctionKey=checkout+agent" {
+	if requests[1].query != "limit=100&traceFunctionKey=checkout+agent" {
 		t.Errorf("scoped list query = %q", requests[1].query)
 	}
 	if requests[2].path != "/api/sdk/datasets/"+testDatasetID {
@@ -302,5 +303,106 @@ func TestDatasets_GetGraderRerun(t *testing.T) {
 	}
 	if server.recorded()[1].query != "runId=r1" {
 		t.Errorf("query = %q", server.recorded()[1].query)
+	}
+}
+
+func TestDatasets_ListPages(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		query, _ := url.ParseQuery(r.query)
+		if query.Get("limit") != "100" || query.Get("traceFunctionKey") != "checkout agent" {
+			t.Errorf("query = %v", query)
+		}
+		if query.Get("cursor") == "" {
+			return map[string]any{"datasets": []any{testDataset()}, "nextCursor": "date|id +"}
+		}
+		if query.Get("cursor") != "date|id +" {
+			t.Errorf("cursor = %q", query.Get("cursor"))
+		}
+		second := testDataset()
+		second["id"] = "second"
+		return map[string]any{"datasets": []any{second}, "nextCursor": nil}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	rows, err := client.Datasets.List(context.Background(), ListDatasetsParams{TraceFunctionKey: "checkout agent"})
+	if err != nil || len(rows) != 2 || rows[1].ID != "second" {
+		t.Fatalf("List = %v, %v", rows, err)
+	}
+	if len(server.recorded()) != 2 {
+		t.Fatal("expected two requests")
+	}
+}
+
+func TestDatasets_ListEmpty(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any { return map[string]any{"datasets": []any{}, "nextCursor": nil} })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	rows, err := client.Datasets.List(context.Background(), ListDatasetsParams{})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("List = %v, %v", rows, err)
+	}
+}
+
+func TestDatasets_ListTracePages(t *testing.T) {
+	for _, scenario := range []string{"pages", "empty", "failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != "/api/sdk/datasets/"+testDatasetID+"/traces" || r.URL.Query().Get("limit") != "100" {
+					t.Errorf("unexpected request %s", r.URL)
+				}
+				if scenario == "empty" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"datasetId": testDatasetID, "traceIds": []string{}, "nextCursor": nil})
+					return
+				}
+				if requests == 1 {
+					_ = json.NewEncoder(w).Encode(map[string]any{"datasetId": testDatasetID, "traceIds": []string{"a"}, "nextCursor": "next| +"})
+					return
+				}
+				if r.URL.Query().Get("cursor") != "next| +" {
+					t.Errorf("unexpected cursor %s", r.URL)
+				}
+				if scenario == "failure" {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"datasetId": testDatasetID, "traceIds": []string{"b"}, "nextCursor": nil})
+			}))
+			defer server.Close()
+			client := NewClient("test-key", WithServiceURL(server.URL))
+			result, err := client.Datasets.ListTraces(context.Background(), testDatasetID)
+			if scenario == "failure" {
+				if err == nil || result != nil {
+					t.Fatalf("expected error without partial data, got %+v, %v", result, err)
+				}
+				return
+			}
+			if err != nil || result.DatasetID != testDatasetID {
+				t.Fatalf("unexpected result %+v, %v", result, err)
+			}
+			if scenario == "empty" {
+				if len(result.TraceIDs) != 0 || requests != 1 {
+					t.Fatalf("unexpected empty result %+v", result)
+				}
+			} else if len(result.TraceIDs) != 2 || result.TraceIDs[0] != "a" || result.TraceIDs[1] != "b" || requests != 2 {
+				t.Fatalf("unexpected pages %+v", result)
+			}
+		})
+	}
+}
+
+func TestDatasets_ListLaterPageFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("cursor") == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"datasets": []any{testDataset()}, "nextCursor": "next"})
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "Forbidden"})
+	}))
+	defer server.Close()
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	rows, err := client.Datasets.List(context.Background(), ListDatasetsParams{})
+	if err == nil || rows != nil {
+		t.Fatalf("expected an error without partial results, got %v, %v", rows, err)
 	}
 }
