@@ -123,6 +123,9 @@ type Client struct {
 
 	// Datasets creates, reads, and modifies the organization's datasets.
 	Datasets *DatasetsClient
+
+	// Traces searches traces for the authenticated organization.
+	Traces *TracesClient
 }
 
 // Option configures a Client.
@@ -182,6 +185,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
+	c.Traces = &TracesClient{httpClient: c.httpClient}
 	startCommitRefResolution()
 	return c
 }
