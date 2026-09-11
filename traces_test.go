@@ -41,3 +41,27 @@ func TestTraces_SearchPostsCallerMetadata(t *testing.T) {
 		t.Errorf("callerMetadata = %+v", req.body["callerMetadata"])
 	}
 }
+
+func TestTraces_SearchPostsNameFilters(t *testing.T) {
+	server := newDatasetsServer(t, func(request datasetRequest) any {
+		return map[string]any{"traces": []any{}, "nextCursor": nil, "hasMore": false}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	if _, err := client.Traces.Search(context.Background(), TraceSearchParams{
+		Name:         "Nightly Checkout",
+		NameContains: "checkout",
+	}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	req := server.recorded()[0]
+	if req.body["name"] != "Nightly Checkout" {
+		t.Errorf("name = %+v", req.body["name"])
+	}
+	if req.body["nameContains"] != "checkout" {
+		t.Errorf("nameContains = %+v", req.body["nameContains"])
+	}
+	if _, present := req.body["callerMetadata"]; present {
+		t.Errorf("callerMetadata should be omitted, body = %+v", req.body)
+	}
+}

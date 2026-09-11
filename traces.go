@@ -6,17 +6,15 @@ import (
 	"fmt"
 )
 
-// TraceSearchParams filters traces by up to 10 exact caller metadata pairs.
-// Every pair must match case-insensitively. Cursor is the opaque NextCursor
-// from a prior page.
 type TraceSearchParams struct {
 	CallerMetadata   map[string]string
+	Name             string
+	NameContains     string
 	TraceFunctionKey string
 	Cursor           string
 	Limit            int
 }
 
-// TraceSearchEntry is one stable summary returned by a trace search.
 type TraceSearchEntry struct {
 	ID               string            `json:"id"`
 	TraceFunctionKey *string           `json:"traceFunctionKey"`
@@ -26,21 +24,27 @@ type TraceSearchEntry struct {
 	CallerMetadata   map[string]string `json:"callerMetadata"`
 }
 
-// TraceSearchResult is one page of matching traces.
 type TraceSearchResult struct {
 	Traces     []TraceSearchEntry `json:"traces"`
 	NextCursor *string            `json:"nextCursor"`
 	HasMore    bool               `json:"hasMore"`
 }
 
-// TracesClient searches traces for the authenticated organization.
 type TracesClient struct {
 	httpClient *httpClient
 }
 
-// Search finds traces by exact caller metadata.
 func (t *TracesClient) Search(ctx context.Context, params TraceSearchParams) (*TraceSearchResult, error) {
-	payload := map[string]any{"callerMetadata": params.CallerMetadata}
+	payload := map[string]any{}
+	if len(params.CallerMetadata) > 0 {
+		payload["callerMetadata"] = params.CallerMetadata
+	}
+	if params.Name != "" {
+		payload["name"] = params.Name
+	}
+	if params.NameContains != "" {
+		payload["nameContains"] = params.NameContains
+	}
 	if params.TraceFunctionKey != "" {
 		payload["traceFunctionKey"] = params.TraceFunctionKey
 	}
