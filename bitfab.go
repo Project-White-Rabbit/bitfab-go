@@ -357,6 +357,13 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		return fn(ctx)
 	}
 
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.httpClient.traceCompletion.abort(id.traceID, id.spanID)
+			panic(recovered)
+		}
+		c.httpClient.traceCompletion.end(id.traceID, id.spanID)
+	}()
 	startedAt := nowISOTimestamp()
 
 	// Execute fn with the new span pushed onto the context stack, unless replay
@@ -508,6 +515,7 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 		registered = traceID
 	}
 
+	c.httpClient.traceCompletion.start(traceID, spanID)
 	return spanIdentity{
 		traceID:      traceID,
 		spanID:       spanID,
@@ -727,6 +735,7 @@ func (s *ActiveSpan) End() {
 	}
 	s.once.Do(func() {
 		defer func() { recover() }() // Never crash the host app
+		defer s.client.httpClient.traceCompletion.end(s.traceID, s.spanID)
 
 		endedAt := nowISOTimestamp()
 

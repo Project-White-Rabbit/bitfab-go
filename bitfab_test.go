@@ -131,6 +131,46 @@ func TestSpan_BasicExecution(t *testing.T) {
 	}
 }
 
+func TestSpan_PanicDoesNotBlockTraceCompletion(t *testing.T) {
+	sink := &carrierSink{}
+	server := newCarrierCaptureServer(t, sink)
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	recovered := false
+	_, err := client.Span(context.Background(), "root", func(ctx context.Context) (any, error) {
+		func() {
+			defer func() {
+				if recover() != nil {
+					recovered = true
+				}
+			}()
+			_, _ = client.Span(ctx, "child", func(context.Context) (any, error) {
+				panic("boom")
+			})
+		}()
+		return "done", nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatal("child panic was not preserved")
+	}
+	if !client.httpClient.close(5 * time.Second) {
+		t.Fatal("close failed")
+	}
+
+	spans := sink.spanPayloads()
+	if len(spans) != 1 {
+		t.Fatalf("span count = %d, want 1", len(spans))
+	}
+	completion := sink.lastTracePayload()
+	if completion["expectedSpanCount"] != float64(1) {
+		t.Fatalf("expected count = %v, want 1", completion["expectedSpanCount"])
+	}
+}
+
 func TestSpan_CaptureWhenNested(t *testing.T) {
 	clearAllTraceStates()
 	var mu sync.Mutex

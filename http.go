@@ -18,9 +18,10 @@ import (
 var carrierSubmissionSequence atomic.Uint64
 
 type httpClient struct {
-	apiKey     string
-	serviceURL string
-	client     *http.Client
+	traceCompletion traceCompletion
+	apiKey          string
+	serviceURL      string
+	client          *http.Client
 
 	transportMu sync.Mutex
 	transport   traceTransport
@@ -313,6 +314,9 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, me
 // sendExternalSpan queues a span payload on this client's trace transport.
 func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
 	ref := carrierRefForPayload(payload)
+	if ref != nil && ref.spanID != "" {
+		h.traceCompletion.record(ref.traceID, ref.spanID)
+	}
 	h.recordSubmittedCarrier(ref)
 	h.submit(operationExternalSpan, payload, carrierMeta{ref: ref}, extraDropped...)
 }
@@ -476,9 +480,28 @@ func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryR
 func (h *httpClient) sendExternalTrace(payload map[string]any) {
 	ref := carrierRefForPayload(payload)
 	if completed, _ := payload["completed"].(bool); !completed {
+		if ref != nil {
+			h.traceCompletion.open(ref.traceID)
+		}
 		ref = nil
 	}
-	h.recordSubmittedCarrier(ref)
+	if ref != nil {
+		h.traceCompletion.close(ref.traceID, func(count int) {
+			defer func() {
+				if recover() != nil {
+					warnOnce("trace-completion-submit", "trace completion could not be queued")
+				}
+			}()
+			counted := make(map[string]any, len(payload)+1)
+			for key, value := range payload {
+				counted[key] = value
+			}
+			counted["expectedSpanCount"] = count
+			h.recordSubmittedCarrier(ref)
+			h.submit(operationExternalTrace, counted, carrierMeta{ref: ref})
+		}, payload["dropped"] == true)
+		return
+	}
 	h.submit(operationExternalTrace, payload, carrierMeta{ref: ref})
 }
 
