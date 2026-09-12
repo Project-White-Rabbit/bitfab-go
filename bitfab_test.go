@@ -1092,6 +1092,69 @@ func TestEnabled_DefaultsToTrue(t *testing.T) {
 	}
 }
 
+func TestCaptureEnabledEnv_TurnsSendingOffWhenNoOptionIsPassed(t *testing.T) {
+	t.Setenv(captureEnabledEnv, "0")
+	if NewClient("test-key").enabled {
+		t.Error("enabled = true, want false from BITFAB_CAPTURE_ENABLED=0")
+	}
+}
+
+func TestCaptureEnabledEnv_TurnsSendingOnWhenNoOptionIsPassed(t *testing.T) {
+	t.Setenv(captureEnabledEnv, "1")
+	if !NewClient("test-key").enabled {
+		t.Error("enabled = false, want true from BITFAB_CAPTURE_ENABLED=1")
+	}
+}
+
+func TestCaptureEnabledEnv_LosesToWithEnabled(t *testing.T) {
+	t.Setenv(captureEnabledEnv, "0")
+	if !NewClient("test-key", WithEnabled(true)).enabled {
+		t.Error("WithEnabled(true) should override BITFAB_CAPTURE_ENABLED=0")
+	}
+
+	t.Setenv(captureEnabledEnv, "1")
+	if NewClient("test-key", WithEnabled(false)).enabled {
+		t.Error("WithEnabled(false) should override BITFAB_CAPTURE_ENABLED=1")
+	}
+}
+
+func TestCaptureEnabledEnv_SendsNothingWhenOff(t *testing.T) {
+	t.Setenv(captureEnabledEnv, "0")
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	result, err := client.Span(context.Background(), "test-service", func(ctx context.Context) (any, error) {
+		return "executed", nil
+	})
+	client.FlushTraces(1 * time.Second)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "executed" {
+		t.Errorf("result = %v, want executed", result)
+	}
+	if requestCount != 0 {
+		t.Errorf("sent %d requests, want 0", requestCount)
+	}
+}
+
+func TestReadBooleanEnv_UnrecognizedValueIsIgnored(t *testing.T) {
+	t.Setenv(captureEnabledEnv, "maybe")
+	if _, ok := readBooleanEnv(captureEnabledEnv); ok {
+		t.Error("readBooleanEnv should not report a value for \"maybe\"")
+	}
+	if !NewClient("test-key").enabled {
+		t.Error("an unrecognized value should leave sending on")
+	}
+}
+
 func TestSpan_UnserializableOutput_DoesNotCrash(t *testing.T) {
 	server := newSpanCaptureServer(t)
 	defer server.Close()

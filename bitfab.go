@@ -128,6 +128,33 @@ type Client struct {
 	Traces *TracesClient
 }
 
+const captureEnabledEnv = "BITFAB_CAPTURE_ENABLED"
+
+var trueEnvValues = map[string]bool{"1": true, "true": true, "yes": true}
+var falseEnvValues = map[string]bool{"0": true, "false": true, "no": true}
+
+func readBooleanEnv(name string) (bool, bool) {
+	raw, present := os.LookupEnv(name)
+	if !present {
+		return false, false
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" {
+		return false, false
+	}
+	if trueEnvValues[value] {
+		return true, true
+	}
+	if falseEnvValues[value] {
+		return false, true
+	}
+	warnOnce(
+		"unrecognized-boolean-env:"+name,
+		fmt.Sprintf("%s=%q is not 0 or 1; ignoring it.", name, raw),
+	)
+	return false, false
+}
+
 // Option configures a Client.
 type Option func(*Client)
 
@@ -136,7 +163,7 @@ func WithServiceURL(url string) Option {
 	return func(c *Client) { c.serviceURL = url }
 }
 
-// WithEnabled controls whether the client sends spans. Defaults to true.
+// WithEnabled controls whether the client sends spans, overriding BITFAB_CAPTURE_ENABLED.
 // When disabled, Span still executes the callback and Start returns a no-op ActiveSpan,
 // but no data is sent to the API.
 func WithEnabled(enabled bool) Option {
@@ -165,10 +192,14 @@ func WithStrict(strict bool) Option {
 // in main, after env/godotenv has loaded), so there is no import-time
 // construction-before-env trap to defer around.
 func NewClient(apiKey string, opts ...Option) *Client {
+	enabled := true
+	if fromEnv, ok := readBooleanEnv(captureEnabledEnv); ok {
+		enabled = fromEnv
+	}
 	c := &Client{
 		apiKey:     apiKey,
 		serviceURL: DefaultServiceURL,
-		enabled:    true,
+		enabled:    enabled,
 	}
 	for _, opt := range opts {
 		opt(c)
