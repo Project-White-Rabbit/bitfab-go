@@ -261,10 +261,14 @@ func (c *Client) resolveReplayDBBranch(
 	testRunID string,
 	originalTraceID string,
 	settings map[string]any,
+	attempts ...int,
 ) (resolveDBBranchResponse, error) {
 	payload := map[string]any{
 		"testRunId": testRunID,
 		"traceId":   originalTraceID,
+	}
+	if len(attempts) > 0 && attempts[0] > 0 {
+		payload["attempt"] = attempts[0]
 	}
 	if len(settings) > 0 {
 		payload["dbBranchSettings"] = settings

@@ -9,6 +9,7 @@ import (
 type replayContextKey struct{}
 
 type replayContext struct {
+	attempt            int
 	testRunID          string
 	traceID            string
 	inputSourceSpanID  string

@@ -28,11 +28,14 @@ type Dataset struct {
 }
 
 // SaveDatasetParams names the dataset to create or update. An empty
-// Description leaves an existing description untouched.
+// Description leaves an existing description untouched unless ClearDescription
+// is true, which sends an explicit empty description. Setting a nonempty
+// Description together with ClearDescription is rejected.
 type SaveDatasetParams struct {
 	TraceFunctionKey string
 	Name             string
 	Description      string
+	ClearDescription bool
 }
 
 // SaveDatasetResult reports whether Save created the dataset or updated an
@@ -180,11 +183,14 @@ func (d *DatasetsClient) post(ctx context.Context, endpoint string, payload map[
 // Save creates a dataset, or updates the one already named this way under the
 // same trace function. The result reports which happened.
 func (d *DatasetsClient) Save(ctx context.Context, params SaveDatasetParams) (*SaveDatasetResult, error) {
+	if params.ClearDescription && params.Description != "" {
+		return nil, fmt.Errorf("bitfab: cannot set Description and ClearDescription together")
+	}
 	payload := map[string]any{
 		"traceFunctionKey": params.TraceFunctionKey,
 		"name":             params.Name,
 	}
-	if params.Description != "" {
+	if params.Description != "" || params.ClearDescription {
 		payload["description"] = params.Description
 	}
 	var result SaveDatasetResult

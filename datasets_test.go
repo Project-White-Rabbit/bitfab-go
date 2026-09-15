@@ -119,6 +119,30 @@ func TestDatasets_SaveOmitsEmptyDescription(t *testing.T) {
 	}
 }
 
+func TestDatasets_SaveClearsDescriptionExplicitly(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		dataset := testDataset()
+		dataset["description"] = ""
+		return map[string]any{"dataset": dataset, "created": false}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	result, err := client.Datasets.Save(context.Background(), SaveDatasetParams{
+		TraceFunctionKey: "checkout-agent", Name: "Refund failures", ClearDescription: true,
+	})
+	if err != nil || result.Created || result.Dataset.Description == nil || *result.Dataset.Description != "" {
+		t.Fatalf("Save = %+v, %v", result, err)
+	}
+	if value, present := server.recorded()[0].body["description"]; !present || value != "" {
+		t.Fatalf("description = %v, present = %t", value, present)
+	}
+	_, err = client.Datasets.Save(context.Background(), SaveDatasetParams{
+		TraceFunctionKey: "checkout-agent", Name: "Refund failures", Description: "new", ClearDescription: true,
+	})
+	if err == nil || len(server.recorded()) != 1 {
+		t.Fatalf("conflicting description accepted: %v", err)
+	}
+}
+
 func TestDatasets_ListAndGet(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		if r.path == "/api/sdk/datasets" {

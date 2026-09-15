@@ -1,0 +1,567 @@
+package bitfab
+
+import (
+	"context"
+	"fmt"
+	"path"
+	"reflect"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+)
+
+// SpanFinalizer changes the recorded output without changing the returned value.
+// It runs in the background; FlushTraces and Close wait for it within their timeout.
+type SpanFinalizer func(any) (any, error)
+
+// TraceOptions configures a subtree owned by one trace invocation.
+type TraceOptions struct {
+	Name, Type, TestRunID string
+	Input                 []any
+	MaxDepth, MaxSpans    *int
+	Exclude               []string
+	CaptureWhen           CaptureWhen
+	MockOnReplayDefault   bool
+	IncludeWrappers       bool
+	Finalize              SpanFinalizer
+}
+
+// NodeOptions customizes an automatically discovered function. Nil booleans inherit
+// the trace's defaults. Capture=false omits this node and reparents its descendants.
+type NodeOptions struct {
+	Name, Type, TestRunID string
+	Capture, MockOnReplay *bool
+	Finalize              SpanFinalizer
+}
+
+// MixedTracingError prevents combining opt-in spans and automatic subtrees.
+type MixedTracingError struct{ Entered, Active string }
+
+func (e *MixedTracingError) Error() string {
+	return fmt.Sprintf("bitfab: cannot enter %s instrumentation inside %s instrumentation", e.Entered, e.Active)
+}
+
+func normalizeAutoSymbol(s string) string {
+	s = strings.TrimSuffix(s, "-fm")
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		if r == '[' {
+			depth++
+			continue
+		}
+		if r == ']' {
+			depth--
+			continue
+		}
+		if depth == 0 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func autoSymbol(fn any) (string, error) {
+	if symbol, ok := fn.(string); ok && symbol != "" {
+		return normalizeAutoSymbol(symbol), nil
+	}
+	v := reflect.ValueOf(fn)
+	if !v.IsValid() || v.Kind() != reflect.Func || v.IsNil() {
+		return "", fmt.Errorf("bitfab: Node requires a function or qualified function name")
+	}
+	f := runtime.FuncForPC(v.Pointer())
+	if f == nil {
+		return "", fmt.Errorf("bitfab: could not identify node function")
+	}
+	return normalizeAutoSymbol(f.Name()), nil
+}
+
+func autoRootName(symbol, key string) string {
+	name := symbol[strings.LastIndex(symbol, "/")+1:]
+	if dot := strings.IndexByte(name, '.'); dot >= 0 {
+		name = name[dot+1:]
+	}
+	if name == "" || strings.Contains(name, ".func") {
+		return key
+	}
+	return name
+}
+
+// Node registers policy for a function discovered by bitfab-instrument. It does
+// not wrap the function or create spans outside a Trace invocation.
+func (c *Client) Node(fn any, opts NodeOptions) error {
+	if opts.Capture != nil && !*opts.Capture && opts.MockOnReplay != nil && *opts.MockOnReplay {
+		return fmt.Errorf("bitfab: a node with Capture=false cannot enable MockOnReplay")
+	}
+	if opts.Type == "" {
+		opts.Type = "custom"
+	}
+	symbol, err := autoSymbol(fn)
+	if err != nil {
+		return err
+	}
+	if opts.Type != "" && !validSpanTypes[opts.Type] {
+		return fmt.Errorf("bitfab: invalid node type %q", opts.Type)
+	}
+	c.autoMu.Lock()
+	defer c.autoMu.Unlock()
+	if c.autoNodes == nil {
+		c.autoNodes = make(map[string]NodeOptions)
+	}
+	if _, exists := c.autoNodes[symbol]; !exists {
+		autoConfiguredNodes.Add(1)
+	}
+	c.autoNodes[symbol] = opts
+	return nil
+}
+
+func (c *Client) nodeOptions(symbol string) (NodeOptions, bool) {
+	c.autoMu.RLock()
+	defer c.autoMu.RUnlock()
+	opts, ok := c.autoNodes[normalizeAutoSymbol(symbol)]
+	return opts, ok
+}
+
+type autoRoot struct {
+	client             *Client
+	key, traceID       string
+	opts               TraceOptions
+	ctx                context.Context
+	mu                 sync.Mutex
+	active, closing    bool
+	count              int
+	maxDepth, maxSpans int
+	records            map[*autoRecord]bool
+	rootRecord         *autoRecord
+	managed            *managedTraceRoot
+	complete           func()
+	completeOnce       sync.Once
+}
+
+type autoRecord struct {
+	root                                              *autoRoot
+	id, parentID, name, kind, functionName, startedAt string
+	input                                             []any
+	links                                             map[string]any
+	once                                              sync.Once
+	bodyDone                                          bool
+	mocked                                            bool
+	mockSource                                        MockSource
+	testRunID                                         string
+	enrichment                                        *spanEnrichment
+}
+
+func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any) *autoRecord {
+	root.mu.Lock()
+	defer root.mu.Unlock()
+	if !root.active {
+		return nil
+	}
+	for _, pattern := range root.opts.Exclude {
+		if matched, _ := path.Match(pattern, symbol); matched || pattern == symbol || pattern == name || pattern == symbol[strings.LastIndex(symbol, ".")+1:] {
+			return nil
+		}
+	}
+	if depth > root.maxDepth || root.count >= root.maxSpans {
+		state := createTraceState(root.traceID)
+		state.mu.Lock()
+		if state.Metadata == nil {
+			state.Metadata = map[string]any{}
+		}
+		state.Metadata["bitfabAutoTrace"] = map[string]any{"protocol": "go-auto-v1", "truncated": true, "maxDepth": root.maxDepth, "maxSpans": root.maxSpans}
+		state.mu.Unlock()
+		return nil
+	}
+	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input}
+	if parent != nil {
+		r.parentID = parent.id
+	}
+	root.count++
+	root.records[r] = true
+	return r
+}
+
+func (r *autoRecord) finish(output any, err error) {
+	r.once.Do(func() {
+		defer func() {
+			r.root.mu.Lock()
+			delete(r.root.records, r)
+			r.root.mu.Unlock()
+			r.root.tryComplete()
+		}()
+		defer func() {
+			if recover() != nil {
+				warnOnce("auto-span-send", "automatic span serialization failed; application results are unchanged")
+			}
+		}()
+		data := map[string]any{"name": r.name, "type": r.kind, "function_name": r.functionName}
+		var dropped []string
+		if r.input != nil {
+			value, fields := capValueReport(r.input)
+			data["input"] = value
+			dropped = append(dropped, fields...)
+		}
+		if output != nil {
+			value, fields := capValueReport(output)
+			data["output"] = value
+			dropped = append(dropped, fields...)
+		}
+		if err != nil {
+			data["error"] = err.Error()
+			data["error_source"] = "code"
+		}
+		for k, v := range r.links {
+			data[k] = v
+		}
+		r.enrichment.apply(data)
+		root := r.root
+		if root.managed != nil && root.rootRecord == r {
+			root.managed.mu.Lock()
+			root.managed.data = data
+			root.managed.mu.Unlock()
+		} else if state := getTraceState(root.traceID); state == nil || !state.isDropped() {
+			raw := map[string]any{"id": r.id, "trace_id": root.traceID, "started_at": r.startedAt, "ended_at": nowISOTimestamp(), "span_data": data, "span_origin": MakeSpanOrigin("trace")}
+			if r.parentID != "" {
+				raw["parent_id"] = r.parentID
+			}
+			payload := map[string]any{"id": r.id, "traceId": root.traceID, "type": "sdk-function", "source": "go-sdk-function", "sourceTraceId": root.traceID, "traceFunctionKey": root.key, "rootTraceFunctionKey": root.key, "rawSpan": raw}
+			if replay := currentReplayContext(root.ctx); replay != nil && replay.inputSourceSpanID != "" {
+				raw["input_source_span_id"] = replay.inputSourceSpanID
+			}
+			if state := getTraceState(root.traceID); state != nil && state.TestRunID != "" {
+				payload["testRunId"] = state.TestRunID
+			}
+			replay := currentReplayContext(root.ctx)
+			if replay != nil && replay.testRunID != "" {
+				payload["testRunId"] = replay.testRunID
+			}
+			if r.testRunID != "" && (replay == nil || replay.testRunID == "") {
+				payload["testRunId"] = r.testRunID
+			}
+			if r.mocked {
+				payload["mocked"] = true
+				payload["mockTarget"] = "output"
+				payload["mockSource"] = string(r.mockSource)
+			}
+			root.client.httpClient.sendExternalSpan(payload, dropped...)
+		}
+	})
+}
+
+func (root *autoRoot) tryComplete() {
+	root.mu.Lock()
+	ready := root.closing && len(root.records) == 0 && (root.managed == nil || root.complete != nil)
+	complete := root.complete
+	root.mu.Unlock()
+	if ready {
+		root.completeOnce.Do(func() {
+			if complete != nil {
+				complete()
+			} else {
+				root.client.sendTraceCompletion(root.key, root.traceID, root.rootRecord.startedAt, nowISOTimestamp())
+			}
+		})
+	}
+}
+
+func (root *autoRoot) close() {
+	root.mu.Lock()
+	root.active = false
+	root.closing = true
+	var unfinished []*autoRecord
+	for r := range root.records {
+		if !r.bodyDone {
+			r.bodyDone = true
+			unfinished = append(unfinished, r)
+		}
+	}
+	root.mu.Unlock()
+	for _, r := range unfinished {
+		r.finish(nil, fmt.Errorf("trace ended before this function completed"))
+	}
+	root.tryComplete()
+}
+
+func finishAutoRecords(records []*autoRecord, output any, err error, finalize SpanFinalizer) {
+	live := make([]*autoRecord, 0, len(records))
+	for _, r := range records {
+		r.root.mu.Lock()
+		if !r.bodyDone {
+			r.bodyDone = true
+			live = append(live, r)
+		}
+		r.root.mu.Unlock()
+	}
+	records = live
+	if len(records) == 0 {
+		return
+	}
+	finish := func() {
+		value, finalErr := output, err
+		if finalize != nil && err == nil {
+			value, finalErr = runSpanFinalizer(output, finalize)
+		}
+		for _, r := range records {
+			r.finish(value, finalErr)
+		}
+	}
+	if finalize == nil || err != nil || len(records) == 0 {
+		finish()
+		return
+	}
+	clients := map[*Client]func(){}
+	for _, r := range records {
+		if _, ok := clients[r.root.client]; !ok {
+			clients[r.root.client] = r.root.client.beginAutoFinalizer()
+		}
+	}
+	go func() {
+		defer func() {
+			for _, done := range clients {
+				done()
+			}
+		}()
+		finish()
+	}()
+}
+
+func (c *Client) beginAutoFinalizer() func() {
+	c.autoMu.Lock()
+	if c.autoPending == 0 {
+		c.autoPendingDone = make(chan struct{})
+	}
+	c.autoPending++
+	c.autoMu.Unlock()
+	return func() {
+		c.autoMu.Lock()
+		c.autoPending--
+		if c.autoPending == 0 {
+			close(c.autoPendingDone)
+		}
+		c.autoMu.Unlock()
+	}
+}
+
+func (c *Client) waitAutoFinalizers(timeout time.Duration) bool {
+	c.autoMu.RLock()
+	pending, done := c.autoPending, c.autoPendingDone
+	c.autoMu.RUnlock()
+	if pending == 0 {
+		return true
+	}
+	if timeout <= 0 {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// Trace captures calls to first-party functions compiled with bitfab-instrument.
+// Nested Trace invocations create linked independent roots except during replay
+// and seed, where they remain in the item-owned trace.
+func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceOptions) (result any, err error) {
+	if fn == nil {
+		return nil, fmt.Errorf("bitfab: Trace requires a function")
+	}
+	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxSpans != nil && *opts.MaxSpans < 0 {
+		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
+	}
+	if !c.shouldRecord(ctx) {
+		return fn(ctx)
+	}
+	previous := currentAutoScope(ctx)
+	managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot)
+	managedParent := false
+	if managed != nil {
+		managed.mu.Lock()
+		managedParent = currentSpan(ctx) != nil && currentSpan(ctx).spanID == managed.spanID
+		managed.mu.Unlock()
+	}
+	if previous != nil && previous.explicit || currentSpan(ctx) != nil && (previous == nil || len(previous.frames) == 0) && !managedParent {
+		return nil, &MixedTracingError{Entered: "trace", Active: "span"}
+	}
+	if opts.CaptureWhen == CaptureWhenNested && (previous == nil || len(previous.frames) == 0) {
+		return fn(ctx)
+	}
+	symbol, _ := autoSymbol(fn)
+	if opts.Name == "" {
+		opts.Name = autoRootName(symbol, key)
+	}
+	if opts.Type == "" {
+		opts.Type = "custom"
+	}
+	if !validSpanTypes[opts.Type] {
+		opts.Type = "custom"
+	}
+	maxDepth, maxSpans := 30, 500
+	if opts.MaxDepth != nil {
+		maxDepth = *opts.MaxDepth
+	}
+	if opts.MaxSpans != nil {
+		maxSpans = *opts.MaxSpans
+	}
+	var frames []autoFrame
+	var records []*autoRecord
+	if previous != nil {
+		frames = append(frames, previous.frames...)
+	}
+	for i, frame := range frames {
+		r := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input)
+		if r != nil {
+			records = append(records, r)
+			frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
+		}
+	}
+	var root *autoRoot
+	if len(frames) == 0 || currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
+		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxSpans: maxSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
+		if len(frames) == 0 && managed != nil && currentSpan(ctx) != nil {
+			root.traceID = currentSpan(ctx).traceID
+			root.managed = managed
+		}
+		state := createTraceState(root.traceID)
+		if state.DBSnapshotRef == nil && seedFromContext(ctx) == nil {
+			state.DBSnapshotRef = c.buildDBSnapshotRef(state.StartedAt)
+		}
+		replay := currentReplayContext(ctx)
+		if replay != nil {
+			state.TestRunID = replay.testRunID
+			state.replay = replay
+			state.InputSourceTraceID = replay.inputSourceTraceID
+		}
+		if opts.TestRunID != "" && (replay == nil || replay.testRunID == "") {
+			state.TestRunID = opts.TestRunID
+		}
+		r := &autoRecord{root: root, id: randomUUID(), name: opts.Name, kind: opts.Type, functionName: symbol, startedAt: nowISOTimestamp(), input: opts.Input, links: map[string]any{}}
+		if root.managed != nil {
+			r.id = currentSpan(ctx).spanID
+			managed.mu.Lock()
+			managed.root = root
+			managed.mu.Unlock()
+		}
+		root.rootRecord = r
+		root.records[r] = true
+		if len(frames) > 0 {
+			outer := frames[len(frames)-1].parent
+			r.links["enclosing_trace_id"] = outer.root.traceID
+			r.links["enclosing_span_id"] = outer.id
+			r.links["enclosing_trace_function_key"] = outer.root.key
+			for _, copy := range records {
+				copy.links = map[string]any{"nested_trace_id": root.traceID, "nested_trace_function_key": key, "nested_root_span_id": r.id}
+			}
+		}
+		records = append(records, r)
+		frames = append(frames, autoFrame{root: root, parent: r})
+	}
+	scope := &autoScope{frames: frames, skipName: symbol}
+	childCtx := context.WithValue(ctx, autoScopeContextKey{}, scope)
+	if len(frames) > 0 {
+		frame := frames[len(frames)-1]
+		childCtx = withSpanContext(context.WithValue(childCtx, spanStackKey{}, []spanEntry(nil)), frame.root.traceID, frame.parent.id)
+		var enrichment *spanEnrichment
+		if existing, ok := childCtx.Value(spanEnrichmentKey{}).(*spanEnrichment); ok && existing.id == frame.parent.id {
+			enrichment = existing
+		} else {
+			childCtx, enrichment = withSpanEnrichment(childCtx, frame.parent.id)
+		}
+		for _, record := range records {
+			record.enrichment = enrichment
+		}
+	}
+	autoActiveRoots.Add(1)
+	restore := pushAutoScope(scope)
+	finalize := opts.Finalize
+	defer func() {
+		p := recover()
+		restore()
+		autoActiveRoots.Add(-1)
+		if p != nil {
+			err = fmt.Errorf("panic: %v", p)
+		}
+		finishAutoRecords(records, result, err, finalize)
+		if root != nil {
+			root.close()
+		}
+		if p != nil {
+			panic(p)
+		}
+	}()
+	if root == nil && len(records) > 0 && currentReplayContext(ctx) != nil {
+		record := records[len(records)-1]
+		value, mocked, source, mockErr := record.root.client.resolveReplayMock(ctx, record.root.key, spanConfig{name: record.name, spanType: "function", input: opts.Input}, false)
+		if mocked {
+			finalize = nil
+			for _, record := range records {
+				record.mocked = mockErr == nil
+				record.mockSource = source
+			}
+			return value, mockErr
+		}
+	}
+	return fn(childCtx)
+}
+
+func prepareManagedAutoSpan(ctx context.Context, id spanIdentity) {
+	managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot)
+	if managed != nil && id.isRootSpan {
+		managed.mu.Lock()
+		managed.spanID = id.spanID
+		managed.mu.Unlock()
+	}
+}
+
+func finishManagedAutoSpan(ctx context.Context, spanID string, send func()) {
+	managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot)
+	if managed == nil {
+		send()
+		return
+	}
+	managed.mu.Lock()
+	root := managed.root
+	isRoot := managed.spanID == spanID
+	managed.mu.Unlock()
+	if root == nil || !isRoot {
+		send()
+		return
+	}
+	root.mu.Lock()
+	root.complete = send
+	root.mu.Unlock()
+	root.tryComplete()
+}
+
+func stampManagedAutoSpan(ctx context.Context, raw, payload map[string]any) {
+	managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot)
+	if managed == nil {
+		return
+	}
+	managed.mu.Lock()
+	defer managed.mu.Unlock()
+	if managed.root == nil {
+		return
+	}
+	if raw["id"] != managed.spanID {
+		return
+	}
+	data := make(map[string]any, len(managed.data)+1)
+	for key, value := range managed.data {
+		data[key] = value
+	}
+	if _, hasInput := data["input"]; !hasInput {
+		if original, ok := raw["span_data"].(map[string]any); ok {
+			if input, present := original["input"]; present {
+				data["input"] = input
+			}
+		}
+	}
+	raw["span_data"] = data
+	raw["span_origin"] = MakeSpanOrigin("trace")
+	payload["rootTraceFunctionKey"] = managed.root.key
+}

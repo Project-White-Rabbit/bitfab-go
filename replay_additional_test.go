@@ -213,6 +213,14 @@ func TestReplaySetupFailuresRemainItemScoped(t *testing.T) {
 			want: "adapter rejected input",
 		},
 		{
+			name: "adapter panic",
+			fn:   func(string, int) {},
+			options: &ReplayOptions{AdaptInputs: func([]any, AdaptContext) ([]any, error) {
+				panic("adapter rejected input")
+			}},
+			want: "replay input adapter panicked: adapter rejected input",
+		},
+		{
 			name: "adapted arity mismatch",
 			fn:   func(string, int) {},
 			options: &ReplayOptions{AdaptInputs: func([]any, AdaptContext) ([]any, error) {
@@ -279,7 +287,7 @@ func TestWaitForReplayPersistencePollsUntilComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waitForReplayPersistence: %v", err)
 	}
-	if calls.Load() != 2 || len(persisted) != 0 {
+	if calls.Load() != 2 || len(persisted) != 1 || persisted["local-1"] != "server-1" {
 		t.Fatalf("calls=%d persisted=%#v", calls.Load(), persisted)
 	}
 }

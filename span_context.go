@@ -44,12 +44,15 @@ type TraceState struct {
 	Name               string
 	TestRunID          string
 	InputSourceTraceID string
+	IngestionType      string
 	DBSnapshotRef      *DBSnapshotRef
 	Metadata           map[string]any
 	Contexts           []ContextEntry
 	StartedAt          string
 	Dropped            bool
 	replay             *replayContext
+	pendingFinalizers  int
+	completion         func()
 	mu                 sync.Mutex
 }
 
@@ -108,8 +111,9 @@ func clearAllTraceStates() {
 
 // CurrentSpan identifies the current active span.
 type CurrentSpan struct {
-	id      string
-	traceID string
+	enrichment *spanEnrichment
+	id         string
+	traceID    string
 }
 
 // ID returns the canonical Bitfab span ID, or an empty string outside a span.
@@ -137,7 +141,11 @@ func GetCurrentSpan(ctx context.Context) *CurrentSpan {
 	if entry == nil {
 		return nil
 	}
-	return &CurrentSpan{id: entry.spanID, traceID: entry.traceID}
+	state, _ := ctx.Value(spanEnrichmentKey{}).(*spanEnrichment)
+	if state != nil && state.id != entry.spanID {
+		state = nil
+	}
+	return &CurrentSpan{id: entry.spanID, traceID: entry.traceID, enrichment: state}
 }
 
 // CurrentTrace provides a handle to the current active trace for setting trace-level context.

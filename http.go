@@ -20,6 +20,8 @@ var carrierSubmissionSequence atomic.Uint64
 type httpClient struct {
 	traceCompletion traceCompletion
 	apiKey          string
+	apiKeyFunc      func() string
+	simulationPlan  *simulationPlan
 	serviceURL      string
 	client          *http.Client
 
@@ -190,17 +192,27 @@ func (h *httpClient) sendPrepared(
 	prepared preparedRequest,
 	timeout time.Duration,
 ) (map[string]any, error) {
+	return h.sendPreparedMethod(ctx, http.MethodPost, endpoint, prepared, timeout)
+}
+
+func (h *httpClient) sendPreparedMethod(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	prepared preparedRequest,
+	timeout time.Duration,
+) (map[string]any, error) {
 	client := h.client
 	if timeout > 0 {
 		client = &http.Client{Timeout: timeout}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", h.serviceURL+endpoint, bytes.NewReader(prepared.body))
+	req, err := http.NewRequestWithContext(ctx, method, h.serviceURL+endpoint, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, fmt.Errorf("bitfab: failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+h.apiKey)
+	req.Header.Set("Authorization", "Bearer "+h.resolveAPIKey())
 	if prepared.contentEncoding != "" {
 		req.Header.Set("Content-Encoding", prepared.contentEncoding)
 	}
@@ -233,11 +245,16 @@ func (h *httpClient) sendPrepared(
 }
 
 func (h *httpClient) get(ctx context.Context, endpoint string, result any) error {
+	return h.getWithConnectionClose(ctx, endpoint, result, false)
+}
+
+func (h *httpClient) getWithConnectionClose(ctx context.Context, endpoint string, result any, connectionClose bool) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", h.serviceURL+endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("bitfab: failed to create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+h.apiKey)
+	req.Header.Set("Authorization", "Bearer "+h.resolveAPIKey())
+	req.Close = connectionClose
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -313,12 +330,27 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, me
 
 // sendExternalSpan queues a span payload on this client's trace transport.
 func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
-	ref := carrierRefForPayload(payload)
-	if ref != nil && ref.spanID != "" {
-		h.traceCompletion.record(ref.traceID, ref.spanID)
+	if raw, ok := payload["rawSpan"].(map[string]any); ok && raw["span_origin"] == nil {
+		clonedRaw := make(map[string]any, len(raw)+1)
+		for key, value := range raw {
+			clonedRaw[key] = value
+		}
+		clonedRaw["span_origin"] = MakeSpanOrigin("span")
+		cloned := make(map[string]any, len(payload))
+		for key, value := range payload {
+			cloned[key] = value
+		}
+		cloned["rawSpan"] = clonedRaw
+		payload = cloned
 	}
-	h.recordSubmittedCarrier(ref)
-	h.submit(operationExternalSpan, payload, carrierMeta{ref: ref}, extraDropped...)
+	h.simulationPlan.sendSpan(payload, func(record map[string]any) {
+		ref := carrierRefForPayload(record)
+		if ref != nil && ref.spanID != "" {
+			h.traceCompletion.record(ref.traceID, ref.spanID)
+		}
+		h.recordSubmittedCarrier(ref)
+		h.submit(operationExternalSpan, record, carrierMeta{ref: ref}, extraDropped...)
+	})
 }
 
 func carrierRefForPayload(payload map[string]any) *carrierRef {
@@ -478,47 +510,56 @@ func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryR
 
 // sendExternalTrace queues a trace payload on this client's trace transport.
 func (h *httpClient) sendExternalTrace(payload map[string]any) {
-	ref := carrierRefForPayload(payload)
-	if completed, _ := payload["completed"].(bool); !completed {
-		if ref != nil {
-			h.traceCompletion.open(ref.traceID)
+	h.simulationPlan.sendTrace(payload, func(record map[string]any) {
+		ref := carrierRefForPayload(record)
+		if completed, _ := record["completed"].(bool); !completed {
+			if ref != nil {
+				h.traceCompletion.open(ref.traceID)
+			}
+			ref = nil
 		}
-		ref = nil
-	}
-	if ref != nil {
+		if ref == nil {
+			h.submit(operationExternalTrace, record, carrierMeta{})
+			return
+		}
 		h.traceCompletion.close(ref.traceID, func(count int) {
 			defer func() {
 				if recover() != nil {
 					warnOnce("trace-completion-submit", "trace completion could not be queued")
 				}
 			}()
-			counted := make(map[string]any, len(payload)+1)
-			for key, value := range payload {
+			counted := make(map[string]any, len(record)+1)
+			for key, value := range record {
 				counted[key] = value
 			}
 			counted["expectedSpanCount"] = count
 			h.recordSubmittedCarrier(ref)
 			h.submit(operationExternalTrace, counted, carrierMeta{ref: ref})
-		}, payload["dropped"] == true)
-		return
-	}
-	h.submit(operationExternalTrace, payload, carrierMeta{ref: ref})
+		}, record["dropped"] == true)
+	})
 }
 
 // flush drains this client's transport within timeout. It reports false when an
 // export failed or the deadline expired.
 func (h *httpClient) flush(timeout time.Duration) bool {
+	deadline := time.Now().Add(max(timeout, 0))
+	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout))
+	timeout = max(time.Until(deadline), 0)
 	h.transportMu.Lock()
 	transport := h.transport
 	h.transportMu.Unlock()
 	if transport == nil {
-		return true
+		return released
 	}
-	return transport.flush(timeout)
+	return transport.flush(timeout) && released
 }
 
 // close flushes and permanently shuts down this client's transport. Idempotent.
 func (h *httpClient) close(timeout time.Duration) bool {
+	deadline := time.Now().Add(max(timeout, 0))
+	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout))
+	h.simulationPlan.stop()
+	timeout = max(time.Until(deadline), 0)
 	h.transportMu.Lock()
 	if h.closed {
 		h.transportMu.Unlock()
@@ -530,7 +571,7 @@ func (h *httpClient) close(timeout time.Duration) bool {
 	h.transportMu.Unlock()
 
 	if transport == nil {
-		return true
+		return released
 	}
-	return transport.shutdown(timeout)
+	return transport.shutdown(timeout) && released
 }

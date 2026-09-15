@@ -131,7 +131,7 @@ func TestSpan_BasicExecution(t *testing.T) {
 	}
 }
 
-func TestSpan_PanicDoesNotBlockTraceCompletion(t *testing.T) {
+func TestSpan_PanicRecordsErrorAndDoesNotBlockTraceCompletion(t *testing.T) {
 	sink := &carrierSink{}
 	server := newCarrierCaptureServer(t, sink)
 	defer server.Close()
@@ -162,12 +162,12 @@ func TestSpan_PanicDoesNotBlockTraceCompletion(t *testing.T) {
 	}
 
 	spans := sink.spanPayloads()
-	if len(spans) != 1 {
-		t.Fatalf("span count = %d, want 1", len(spans))
+	if len(spans) != 2 {
+		t.Fatalf("span count = %d, want 2", len(spans))
 	}
 	completion := sink.lastTracePayload()
-	if completion["expectedSpanCount"] != float64(1) {
-		t.Fatalf("expected count = %v, want 1", completion["expectedSpanCount"])
+	if completion["expectedSpanCount"] != float64(2) {
+		t.Fatalf("expected count = %v, want 2", completion["expectedSpanCount"])
 	}
 }
 
@@ -1405,7 +1405,7 @@ func TestStart_ContextAccumulation(t *testing.T) {
 func TestNewClient_EmptyAPIKeyAutoDisables(t *testing.T) {
 	t.Setenv("BITFAB_API_KEY", "") // ignore any ambient key so the fallback is empty
 	client := NewClient("")
-	if client.enabled {
+	if client.CaptureEnabled() {
 		t.Error("client with empty apiKey should be auto-disabled")
 	}
 }
@@ -1413,7 +1413,7 @@ func TestNewClient_EmptyAPIKeyAutoDisables(t *testing.T) {
 func TestNewClient_WhitespaceAPIKeyAutoDisables(t *testing.T) {
 	t.Setenv("BITFAB_API_KEY", "")
 	client := NewClient("   ")
-	if client.enabled {
+	if client.CaptureEnabled() {
 		t.Error("client with whitespace apiKey should be auto-disabled")
 	}
 }
@@ -1457,8 +1457,8 @@ func TestNewClient_FallsBackToEnvAPIKey(t *testing.T) {
 	if !client.enabled {
 		t.Error("client should be enabled when key comes from the environment")
 	}
-	if client.apiKey != "env-key" {
-		t.Errorf("apiKey = %q, want env-key", client.apiKey)
+	if client.resolveAPIKey() != "env-key" {
+		t.Errorf("resolved key = %q, want env-key", client.resolveAPIKey())
 	}
 }
 
@@ -1485,7 +1485,7 @@ func TestNewClient_StrictPanicsWithoutKey(t *testing.T) {
 			t.Error("strict client with no key should panic")
 		}
 	}()
-	NewClient("", WithStrict(true))
+	NewClient("", WithStrict(true)).CaptureEnabled()
 }
 
 func TestNewClient_StrictDoesNotPanicWithKey(t *testing.T) {

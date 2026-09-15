@@ -30,7 +30,6 @@ package bitfab
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"reflect"
@@ -113,19 +112,41 @@ func nowISOTimestamp() string {
 
 // Client is the main entry point for creating spans.
 type Client struct {
-	apiKey          string
-	serviceURL      string
-	enabled         bool
-	strict          bool
-	httpClient      *httpClient
-	mockOverridesMu sync.RWMutex
-	mockOverrides   []MockOverride
+	dbSnapshot             *DBSnapshotConfig
+	bamlExecutor           BAMLExecutor
+	bamlEnv                map[string]string
+	apiKey                 string
+	apiKeyFunc             func() string
+	apiKeyMu               sync.Mutex
+	resolvedAPIKey         string
+	apiKeyWarned           bool
+	captureDisabled        bool
+	simulationPlanDisabled bool
+	requestTimeout         time.Duration
+	serviceURL             string
+	enabled                bool
+	strict                 bool
+	httpClient             *httpClient
+	mockOverridesMu        sync.RWMutex
+	mockOverrides          []MockOverride
+	autoMu                 sync.RWMutex
+	autoNodes              map[string]NodeOptions
+	autoPending            int
+	autoPendingDone        chan struct{}
+	closeMu                sync.Mutex
+	closeDone              chan struct{}
+	closeResult            bool
 
 	// Datasets creates, reads, and modifies the organization's datasets.
 	Datasets *DatasetsClient
-
-	// Traces searches traces for the authenticated organization.
+	// AssertionCategories manages organization-scoped assertion groupings.
+	AssertionCategories *AssertionCategoriesClient
+	// Traces searches traces and reads or writes their assertions.
 	Traces *TracesClient
+	// Labels reads and writes trace and assertion verdicts.
+	Labels *LabelsClient
+	// Graders reads the individual verdicts recorded by automated graders.
+	Graders *GradersClient
 }
 
 const captureEnabledEnv = "BITFAB_CAPTURE_ENABLED"
@@ -163,34 +184,50 @@ func WithServiceURL(url string) Option {
 	return func(c *Client) { c.serviceURL = url }
 }
 
-// WithEnabled controls whether the client sends spans, overriding BITFAB_CAPTURE_ENABLED.
-// When disabled, Span still executes the callback and Start returns a no-op ActiveSpan,
-// but no data is sent to the API.
+// WithEnabled is a deprecated alias for WithCaptureEnabled. Replay and seed
+// execution still record when ordinary capture is disabled.
 func WithEnabled(enabled bool) Option {
-	return func(c *Client) { c.enabled = enabled }
+	return func(c *Client) {
+		warnOnce("enabled-deprecated", "WithEnabled is deprecated; use WithCaptureEnabled")
+		c.enabled = enabled
+	}
+}
+
+// WithCaptureEnabled controls ordinary tracing while preserving replay and seed capture.
+func WithCaptureEnabled(enabled bool) Option {
+	return func(c *Client) { c.captureDisabled = !enabled }
+}
+
+// WithAPIKeyFunc resolves credentials at first use, after application setup.
+func WithAPIKeyFunc(resolve func() string) Option {
+	return func(c *Client) { c.apiKeyFunc = resolve; c.apiKey = "" }
+}
+
+// WithSimulationPlan controls background simulation-plan content policy reads.
+func WithSimulationPlan(enabled bool) Option {
+	return func(c *Client) { c.simulationPlanDisabled = !enabled }
+}
+
+// WithTimeout sets the default HTTP request timeout.
+func WithTimeout(timeout time.Duration) Option {
+	return func(c *Client) { c.requestTimeout = timeout }
 }
 
 // WithAPIKey sets the API key. Equivalent to the apiKey argument of NewClient,
 // useful when constructing purely via options; whichever is set last wins.
 func WithAPIKey(apiKey string) Option {
-	return func(c *Client) { c.apiKey = apiKey }
+	return func(c *Client) { c.apiKey = apiKey; c.apiKeyFunc = nil }
 }
 
-// WithStrict makes an unresolvable API key a fatal misconfiguration: NewClient
-// panics instead of disabling tracing quietly. Off by default so a missing
-// telemetry key never crashes the host app; turn it on in standalone programs
-// where an untraced run is a failure you want surfaced immediately.
+// WithStrict makes a missing API key panic at first use. Client construction
+// remains lazy so environment loading can follow package initialization.
 func WithStrict(strict bool) Option {
 	return func(c *Client) { c.strict = strict }
 }
 
 // NewClient creates a new Bitfab client.
 //
-// If no apiKey is supplied (empty argument and no WithAPIKey), the key is read
-// from the BITFAB_API_KEY environment variable. Unlike the JS/Python SDKs, Go
-// resolves the key eagerly here: the client is constructed explicitly (normally
-// in main, after env/godotenv has loaded), so there is no import-time
-// construction-before-env trap to defer around.
+// Credentials are resolved at first use and a successful resolution is cached.
 func NewClient(apiKey string, opts ...Option) *Client {
 	enabled := true
 	if fromEnv, ok := readBooleanEnv(captureEnabledEnv); ok {
@@ -204,19 +241,17 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	for _, opt := range opts {
 		opt(c)
 	}
-	if strings.TrimSpace(c.apiKey) == "" {
-		c.apiKey = os.Getenv("BITFAB_API_KEY")
-	}
-	if c.enabled && strings.TrimSpace(c.apiKey) == "" {
-		if c.strict {
-			panic("bitfab: no API key resolved. Set BITFAB_API_KEY or pass an apiKey to NewClient.")
-		}
-		log.Println("Bitfab: apiKey is empty - tracing is disabled. Provide a valid API key to enable tracing.")
-		c.enabled = false
-	}
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
+	c.httpClient.apiKeyFunc = c.resolveAPIKey
+	c.httpClient.simulationPlan = newSimulationPlan(c.httpClient.getSimulationPlan, !c.simulationPlanDisabled)
+	if c.requestTimeout > 0 {
+		c.httpClient.client.Timeout = c.requestTimeout
+	}
 	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
+	c.AssertionCategories = &AssertionCategoriesClient{httpClient: c.httpClient}
 	c.Traces = &TracesClient{httpClient: c.httpClient}
+	c.Labels = &LabelsClient{httpClient: c.httpClient}
+	c.Graders = &GradersClient{httpClient: c.httpClient}
 	startCommitRefResolution()
 	return c
 }
@@ -269,6 +304,8 @@ type SpanFunc func(ctx context.Context) (any, error)
 type SpanOption func(*spanConfig)
 
 type spanConfig struct {
+	finalize       SpanFinalizer
+	testRunID      string
 	name           string
 	spanType       string
 	functionName   string
@@ -305,6 +342,18 @@ func WithInput(args ...any) SpanOption {
 			c.input = args
 		}
 	}
+}
+
+// WithFinalize records a serializable view of the returned value asynchronously.
+// The original value returns unchanged. FlushTraces and Close await finalization.
+func WithFinalize(finalize SpanFinalizer) SpanOption {
+	return func(c *spanConfig) { c.finalize = finalize }
+}
+
+// WithTestRunID attributes a span and the trace it starts to a test run.
+// Replay attribution takes precedence so items remain in their experiment.
+func WithTestRunID(testRunID string) SpanOption {
+	return func(c *spanConfig) { c.testRunID = testRunID }
 }
 
 // WithCaptureWhen controls whether a span may start a new trace.
@@ -356,10 +405,13 @@ func normalizeCaptureWhen(captureWhen CaptureWhen, traceFunctionKey string) Capt
 // Use WithInput to capture input data.
 // If fn returns an error, it is captured in the span data and returned to the caller.
 func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc, opts ...SpanOption) (any, error) {
-	if !c.enabled {
+	if !c.shouldRecord(ctx) {
 		return fn(ctx)
 	}
 
+	if err := checkMixedAutoSpan(ctx); err != nil {
+		return nil, err
+	}
 	cfg := spanConfig{
 		name:        traceFunctionKey,
 		spanType:    "custom",
@@ -392,18 +444,20 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		return fn(ctx)
 	}
 
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			c.httpClient.traceCompletion.abort(id.traceID, id.spanID)
-			panic(recovered)
-		}
-		c.httpClient.traceCompletion.end(id.traceID, id.spanID)
-	}()
+	replayAtStart := currentReplayContext(ctx)
+	if id.isRootSpan && cfg.testRunID != "" && (replayAtStart == nil || replayAtStart.testRunID == "") {
+		state := getTraceState(id.traceID)
+		state.mu.Lock()
+		state.TestRunID = cfg.testRunID
+		state.mu.Unlock()
+	}
+	prepareManagedAutoSpan(ctx, id)
 	startedAt := nowISOTimestamp()
 
 	// Execute fn with the new span pushed onto the context stack, unless replay
 	// selected this child span for recorded or overridden output substitution.
 	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
+	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
 	result, intercepted, mockSource, mockErr := c.resolveReplayMock(
 		ctx,
 		traceFunctionKey,
@@ -412,86 +466,105 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	)
 	mocked := intercepted && mockErr == nil
 	fnErr := mockErr
+	var fnPanic any
 	if !intercepted {
-		result, fnErr = fn(childCtx)
+		func() {
+			defer c.beginExplicitAutoScope(ctx)()
+			defer func() { fnPanic = recover() }()
+			result, fnErr = fn(childCtx)
+		}()
 	}
-
-	endedAt := nowISOTimestamp()
+	if fnPanic != nil {
+		fnErr = fmt.Errorf("panic: %v", fnPanic)
+	}
 
 	// Build and send span data - wrapped in a closure so a panic here
 	// never crashes the host app. The user's result/error is always returned.
-	func() {
-		defer func() { recover() }()
+	c.finalizeSpanOutput(id.traceID, cfg.finalize, result, fnErr, intercepted, func(recordedResult any, recordedErr error) {
+		defer c.httpClient.traceCompletion.end(id.traceID, id.spanID)
+		finishManagedAutoSpan(ctx, id.spanID, func() {
+			endedAt := nowISOTimestamp()
+			defer func() { recover() }()
 
-		spanData := map[string]any{
-			"name": cfg.name,
-			"type": cfg.spanType,
-		}
-		if cfg.functionName != "" {
-			spanData["function_name"] = cfg.functionName
-		}
-		var dropped []string
-		if cfg.input != nil {
-			v, d := capValueReport(cfg.input)
-			spanData["input"] = v
-			dropped = append(dropped, d...)
-		}
-		if result != nil {
-			v, d := capValueReport(result)
-			spanData["output"] = v
-			dropped = append(dropped, d...)
-		}
-		if fnErr != nil {
-			spanData["error"] = fnErr.Error()
-			spanData["error_source"] = "code"
-		}
-
-		rawSpan := map[string]any{
-			"id":         id.spanID,
-			"trace_id":   id.traceID,
-			"started_at": startedAt,
-			"ended_at":   endedAt,
-			"span_data":  spanData,
-		}
-		if id.parentSpanID != "" {
-			rawSpan["parent_id"] = id.parentSpanID
-		}
-		replay := currentReplayContext(ctx)
-		if replay != nil && replay.inputSourceSpanID != "" {
-			rawSpan["input_source_span_id"] = replay.inputSourceSpanID
-		}
-
-		// If drop() was called on this trace, suppress the span PAYLOAD upload
-		// for every span that completes after the flag was set. The trace
-		// completion still rides out with dropped: true (see
-		// sendTraceCompletion), so the server scrubs any sibling spans that
-		// already raced out before the flag was set.
-		if ts := getTraceState(id.traceID); ts == nil || !ts.isDropped() {
-			payload := map[string]any{
-				"id":               id.spanID,
-				"traceId":          id.traceID,
-				"type":             "sdk-function",
-				"source":           "go-sdk-function",
-				"sourceTraceId":    id.traceID,
-				"traceFunctionKey": traceFunctionKey,
-				"rawSpan":          rawSpan,
+			spanData := map[string]any{
+				"name": cfg.name,
+				"type": cfg.spanType,
 			}
-			if replay != nil && replay.testRunID != "" {
-				payload["testRunId"] = replay.testRunID
+			if cfg.functionName != "" {
+				spanData["function_name"] = cfg.functionName
 			}
-			if mocked {
-				payload["mocked"] = true
-				payload["mockTarget"] = "output"
-				payload["mockSource"] = string(mockSource)
+			var dropped []string
+			if cfg.input != nil {
+				v, d := capValueReport(cfg.input)
+				spanData["input"] = v
+				dropped = append(dropped, d...)
 			}
-			c.httpClient.sendExternalSpan(payload, dropped...)
-		}
+			if recordedResult != nil {
+				v, d := capValueReport(recordedResult)
+				spanData["output"] = v
+				dropped = append(dropped, d...)
+			}
+			if recordedErr != nil {
+				spanData["error"] = recordedErr.Error()
+				spanData["error_source"] = "code"
+			}
 
-		if id.isRootSpan {
-			c.sendTraceCompletion(traceFunctionKey, id.traceID, startedAt, endedAt)
-		}
-	}()
+			enrichment.apply(spanData)
+			rawSpan := map[string]any{
+				"id":         id.spanID,
+				"trace_id":   id.traceID,
+				"started_at": startedAt,
+				"ended_at":   endedAt,
+				"span_data":  spanData,
+			}
+			if id.parentSpanID != "" {
+				rawSpan["parent_id"] = id.parentSpanID
+			}
+			replay := currentReplayContext(ctx)
+			if replay != nil && replay.inputSourceSpanID != "" {
+				rawSpan["input_source_span_id"] = replay.inputSourceSpanID
+			}
 
+			// If drop() was called on this trace, suppress the span PAYLOAD upload
+			// for every span that completes after the flag was set. The trace
+			// completion still rides out with dropped: true (see
+			// sendTraceCompletion), so the server scrubs any sibling spans that
+			// already raced out before the flag was set.
+			if ts := getTraceState(id.traceID); ts == nil || !ts.isDropped() {
+				payload := map[string]any{
+					"id":               id.spanID,
+					"traceId":          id.traceID,
+					"type":             "sdk-function",
+					"source":           "go-sdk-function",
+					"sourceTraceId":    id.traceID,
+					"traceFunctionKey": traceFunctionKey,
+					"rawSpan":          rawSpan,
+				}
+				if replay != nil && replay.testRunID != "" {
+					payload["testRunId"] = replay.testRunID
+				}
+				if cfg.testRunID != "" && (replay == nil || replay.testRunID == "") {
+					payload["testRunId"] = cfg.testRunID
+				}
+				if mocked {
+					payload["mocked"] = true
+					payload["mockTarget"] = "output"
+					payload["mockSource"] = string(mockSource)
+				}
+				stampManagedAutoSpan(ctx, rawSpan, payload)
+				c.httpClient.sendExternalSpan(payload, dropped...)
+			}
+
+			if id.isRootSpan {
+				c.sendTraceCompletion(traceFunctionKey, id.traceID, startedAt, endedAt)
+			}
+		})
+
+	})
+
+	if fnPanic != nil {
+		panic(fnPanic)
+	}
 	return result, fnErr
 }
 
@@ -528,6 +601,8 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 	traceID := randomUUID()
 	if parent != nil {
 		traceID = parent.traceID
+	} else if seed := seedFromContext(ctx); seed != nil {
+		traceID = seed.traceID
 	} else if replay := currentReplayContext(ctx); replay != nil && replay.traceID != "" {
 		traceID = replay.traceID
 	}
@@ -541,7 +616,7 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 
 	if isRootSpan && getTraceState(traceID) == nil {
 		state := createTraceState(traceID)
-		state.DBSnapshotRef = &DBSnapshotRef{SDKWallClockBeforeFn: state.StartedAt}
+		state.DBSnapshotRef = c.buildDBSnapshotRef(state.StartedAt)
 		if replay := currentReplayContext(ctx); replay != nil {
 			state.TestRunID = replay.testRunID
 			state.InputSourceTraceID = replay.inputSourceTraceID
@@ -565,7 +640,10 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 //
 // This is the recommended way to instrument existing functions without restructuring them.
 func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName string, opts ...SpanOption) (context.Context, *ActiveSpan) {
-	if !c.enabled {
+	if err := checkMixedAutoSpan(ctx); err != nil {
+		panic(err)
+	}
+	if !c.shouldRecord(ctx) {
 		return ctx, &ActiveSpan{}
 	}
 
@@ -599,8 +677,10 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 	}
 
 	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
+	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
 
 	span := &ActiveSpan{
+		enrichment:       enrichment,
 		client:           c,
 		traceFunctionKey: traceFunctionKey,
 		traceID:          id.traceID,
@@ -615,25 +695,73 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 		span.inputSourceSpanID = replay.inputSourceSpanID
 	}
 
+	replayAtStart := currentReplayContext(ctx)
+	if cfg.testRunID != "" && (replayAtStart == nil || replayAtStart.testRunID == "") {
+		span.testRunID = cfg.testRunID
+		if id.isRootSpan {
+			state := getTraceState(id.traceID)
+			state.mu.Lock()
+			state.TestRunID = cfg.testRunID
+			state.mu.Unlock()
+		}
+	}
+	span.autoRestore = c.beginExplicitAutoScope(ctx)
 	return childCtx, span
 }
 
 // FlushTraces drains this client's pending span deliveries within timeout.
 // It reports false when an export failed or the deadline expired.
 func (c *Client) FlushTraces(timeout time.Duration) bool {
-	return c.httpClient.flush(timeout)
+	started := time.Now()
+	settled := c.waitAutoFinalizers(timeout)
+	flushed := c.httpClient.flush(max(timeout-time.Since(started), 0))
+	return settled && flushed
 }
 
 // Close flushes this client's pending spans and permanently shuts down its
 // OpenTelemetry worker. It is idempotent, and reports false when an export
 // failed or the deadline expired. A closed client no longer records spans.
 func (c *Client) Close(timeout time.Duration) bool {
-	return c.httpClient.close(timeout)
+	started := time.Now()
+	c.closeMu.Lock()
+	if c.closeDone != nil {
+		done := c.closeDone
+		c.closeMu.Unlock()
+		timer := time.NewTimer(max(timeout, 0))
+		defer timer.Stop()
+		select {
+		case <-done:
+			c.closeMu.Lock()
+			result := c.closeResult
+			c.closeMu.Unlock()
+			return result
+		default:
+		}
+		select {
+		case <-done:
+			c.closeMu.Lock()
+			result := c.closeResult
+			c.closeMu.Unlock()
+			return result
+		case <-timer.C:
+			return false
+		}
+	}
+	c.closeDone = make(chan struct{})
+	c.closeMu.Unlock()
+	settled := c.waitAutoFinalizers(timeout)
+	closed := c.httpClient.close(max(timeout-time.Since(started), 0))
+	c.closeMu.Lock()
+	c.closeResult = settled && closed
+	close(c.closeDone)
+	c.closeMu.Unlock()
+	return settled && closed
 }
 
 // GetFunction returns a Function bound to the given traceFunctionKey.
 // This provides a fluent API for creating multiple spans under the same key.
 func (c *Client) GetFunction(traceFunctionKey string) *Function {
+	c.httpClient.simulationPlan.refresh()
 	return &Function{
 		client:           c,
 		traceFunctionKey: traceFunctionKey,
@@ -684,6 +812,8 @@ func (f *Function) Start(ctx context.Context, spanName string, opts ...SpanOptio
 // ActiveSpan represents an in-progress span created by Start.
 // Call End() to complete the span and send it to the API.
 type ActiveSpan struct {
+	enrichment        *spanEnrichment
+	autoRestore       func()
 	client            *Client
 	traceFunctionKey  string
 	traceID           string
@@ -769,78 +899,84 @@ func (s *ActiveSpan) End() {
 		return
 	}
 	s.once.Do(func() {
+		if s.autoRestore != nil {
+			defer s.autoRestore()
+		}
 		defer func() { recover() }() // Never crash the host app
-		defer s.client.httpClient.traceCompletion.end(s.traceID, s.spanID)
+		s.client.finalizeSpanOutput(s.traceID, s.cfg.finalize, s.output, s.spanErr, false, func(recordedOutput any, recordedErr error) {
+			defer s.client.httpClient.traceCompletion.end(s.traceID, s.spanID)
+			defer func() { recover() }()
+			endedAt := nowISOTimestamp()
 
-		endedAt := nowISOTimestamp()
-
-		spanData := map[string]any{
-			"name": s.cfg.name,
-			"type": s.cfg.spanType,
-		}
-		if s.cfg.functionName != "" {
-			spanData["function_name"] = s.cfg.functionName
-		}
-		var dropped []string
-		if s.input != nil {
-			v, d := capValueReport(s.input)
-			spanData["input"] = v
-			dropped = append(dropped, d...)
-		}
-		if s.output != nil {
-			v, d := capValueReport(s.output)
-			spanData["output"] = v
-			dropped = append(dropped, d...)
-		}
-		if s.spanErr != nil {
-			spanData["error"] = s.spanErr.Error()
-			spanData["error_source"] = "code"
-		}
-		if len(s.contexts) > 0 {
-			spanData["contexts"] = s.contexts
-		}
-		if s.prompt != "" {
-			spanData["prompt"] = s.prompt
-		}
-
-		rawSpan := map[string]any{
-			"id":         s.spanID,
-			"trace_id":   s.traceID,
-			"started_at": s.startedAt,
-			"ended_at":   endedAt,
-			"span_data":  spanData,
-		}
-		if s.parentSpanID != "" {
-			rawSpan["parent_id"] = s.parentSpanID
-		}
-		if s.inputSourceSpanID != "" {
-			rawSpan["input_source_span_id"] = s.inputSourceSpanID
-		}
-
-		// If drop() was called on this trace, suppress the span PAYLOAD upload
-		// for every span that completes after the flag was set. The trace
-		// completion still rides out with dropped: true (see
-		// sendTraceCompletion), so the server scrubs any sibling spans that
-		// already raced out before the flag was set.
-		if ts := getTraceState(s.traceID); ts == nil || !ts.isDropped() {
-			payload := map[string]any{
-				"id":               s.spanID,
-				"traceId":          s.traceID,
-				"type":             "sdk-function",
-				"source":           "go-sdk-function",
-				"sourceTraceId":    s.traceID,
-				"traceFunctionKey": s.traceFunctionKey,
-				"rawSpan":          rawSpan,
+			spanData := map[string]any{
+				"name": s.cfg.name,
+				"type": s.cfg.spanType,
 			}
-			if s.testRunID != "" {
-				payload["testRunId"] = s.testRunID
+			if s.cfg.functionName != "" {
+				spanData["function_name"] = s.cfg.functionName
 			}
-			s.client.httpClient.sendExternalSpan(payload, dropped...)
-		}
+			var dropped []string
+			if s.input != nil {
+				v, d := capValueReport(s.input)
+				spanData["input"] = v
+				dropped = append(dropped, d...)
+			}
+			if recordedOutput != nil {
+				v, d := capValueReport(recordedOutput)
+				spanData["output"] = v
+				dropped = append(dropped, d...)
+			}
+			if recordedErr != nil {
+				spanData["error"] = recordedErr.Error()
+				spanData["error_source"] = "code"
+			}
+			if len(s.contexts) > 0 {
+				spanData["contexts"] = s.contexts
+			}
+			if s.prompt != "" {
+				spanData["prompt"] = s.prompt
+			}
 
-		if s.isRootSpan {
-			s.client.sendTraceCompletion(s.traceFunctionKey, s.traceID, s.startedAt, endedAt)
-		}
+			s.enrichment.apply(spanData)
+			rawSpan := map[string]any{
+				"id":         s.spanID,
+				"trace_id":   s.traceID,
+				"started_at": s.startedAt,
+				"ended_at":   endedAt,
+				"span_data":  spanData,
+			}
+			if s.parentSpanID != "" {
+				rawSpan["parent_id"] = s.parentSpanID
+			}
+			if s.inputSourceSpanID != "" {
+				rawSpan["input_source_span_id"] = s.inputSourceSpanID
+			}
+
+			// If drop() was called on this trace, suppress the span PAYLOAD upload
+			// for every span that completes after the flag was set. The trace
+			// completion still rides out with dropped: true (see
+			// sendTraceCompletion), so the server scrubs any sibling spans that
+			// already raced out before the flag was set.
+			if ts := getTraceState(s.traceID); ts == nil || !ts.isDropped() {
+				payload := map[string]any{
+					"id":               s.spanID,
+					"traceId":          s.traceID,
+					"type":             "sdk-function",
+					"source":           "go-sdk-function",
+					"sourceTraceId":    s.traceID,
+					"traceFunctionKey": s.traceFunctionKey,
+					"rawSpan":          rawSpan,
+				}
+				if s.testRunID != "" {
+					payload["testRunId"] = s.testRunID
+				}
+				s.client.httpClient.sendExternalSpan(payload, dropped...)
+			}
+
+			if s.isRootSpan {
+				s.client.sendTraceCompletion(s.traceFunctionKey, s.traceID, s.startedAt, endedAt)
+			}
+		})
 	})
 }
 
@@ -849,6 +985,15 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 	defer func() { recover() }() // Never crash the host app
 
 	ts := getTraceState(traceID)
+	if ts != nil {
+		ts.mu.Lock()
+		if ts.pendingFinalizers > 0 {
+			ts.completion = func() { c.sendTraceCompletion(traceFunctionKey, traceID, startedAt, nowISOTimestamp()) }
+			ts.mu.Unlock()
+			return
+		}
+		ts.mu.Unlock()
+	}
 	traceStartedAt := startedAt
 	if ts != nil && ts.StartedAt != "" {
 		traceStartedAt = ts.StartedAt
@@ -861,6 +1006,9 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 	}
 
 	if ts != nil {
+		if ts.IngestionType != "" {
+			rawTrace["ingestion_type"] = ts.IngestionType
+		}
 		if ts.Name != "" {
 			rawTrace["name"] = ts.Name
 		}
@@ -869,6 +1017,9 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		}
 		if len(ts.Contexts) > 0 {
 			rawTrace["contexts"] = ts.Contexts
+		}
+		if ts.replay != nil {
+			rawTrace["replay_attempt"] = ts.replay.attempt
 		}
 		if ts.InputSourceTraceID != "" {
 			rawTrace["input_source_trace_id"] = ts.InputSourceTraceID

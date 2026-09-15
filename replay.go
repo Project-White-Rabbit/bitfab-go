@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ const (
 	replayPersistenceTimeout = 30 * time.Second
 	maxReplayTraceIDs        = 100
 	maxReplayLimit           = 5000
+	maxReplayAttempts        = 100
 )
 
 // CodeChangeFile records one file changed by the code under test.
@@ -69,10 +71,12 @@ type TraceOutline struct {
 
 // AdaptContext identifies the historical trace whose inputs are being adapted.
 type AdaptContext struct {
-	OriginalTraceID string `json:"originalTraceId"`
-	OriginalSpanID  string `json:"originalSpanId"`
-	SourceTraceID   string `json:"sourceTraceId"`
-	SourceSpanID    string `json:"sourceSpanId"`
+	Attempt         int            `json:"attempt"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	OriginalTraceID string         `json:"originalTraceId"`
+	OriginalSpanID  string         `json:"originalSpanId"`
+	SourceTraceID   string         `json:"sourceTraceId"`
+	SourceSpanID    string         `json:"sourceSpanId"`
 }
 
 // ReplayInputAdapter reshapes recorded positional inputs for a changed function signature.
@@ -80,6 +84,8 @@ type ReplayInputAdapter func(inputs []any, ctx AdaptContext) ([]any, error)
 
 // ReplayItem is one historical trace executed against the current function.
 type ReplayItem struct {
+	Attempt              int              `json:"attempt"`
+	IngestionType        *string          `json:"ingestionType"`
 	TraceID              *string          `json:"traceId"`
 	OriginalTraceID      string           `json:"originalTraceId"`
 	OriginalSpanID       string           `json:"originalSpanId"`
@@ -138,6 +144,7 @@ func replayErrorJSON(err error) any {
 
 // ReplayResult contains every replayed item and the experiment it created.
 type ReplayResult struct {
+	Attempts   int          `json:"attempts"`
 	Items      []ReplayItem `json:"items"`
 	TestRunID  string       `json:"testRunId"`
 	TestRunURL string       `json:"testRunUrl"`
@@ -185,6 +192,12 @@ type ReplayItemFinishProgress struct {
 
 // ReplayOptions configures Client.Replay.
 type ReplayOptions struct {
+	Concurrency    *ReplayConcurrency
+	processCommand *replayProcessCommand
+	// Attempts repeats each selected trace 1–100 times. Zero defaults to one.
+	Attempts                 int
+	OnlyWithAssertions       bool
+	DryRun                   bool
 	Limit                    int
 	TraceIDs                 []string
 	Name                     string
@@ -225,6 +238,9 @@ func SerializeReplayResult(result ReplayResult) (string, error) {
 }
 
 type replayServerItem struct {
+	attempt            int
+	OriginalMetadata   map[string]any          `json:"originalMetadata"`
+	IngestionType      *string                 `json:"ingestionType"`
 	OriginalTraceID    string                  `json:"originalTraceId"`
 	OriginalSpanID     string                  `json:"originalSpanId"`
 	SourceTraceID      string                  `json:"sourceTraceId"`
@@ -523,8 +539,8 @@ func (c *Client) Replay(
 	if err != nil {
 		return ReplayResult{}, err
 	}
-	if !c.enabled || strings.TrimSpace(c.apiKey) == "" {
-		return ReplayResult{}, fmt.Errorf("bitfab: replay requires an enabled client with an API key")
+	if strings.TrimSpace(c.resolveAPIKey()) == "" {
+		return ReplayResult{}, fmt.Errorf("bitfab: replay requires an API key")
 	}
 	if strings.TrimSpace(traceFunctionKey) == "" {
 		return ReplayResult{}, fmt.Errorf("bitfab: replay trace function key is required")
@@ -547,7 +563,20 @@ func (c *Client) Replay(
 	if err != nil {
 		return ReplayResult{}, err
 	}
+	sources := start.Items
+	start.Items = make([]replayServerItem, 0, len(sources)*resolved.Attempts)
+	for attempt := range resolved.Attempts {
+		for _, source := range sources {
+			source.attempt = attempt
+			if attempt > 0 {
+				source.DBBranchLease = nil
+				source.DBBranchLeaseError = nil
+			}
+			start.Items = append(start.Items, source)
+		}
+	}
 	result := ReplayResult{
+		Attempts:   resolved.Attempts,
 		Items:      make([]ReplayItem, len(start.Items)),
 		TestRunID:  start.TestRunID,
 		TestRunURL: c.replayURL(start.TestRunURL),
@@ -557,9 +586,22 @@ func (c *Client) Replay(
 	for index := range localTraceIDs {
 		localTraceIDs[index] = randomUUID()
 	}
-	c.httpClient.trackTraceDeliveries(localTraceIDs)
+	if !resolved.DryRun && (resolved.Concurrency == nil || resolved.Concurrency.Primitive != "process") {
+		c.httpClient.trackTraceDeliveries(localTraceIDs)
+	}
 
-	c.runReplayItems(ctx, traceFunctionKey, callable, resolved, start, localTraceIDs, &result)
+	if resolved.Concurrency != nil && resolved.Concurrency.Primitive == "process" && !resolved.DryRun {
+		c.runReplayProcesses(ctx, resolved, start, localTraceIDs, &result)
+	} else {
+		c.runReplayItems(ctx, traceFunctionKey, callable, resolved, start, localTraceIDs, &result)
+	}
+	if resolved.DryRun {
+		_, _ = c.completeReplay(ctx, start.TestRunID)
+		if err := writeReplayResultFile(result); err != nil {
+			log.Printf("Bitfab: %v", err)
+		}
+		return result, nil
+	}
 	executedTraceIDs := make([]string, 0, len(result.Items))
 	for _, item := range result.Items {
 		if item.localTraceID != "" {
@@ -590,18 +632,30 @@ func (c *Client) Replay(
 
 func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 	resolved := ReplayOptions{
+		Attempts:       1,
 		Limit:          defaultReplayLimit,
 		MaxConcurrency: defaultReplayConcurrency,
 		Mock:           MockMarked,
 	}
 	if options != nil {
 		resolved = *options
+		var concurrencyErr error
+		resolved, concurrencyErr = normalizeReplayConcurrency(resolved)
+		if concurrencyErr != nil {
+			return ReplayOptions{}, concurrencyErr
+		}
+		if resolved.Attempts == 0 {
+			resolved.Attempts = 1
+		}
 		if resolved.Limit == 0 {
 			resolved.Limit = defaultReplayLimit
 		}
 		if resolved.MaxConcurrency == 0 {
 			resolved.MaxConcurrency = defaultReplayConcurrency
 		}
+	}
+	if resolved.Attempts < 1 || resolved.Attempts > maxReplayAttempts {
+		return ReplayOptions{}, fmt.Errorf("bitfab: replay attempts must be between 1 and %d", maxReplayAttempts)
 	}
 	if resolved.Limit < 1 || resolved.Limit > maxReplayLimit {
 		return ReplayOptions{}, fmt.Errorf("bitfab: replay limit must be between 1 and %d", maxReplayLimit)
@@ -687,6 +741,15 @@ func newReplayRunError(cause error, result ReplayResult) *ReplayError {
 
 func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, options ReplayOptions) (startReplayResponse, error) {
 	payload := map[string]any{"traceFunctionKey": traceFunctionKey}
+	if options.Attempts > 1 {
+		payload["attempts"] = options.Attempts
+	}
+	if options.OnlyWithAssertions {
+		payload["onlyWithAssertions"] = true
+	}
+	if options.AdaptInputs != nil {
+		payload["includeOriginalMetadata"] = true
+	}
 	if options.TraceIDs == nil {
 		payload["limit"] = options.Limit
 	} else {
@@ -704,7 +767,7 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if options.DisableCodeChangeCapture && options.CodeChangeFiles == nil {
 		payload["codeChangeFiles"] = nil
 	}
-	if options.DBBranch != nil {
+	if options.DBBranch != nil && !options.DryRun {
 		payload["includeDbBranchLease"] = true
 		payload["lazyDbBranchLease"] = true
 		if len(options.dbBranchSettings) > 0 {
@@ -727,7 +790,7 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 
 	timeout := 30 * time.Second
-	if options.DBBranch != nil {
+	if options.DBBranch != nil && !options.DryRun {
 		timeout = replayDBBranchRequestTimeout
 	}
 	response, err := c.httpClient.request(ctx, "/api/sdk/replay/start", payload, timeout)
@@ -847,6 +910,7 @@ func (state *replayProgressState) reportStart(callback func(ReplayItemStartProgr
 			Errored:   state.errored,
 			Item: AdaptContext{
 				OriginalTraceID: originalTraceID,
+				Attempt:         item.attempt,
 				OriginalSpanID:  originalSpanID,
 				SourceTraceID:   originalTraceID,
 				SourceSpanID:    originalSpanID,
@@ -905,6 +969,8 @@ func baseReplayItem(serverItem replayServerItem) ReplayItem {
 	originalSpanID := serverItem.originalSpanID()
 	duration, tokens, model := replayMetrics(serverItem)
 	return ReplayItem{
+		Attempt:            serverItem.attempt,
+		IngestionType:      serverItem.IngestionType,
 		OriginalTraceID:    originalTraceID,
 		OriginalSpanID:     originalSpanID,
 		SourceTraceID:      originalTraceID,
@@ -931,8 +997,13 @@ func (c *Client) runReplayItem(
 	item := baseReplayItem(serverItem)
 	lease := serverItem.DBBranchLease
 	leaseError := serverItem.DBBranchLeaseError
-	if options.DBBranch != nil && lease == nil && leaseError == nil {
-		resolved, err := c.resolveReplayDBBranch(ctx, testRunID, item.OriginalTraceID, options.dbBranchSettings)
+	if options.DBBranch == nil || options.DryRun {
+		lease = nil
+		leaseError = nil
+		item.DBBranchTimings = nil
+	}
+	if options.DBBranch != nil && !options.DryRun && lease == nil && leaseError == nil {
+		resolved, err := c.resolveReplayDBBranch(ctx, testRunID, item.OriginalTraceID, options.dbBranchSettings, serverItem.attempt)
 		if err != nil {
 			setReplaySetupError(&item, err)
 			return item
@@ -959,7 +1030,13 @@ func (c *Client) runReplayItem(
 		return item
 	}
 	item.OriginalOutput = span.RawData.SpanData.Output
+	metadata := maps.Clone(serverItem.OriginalMetadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	adaptContext := AdaptContext{
+		Attempt:         serverItem.attempt,
+		Metadata:        metadata,
 		OriginalTraceID: item.OriginalTraceID,
 		OriginalSpanID:  item.OriginalSpanID,
 		SourceTraceID:   item.OriginalTraceID,
@@ -971,7 +1048,7 @@ func (c *Client) runReplayItem(
 		if !ok {
 			recorded = []any{span.RawData.SpanData.Input}
 		}
-		inputs, err = options.AdaptInputs(recorded, adaptContext)
+		inputs, err = invokeReplayInputAdapter(options.AdaptInputs, recorded, adaptContext)
 		if err != nil {
 			setReplaySetupError(&item, err)
 			return item
@@ -989,6 +1066,9 @@ func (c *Client) runReplayItem(
 		}
 		item.Input = inputs
 	}
+	if options.DryRun {
+		return item
+	}
 	mockTree, err := c.prepareReplayMockTree(
 		ctx,
 		serverItem.originalSpanID(),
@@ -1000,6 +1080,7 @@ func (c *Client) runReplayItem(
 		return item
 	}
 	replayCtx := withReplayContext(ctx, &replayContext{
+		attempt:            serverItem.attempt,
 		testRunID:          testRunID,
 		traceID:            localTraceID,
 		inputSourceSpanID:  span.ID,
@@ -1016,7 +1097,7 @@ func (c *Client) runReplayItem(
 
 	started := time.Now()
 	result, traceErr := c.Span(
-		replayCtx,
+		withManagedTraceRoot(replayCtx),
 		traceFunctionKey,
 		func(spanCtx context.Context) (any, error) {
 			return callable.invoke(spanCtx, inputs)
@@ -1035,6 +1116,15 @@ func (c *Client) runReplayItem(
 		item.TraceError = traceErr
 	}
 	return item
+}
+
+func invokeReplayInputAdapter(adapter ReplayInputAdapter, inputs []any, ctx AdaptContext) (adapted []any, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("bitfab: replay input adapter panicked: %v", recovered)
+		}
+	}()
+	return adapter(inputs, ctx)
 }
 
 func setReplaySetupError(item *ReplayItem, err error) {
@@ -1085,6 +1175,9 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 				}
 			}
 			if missing == 0 {
+				for traceID, serverID := range status.TraceIDs {
+					readBackTraceIDs[traceID] = serverID
+				}
 				return readBackTraceIDs, nil
 			}
 		}
