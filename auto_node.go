@@ -78,7 +78,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		if opts.Type != "" {
 			kind = opts.Type
 		}
-		r := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs)
+		r := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, configured)
 		if r == nil {
 			continue
 		}

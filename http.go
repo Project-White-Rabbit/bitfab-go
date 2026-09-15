@@ -543,7 +543,7 @@ func (h *httpClient) sendExternalTrace(payload map[string]any) {
 // export failed or the deadline expired.
 func (h *httpClient) flush(timeout time.Duration) bool {
 	deadline := time.Now().Add(max(timeout, 0))
-	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout))
+	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout), false)
 	timeout = max(time.Until(deadline), 0)
 	h.transportMu.Lock()
 	transport := h.transport
@@ -557,7 +557,7 @@ func (h *httpClient) flush(timeout time.Duration) bool {
 // close flushes and permanently shuts down this client's transport. Idempotent.
 func (h *httpClient) close(timeout time.Duration) bool {
 	deadline := time.Now().Add(max(timeout, 0))
-	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout))
+	released := h.simulationPlan.release(min(timeout/2, simulationPlanReadTimeout), true)
 	h.simulationPlan.stop()
 	timeout = max(time.Until(deadline), 0)
 	h.transportMu.Lock()

@@ -299,14 +299,14 @@ func TestOtel_DirectRequestsAreCountBounded(t *testing.T) {
 		cfg.maxExportBatchSize = 512
 	})
 
-	for i := range 20 {
+	for i := range 300 {
 		transport.submit(operationExternalSpan, map[string]any{"index": i}, nil)
 	}
 	transport.flush(10 * time.Second)
 
 	requests := sender.recorded()
 	if len(requests) != 3 {
-		t.Fatalf("requests = %d, want 3 (20 carriers at 8 per request)", len(requests))
+		t.Fatalf("requests = %d, want 3 (300 carriers at %d per request)", len(requests), otelDirectMaxRequestBatchSize)
 	}
 	for _, request := range requests {
 		carriers := carriersIn(t, []recordedRequest{request})
@@ -314,8 +314,8 @@ func TestOtel_DirectRequestsAreCountBounded(t *testing.T) {
 			t.Errorf("request held %d carriers, want at most %d", len(carriers), otelDirectMaxRequestBatchSize)
 		}
 	}
-	if total := len(carriersIn(t, requests)); total != 20 {
-		t.Errorf("delivered %d carriers, want all 20", total)
+	if total := len(carriersIn(t, requests)); total != 300 {
+		t.Errorf("delivered %d carriers, want all 300", total)
 	}
 }
 
@@ -483,6 +483,7 @@ func TestOtel_ExportConcurrencyIsBounded(t *testing.T) {
 	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
 		cfg.exportConcurrency = 2
 		cfg.maxExportBatchSize = 512
+		cfg.maxRequestBatchSize = 8
 	})
 
 	for i := range 40 {
@@ -512,6 +513,7 @@ func TestOtel_PanickingSenderDoesNotHangExport(t *testing.T) {
 	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
 		cfg.exportConcurrency = 2
 		cfg.maxExportBatchSize = 512
+		cfg.maxRequestBatchSize = 8
 	})
 
 	for i := range 40 {
@@ -542,7 +544,7 @@ func TestOtel_ExportStopsWhenContextIsCancelled(t *testing.T) {
 	exporter := &bitfabSpanExporter{
 		directSender:        sender.send,
 		maxRequestBytes:     otelMaxRequestBytes,
-		maxRequestBatchSize: otelDirectMaxRequestBatchSize,
+		maxRequestBatchSize: 8,
 		exportConcurrency:   1,
 	}
 

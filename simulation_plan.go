@@ -25,16 +25,50 @@ type simulationPlan struct {
 	read         func() (map[string]any, error)
 	disabled     bool
 	contentOff   map[string]map[string]bool
+	unavailable  bool
+	closing      bool
+	drainMu      sync.Mutex
 	refreshAfter time.Time
 	held         []heldPlanRecord
 	draining     map[string]bool
 	reading      chan struct{}
 	stopCh       chan struct{}
 	stopped      bool
+
+	firstReadWait     time.Duration
+	firstReadDeadline time.Time
+	firstReadDone     chan struct{}
+	firstReadOnce     sync.Once
 }
 
 func newSimulationPlan(read func() (map[string]any, error), enabled bool) *simulationPlan {
-	return &simulationPlan{read: read, disabled: !enabled, stopCh: make(chan struct{})}
+	return &simulationPlan{read: read, disabled: !enabled, stopCh: make(chan struct{}), firstReadWait: simulationPlanReadTimeout, firstReadDone: make(chan struct{})}
+}
+
+func (p *simulationPlan) finishFirstRead() {
+	p.firstReadOnce.Do(func() { close(p.firstReadDone) })
+}
+
+func (p *simulationPlan) awaitFirstRead(ctx context.Context) {
+	if p == nil || p.isDisabled() {
+		return
+	}
+	p.mu.Lock()
+	started := !p.firstReadDeadline.IsZero()
+	remaining := time.Until(p.firstReadDeadline)
+	pending := started && !p.stopped && p.contentOff == nil && remaining > 0
+	p.mu.Unlock()
+	if !pending {
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-p.firstReadDone:
+	case <-timer.C:
+	case <-ctx.Done():
+	case <-p.stopCh:
+	}
 }
 
 func (p *simulationPlan) isDisabled() bool {
@@ -54,7 +88,10 @@ func (p *simulationPlan) refresh() {
 
 func (p *simulationPlan) startReader(delay time.Duration) {
 	p.reading = make(chan struct{})
-	go p.readUntilLoaded(delay, p.reading)
+	if p.firstReadDeadline.IsZero() {
+		p.firstReadDeadline = time.Now().Add(delay + p.firstReadWait)
+	}
+	go p.readPlan(delay, p.reading)
 }
 
 func (p *simulationPlan) pause(delay time.Duration) bool {
@@ -95,7 +132,7 @@ func parseSimulationPlan(body map[string]any) (map[string]map[string]bool, error
 func (p *simulationPlan) readOnce() (result map[string]map[string]bool) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			warnOnce("sim-plan-unavailable", fmt.Sprintf("simulation plan read failed: %v; holding content until it loads", recovered))
+			warnOnce("sim-plan-unavailable", fmt.Sprintf("simulation plan read failed: %v", recovered))
 			result = nil
 		}
 	}()
@@ -104,7 +141,7 @@ func (p *simulationPlan) readOnce() (result map[string]map[string]bool) {
 		return map[string]map[string]bool{}
 	}
 	if err != nil {
-		warnOnce("sim-plan-unavailable", fmt.Sprintf("could not read simulation plan: %v; holding content until it loads", err))
+		warnOnce("sim-plan-unavailable", fmt.Sprintf("could not read simulation plan: %v", err))
 		return nil
 	}
 	parsed, err := parseSimulationPlan(body)
@@ -115,61 +152,69 @@ func (p *simulationPlan) readOnce() (result map[string]map[string]bool) {
 	return parsed
 }
 
-func (p *simulationPlan) readUntilLoaded(delay time.Duration, done chan struct{}) {
+func (p *simulationPlan) readPlan(delay time.Duration, done chan struct{}) {
 	defer func() {
 		p.mu.Lock()
 		p.draining = nil
 		p.reading = nil
 		close(done)
 		p.mu.Unlock()
+		p.finishFirstRead()
 	}()
 	if delay > 0 && !p.pause(delay) {
 		return
 	}
-	for {
-		p.mu.Lock()
-		stopped := p.stopped
-		p.mu.Unlock()
-		var parsed map[string]map[string]bool
-		if !stopped && !p.isDisabled() {
-			parsed = p.readOnce()
+	p.mu.Lock()
+	skipped := p.stopped || p.isDisabled()
+	p.mu.Unlock()
+	var parsed map[string]map[string]bool
+	if !skipped {
+		parsed = p.readOnce()
+	}
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+	p.mu.Lock()
+	if parsed != nil {
+		p.contentOff = parsed
+		p.unavailable = false
+		p.refreshAfter = time.Now().Add(simulationPlanRefreshInterval)
+	} else {
+		p.refreshAfter = time.Now().Add(simulationPlanRetryInterval)
+		if !skipped && p.contentOff == nil {
+			p.unavailable = true
 		}
-		p.mu.Lock()
-		var entries []heldPlanRecord
-		finished := false
-		if parsed != nil {
-			p.contentOff = parsed
-			p.refreshAfter = time.Now().Add(simulationPlanRefreshInterval)
-			entries, p.held = p.held, nil
-			p.draining = make(map[string]bool)
-			for _, entry := range entries {
-				if entry.key != "" {
-					p.draining[planTraceID(entry.payload)] = true
-				}
+	}
+	entries := p.takeHeld()
+	p.mu.Unlock()
+	p.finishFirstRead()
+	p.drain(entries)
+}
+
+func (p *simulationPlan) takeHeld() []heldPlanRecord {
+	entries := p.held
+	p.held = nil
+	if len(entries) > 0 {
+		p.draining = make(map[string]bool)
+		for _, entry := range entries {
+			if entry.key != "" {
+				p.draining[planTraceID(entry.payload)] = true
 			}
-			finished = true
-		} else if p.contentOff != nil || p.stopped || p.isDisabled() || len(p.held) == 0 {
-			p.refreshAfter = time.Now().Add(simulationPlanRetryInterval)
-			finished = true
+		}
+	}
+	return entries
+}
+
+func (p *simulationPlan) drain(entries []heldPlanRecord) {
+	for len(entries) > 0 {
+		for _, entry := range entries {
+			p.submit(entry)
+		}
+		p.mu.Lock()
+		entries, p.held = p.held, nil
+		if len(entries) == 0 {
+			p.draining = nil
 		}
 		p.mu.Unlock()
-		if finished {
-			for len(entries) > 0 {
-				for _, entry := range entries {
-					p.submit(entry)
-				}
-				p.mu.Lock()
-				entries, p.held = p.held, nil
-				if len(entries) == 0 {
-					p.draining = nil
-				}
-				p.mu.Unlock()
-			}
-			return
-		}
-		if !p.pause(simulationPlanRetryInterval) {
-			return
-		}
 	}
 }
 
@@ -182,8 +227,34 @@ func (p *simulationPlan) submit(entry heldPlanRecord) {
 	if entry.key == "" {
 		entry.submit(entry.payload)
 	} else {
-		entry.submit(p.apply(entry.payload, entry.key))
+		entry.submit(p.prepare(entry.payload, entry.key))
 	}
+}
+
+func (p *simulationPlan) submitWithoutPlan(entry heldPlanRecord) {
+	defer func() {
+		if value := recover(); value != nil {
+			warnOnce("sim-plan-held-span-dropped", fmt.Sprintf("held record could not be sent: %v", value))
+		}
+	}()
+	if entry.key == "" {
+		entry.submit(entry.payload)
+	} else {
+		entry.submit(withoutPlanContent(entry.payload))
+	}
+}
+
+func (p *simulationPlan) prepare(payload map[string]any, key string) map[string]any {
+	p.mu.Lock()
+	loaded, withheld := p.contentOff != nil, p.unavailable || p.closing || p.stopped
+	p.mu.Unlock()
+	if loaded {
+		return p.apply(payload, key)
+	}
+	if withheld {
+		return withoutPlanContent(payload)
+	}
+	return payload
 }
 
 func planTraceID(payload map[string]any) string {
@@ -199,7 +270,11 @@ func recordedByFramework(payload map[string]any) bool {
 	raw, _ := payload["rawSpan"].(map[string]any)
 	origin, _ := raw["span_origin"].(map[string]any)
 	instrumentation, _ := origin["instrumentation"].(map[string]any)
-	switch instrumentation["name"] {
+	return frameworkInstrumentation(instrumentation["name"])
+}
+
+func frameworkInstrumentation(name any) bool {
+	switch name {
 	case "openai-agents", "langgraph", "claude-agent-sdk", "vercel-ai":
 		return true
 	}
@@ -211,15 +286,25 @@ func MakeSpanOrigin(instrumentation string) map[string]any {
 	return map[string]any{"name": "bitfab.sdk.go", "version": Version, "instrumentation": map[string]any{"name": instrumentation}}
 }
 
-func (p *simulationPlan) hold(entry heldPlanRecord) {
+func (p *simulationPlan) hold(entry heldPlanRecord) (overflow heldPlanRecord, overflowed bool) {
 	p.held = append(p.held, entry)
 	if len(p.held) > simulationPlanMaxHeld {
+		overflow, overflowed = p.held[0], true
 		p.held[0] = heldPlanRecord{}
 		p.held = p.held[1:]
-		warnOnce("sim-plan-held-overflow", "simulation plan has not loaded; dropping oldest records beyond 1000")
+		warnOnce("sim-plan-held-overflow", "simulation plan has not loaded; sending the oldest records beyond 1000 without inputs and outputs")
 	}
 	if p.reading == nil && !p.stopped && !p.isDisabled() {
 		p.startReader(max(time.Until(p.refreshAfter), 0))
+	}
+	return overflow, overflowed
+}
+
+func (p *simulationPlan) holdAndRelease(entry heldPlanRecord) {
+	overflow, overflowed := p.hold(entry)
+	p.mu.Unlock()
+	if overflowed {
+		p.submitWithoutPlan(overflow)
 	}
 }
 
@@ -242,16 +327,15 @@ func (p *simulationPlan) sendSpan(payload map[string]any, submit func(map[string
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
-		submit(payload)
+		submit(p.prepare(payload, key))
 		return
 	}
-	if p.contentOff == nil {
-		p.hold(heldPlanRecord{payload, key, submit})
-		p.mu.Unlock()
+	if p.contentOff == nil && !p.unavailable && !p.closing {
+		p.holdAndRelease(heldPlanRecord{payload, key, submit})
 		return
 	}
 	p.mu.Unlock()
-	submit(p.apply(payload, key))
+	submit(p.prepare(payload, key))
 }
 
 func (p *simulationPlan) sendTrace(payload map[string]any, submit func(map[string]any)) {
@@ -270,12 +354,35 @@ func (p *simulationPlan) sendTrace(payload map[string]any, submit func(map[strin
 		}
 	}
 	if !p.stopped && id != "" && held {
-		p.hold(heldPlanRecord{payload, "", submit})
-		p.mu.Unlock()
+		p.holdAndRelease(heldPlanRecord{payload, "", submit})
 		return
 	}
 	p.mu.Unlock()
 	submit(payload)
+}
+
+func (p *simulationPlan) isContentOff(key, name string) bool {
+	if p == nil || p.isDisabled() || key == "" || name == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.stopped && p.contentOff[key][name]
+}
+
+func (p *simulationPlan) withholdsContent(key, name string, root bool, instrumentation string) bool {
+	if p == nil || p.isDisabled() || key == "" || name == "" || frameworkInstrumentation(instrumentation) {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped {
+		return false
+	}
+	if p.contentOff != nil {
+		return p.contentOff[key][name]
+	}
+	return p.unavailable && !root
 }
 
 func (p *simulationPlan) apply(payload map[string]any, key string) map[string]any {
@@ -291,6 +398,21 @@ func (p *simulationPlan) apply(payload map[string]any, key string) map[string]an
 	if !off {
 		return payload
 	}
+	return stripPlanContent(payload)
+}
+
+func withoutPlanContent(payload map[string]any) map[string]any {
+	raw, _ := payload["rawSpan"].(map[string]any)
+	if parent, _ := raw["parent_id"].(string); parent == "" || recordedByFramework(payload) {
+		return payload
+	}
+	warnOnce("sim-plan-unavailable-content-withheld", "simulation plan could not be read; sending spans without inputs and outputs until it loads")
+	return stripPlanContent(payload)
+}
+
+func stripPlanContent(payload map[string]any) map[string]any {
+	raw, _ := payload["rawSpan"].(map[string]any)
+	data, _ := raw["span_data"].(map[string]any)
 	kept := make(map[string]any, len(data))
 	for field, value := range data {
 		switch field {
@@ -313,7 +435,7 @@ func (p *simulationPlan) apply(payload map[string]any, key string) map[string]an
 	return cloned
 }
 
-func (p *simulationPlan) release(timeout time.Duration) bool {
+func (p *simulationPlan) release(timeout time.Duration, final bool) bool {
 	if p == nil {
 		return true
 	}
@@ -330,12 +452,22 @@ func (p *simulationPlan) release(timeout time.Duration) bool {
 		}
 		timer.Stop()
 	}
+	if final {
+		p.flushHeld()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.contentOff == nil && len(p.held) > 0 {
-		warnOnce("sim-plan-never-loaded", "records remain held because simulation plan has not loaded")
-	}
 	return len(p.held) == 0 && len(p.draining) == 0
+}
+
+func (p *simulationPlan) flushHeld() {
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+	p.mu.Lock()
+	p.closing = true
+	entries := p.takeHeld()
+	p.mu.Unlock()
+	p.drain(entries)
 }
 
 func (p *simulationPlan) stop() {
@@ -343,12 +475,12 @@ func (p *simulationPlan) stop() {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if !p.stopped {
 		p.stopped = true
 		close(p.stopCh)
-		p.held = nil
 	}
+	p.mu.Unlock()
+	p.flushHeld()
 }
 
 func (h *httpClient) getSimulationPlan() (map[string]any, error) {

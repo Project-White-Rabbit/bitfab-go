@@ -17,14 +17,15 @@ type SpanFinalizer func(any) (any, error)
 
 // TraceOptions configures a subtree owned by one trace invocation.
 type TraceOptions struct {
-	Name, Type, TestRunID string
-	Input                 []any
-	MaxDepth, MaxSpans    *int
-	Exclude               []string
-	CaptureWhen           CaptureWhen
-	MockOnReplayDefault   bool
-	IncludeWrappers       bool
-	Finalize              SpanFinalizer
+	Name, Type, TestRunID   string
+	Input                   []any
+	MaxDepth, MaxSpans      *int
+	MaxCapturedSubtreeSpans *int
+	Exclude                 []string
+	CaptureWhen             CaptureWhen
+	MockOnReplayDefault     bool
+	IncludeWrappers         bool
+	Finalize                SpanFinalizer
 }
 
 // NodeOptions customizes an automatically discovered function. Nil booleans inherit
@@ -124,19 +125,19 @@ func (c *Client) nodeOptions(symbol string) (NodeOptions, bool) {
 }
 
 type autoRoot struct {
-	client             *Client
-	key, traceID       string
-	opts               TraceOptions
-	ctx                context.Context
-	mu                 sync.Mutex
-	active, closing    bool
-	count              int
-	maxDepth, maxSpans int
-	records            map[*autoRecord]bool
-	rootRecord         *autoRecord
-	managed            *managedTraceRoot
-	complete           func()
-	completeOnce       sync.Once
+	client                                      *Client
+	key, traceID                                string
+	opts                                        TraceOptions
+	ctx                                         context.Context
+	mu                                          sync.Mutex
+	active, closing                             bool
+	count, capturedSubtreeCount                 int
+	maxDepth, maxSpans, maxCapturedSubtreeSpans int
+	records                                     map[*autoRecord]bool
+	rootRecord                                  *autoRecord
+	managed                                     *managedTraceRoot
+	complete                                    func()
+	completeOnce                                sync.Once
 }
 
 type autoRecord struct {
@@ -152,7 +153,8 @@ type autoRecord struct {
 	enrichment                                        *spanEnrichment
 }
 
-func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any) *autoRecord {
+func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, declared bool) *autoRecord {
+	contentOff := root.client.httpClient.simulationPlan.isContentOff(root.key, name)
 	root.mu.Lock()
 	defer root.mu.Unlock()
 	if !root.active {
@@ -163,13 +165,14 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 			return nil
 		}
 	}
-	if depth > root.maxDepth || root.count >= root.maxSpans {
+	full := root.count >= root.maxSpans || !contentOff && !declared && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans
+	if depth > root.maxDepth || full {
 		state := createTraceState(root.traceID)
 		state.mu.Lock()
 		if state.Metadata == nil {
 			state.Metadata = map[string]any{}
 		}
-		state.Metadata["bitfabAutoTrace"] = map[string]any{"protocol": "go-auto-v1", "truncated": true, "maxDepth": root.maxDepth, "maxSpans": root.maxSpans}
+		state.Metadata["bitfabAutoTrace"] = map[string]any{"protocol": "go-auto-v1", "truncated": true, "maxDepth": root.maxDepth, "maxSpans": root.maxSpans, "maxCapturedSubtreeSpans": root.maxCapturedSubtreeSpans}
 		state.mu.Unlock()
 		return nil
 	}
@@ -178,6 +181,9 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 		r.parentID = parent.id
 	}
 	root.count++
+	if !contentOff && !declared {
+		root.capturedSubtreeCount++
+	}
 	root.records[r] = true
 	return r
 }
@@ -197,12 +203,16 @@ func (r *autoRecord) finish(output any, err error) {
 		}()
 		data := map[string]any{"name": r.name, "type": r.kind, "function_name": r.functionName}
 		var dropped []string
-		if r.input != nil {
+		contentOff := r.root.client.httpClient.simulationPlan.withholdsContent(r.root.key, r.name, r.parentID == "", "trace")
+		if contentOff {
+			data["content_off_by_simulation_plan"] = true
+		}
+		if r.input != nil && !contentOff {
 			value, fields := capValueReport(r.input)
 			data["input"] = value
 			dropped = append(dropped, fields...)
 		}
-		if output != nil {
+		if output != nil && !contentOff {
 			value, fields := capValueReport(output)
 			data["output"] = value
 			dropped = append(dropped, fields...)
@@ -370,8 +380,11 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if fn == nil {
 		return nil, fmt.Errorf("bitfab: Trace requires a function")
 	}
-	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxSpans != nil && *opts.MaxSpans < 0 {
+	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxSpans != nil && *opts.MaxSpans < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 {
 		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
+	}
+	if opts.MaxSpans != nil && *opts.MaxSpans == 0 {
+		return nil, fmt.Errorf("bitfab: MaxSpans must be at least 1 because the root span counts toward it")
 	}
 	if !c.shouldRecord(ctx) {
 		return fn(ctx)
@@ -400,20 +413,28 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if !validSpanTypes[opts.Type] {
 		opts.Type = "custom"
 	}
-	maxDepth, maxSpans := 30, 500
+	if previous == nil || len(previous.frames) == 0 {
+		c.httpClient.simulationPlan.refresh()
+		c.httpClient.simulationPlan.awaitFirstRead(ctx)
+	}
+	maxDepth, maxSpans, maxCapturedSubtreeSpans := 30, 2048, 512
 	if opts.MaxDepth != nil {
 		maxDepth = *opts.MaxDepth
 	}
 	if opts.MaxSpans != nil {
 		maxSpans = *opts.MaxSpans
 	}
+	if opts.MaxCapturedSubtreeSpans != nil {
+		maxCapturedSubtreeSpans = *opts.MaxCapturedSubtreeSpans
+	}
+	maxCapturedSubtreeSpans = min(maxCapturedSubtreeSpans, maxSpans)
 	var frames []autoFrame
 	var records []*autoRecord
 	if previous != nil {
 		frames = append(frames, previous.frames...)
 	}
 	for i, frame := range frames {
-		r := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input)
+		r := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, true)
 		if r != nil {
 			records = append(records, r)
 			frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
@@ -421,7 +442,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	}
 	var root *autoRoot
 	if len(frames) == 0 || currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
-		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxSpans: maxSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
+		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, count: 1, maxDepth: maxDepth, maxSpans: maxSpans, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
 		if len(frames) == 0 && managed != nil && currentSpan(ctx) != nil {
 			root.traceID = currentSpan(ctx).traceID
 			root.managed = managed
@@ -537,6 +558,20 @@ func finishManagedAutoSpan(ctx context.Context, spanID string, send func()) {
 	root.tryComplete()
 }
 
+func managedAutoSpanContentOff(ctx context.Context, plan *simulationPlan, spanID, key, name string, root bool) bool {
+	instrumentation := "span"
+	if managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot); managed != nil {
+		managed.mu.Lock()
+		if managed.root != nil && managed.spanID == spanID {
+			key = managed.root.key
+			name, _ = managed.data["name"].(string)
+			instrumentation = "trace"
+		}
+		managed.mu.Unlock()
+	}
+	return plan.withholdsContent(key, name, root, instrumentation)
+}
+
 func stampManagedAutoSpan(ctx context.Context, raw, payload map[string]any) {
 	managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot)
 	if managed == nil {
@@ -554,7 +589,7 @@ func stampManagedAutoSpan(ctx context.Context, raw, payload map[string]any) {
 	for key, value := range managed.data {
 		data[key] = value
 	}
-	if _, hasInput := data["input"]; !hasInput {
+	if _, hasInput := data["input"]; !hasInput && data["content_off_by_simulation_plan"] != true {
 		if original, ok := raw["span_data"].(map[string]any); ok {
 			if input, present := original["input"]; present {
 				data["input"] = input

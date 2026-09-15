@@ -244,6 +244,9 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	c.httpClient.apiKeyFunc = c.resolveAPIKey
 	c.httpClient.simulationPlan = newSimulationPlan(c.httpClient.getSimulationPlan, !c.simulationPlanDisabled)
+	if c.apiKeyFunc == nil && (strings.TrimSpace(c.apiKey) != "" || strings.TrimSpace(os.Getenv("BITFAB_API_KEY")) != "") {
+		c.httpClient.simulationPlan.refresh()
+	}
 	if c.requestTimeout > 0 {
 		c.httpClient.client.Timeout = c.requestTimeout
 	}
@@ -494,12 +497,16 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 				spanData["function_name"] = cfg.functionName
 			}
 			var dropped []string
-			if cfg.input != nil {
+			contentOff := managedAutoSpanContentOff(ctx, c.httpClient.simulationPlan, id.spanID, traceFunctionKey, cfg.name, id.parentSpanID == "")
+			if contentOff {
+				spanData["content_off_by_simulation_plan"] = true
+			}
+			if cfg.input != nil && !contentOff {
 				v, d := capValueReport(cfg.input)
 				spanData["input"] = v
 				dropped = append(dropped, d...)
 			}
-			if recordedResult != nil {
+			if recordedResult != nil && !contentOff {
 				v, d := capValueReport(recordedResult)
 				spanData["output"] = v
 				dropped = append(dropped, d...)
@@ -916,12 +923,16 @@ func (s *ActiveSpan) End() {
 				spanData["function_name"] = s.cfg.functionName
 			}
 			var dropped []string
-			if s.input != nil {
+			contentOff := s.client.httpClient.simulationPlan.withholdsContent(s.traceFunctionKey, s.cfg.name, s.parentSpanID == "", "span")
+			if contentOff {
+				spanData["content_off_by_simulation_plan"] = true
+			}
+			if s.input != nil && !contentOff {
 				v, d := capValueReport(s.input)
 				spanData["input"] = v
 				dropped = append(dropped, d...)
 			}
-			if recordedOutput != nil {
+			if recordedOutput != nil && !contentOff {
 				v, d := capValueReport(recordedOutput)
 				spanData["output"] = v
 				dropped = append(dropped, d...)
