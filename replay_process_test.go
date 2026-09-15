@@ -159,6 +159,98 @@ func TestReplayProcessConcurrencyValidation(t *testing.T) {
 	}
 }
 
+const (
+	replayStallCalm     = "some avg10=35.00 avg60=20.00 avg300=5.00 total=100\nfull avg10=0.40 avg60=0.10 avg300=0.00 total=10\n"
+	replayStallCritical = "some avg10=80.00 avg60=60.00 avg300=20.00 total=100\nfull avg10=12.50 avg60=4.00 avg300=1.00 total=10\n"
+)
+
+func TestReplayMemoryAdmissionWeighsPressureBeforeSwap(t *testing.T) {
+	cases := []struct {
+		name                  string
+		critical, known       bool
+		swap                  float64
+		wantSecondChildAdmits bool
+	}{
+		{"calm pressure ignores full swap", false, true, .99, true},
+		{"critical pressure blocks despite free memory", true, true, 0, false},
+		{"unreadable pressure falls back to the swap limit", false, false, .9, false},
+		{"unreadable pressure admits below the swap limit", false, false, .5, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			throttle := newReplayMemoryThrottle()
+			throttle.budget = 100
+			throttle.floor = 50
+			throttle.poll = time.Millisecond
+			throttle.available = func() (int64, bool) { return 1000, true }
+			throttle.pressure = func() (bool, bool) { return c.critical, c.known }
+			throttle.swap = func() (float64, bool) { return c.swap, true }
+			if err := throttle.admit(context.Background(), 0); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			err := throttle.admit(ctx, 1)
+			if admitted := err == nil; admitted != c.wantSecondChildAdmits {
+				t.Fatalf("second child admitted = %v, want %v", admitted, c.wantSecondChildAdmits)
+			}
+		})
+	}
+}
+
+func TestReplayPressureCriticalFromLevel(t *testing.T) {
+	cases := []struct {
+		raw             string
+		critical, known bool
+	}{{"1", false, true}, {"2", false, true}, {"4\n", true, true}, {"0", false, false}, {"warn", false, false}, {"", false, false}}
+	for _, c := range cases {
+		critical, known := replayPressureCriticalFromLevel(c.raw)
+		if critical != c.critical || known != c.known {
+			t.Errorf("level %q = (%v, %v), want (%v, %v)", c.raw, critical, known, c.critical, c.known)
+		}
+	}
+}
+
+func TestReplayPressureCriticalFromStall(t *testing.T) {
+	cases := []struct {
+		raw             string
+		critical, known bool
+	}{
+		{replayStallCalm, false, true},
+		{replayStallCritical, true, true},
+		{"some avg10=90.00 avg60=0.00 avg300=0.00 total=1\n", false, false},
+		{"full avg10=abc avg60=0.00 avg300=0.00 total=1\n", false, false},
+		{"", false, false},
+	}
+	for _, c := range cases {
+		critical, known := replayPressureCriticalFromStall(c.raw)
+		if critical != c.critical || known != c.known {
+			t.Errorf("stall %q = (%v, %v), want (%v, %v)", c.raw, critical, known, c.critical, c.known)
+		}
+	}
+}
+
+func TestReplayPressurePrefersTheContainerStallFile(t *testing.T) {
+	dir := t.TempDir()
+	container := filepath.Join(dir, "memory.pressure")
+	host := filepath.Join(dir, "pressure-memory")
+	if err := os.WriteFile(host, []byte(replayStallCritical), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if critical, known := replayPressureCriticalFromStallFiles([]string{filepath.Join(dir, "missing"), host}); !known || !critical {
+		t.Fatalf("host fallback = (%v, %v), want (true, true)", critical, known)
+	}
+	if err := os.WriteFile(container, []byte(replayStallCalm), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if critical, known := replayPressureCriticalFromStallFiles([]string{container, host}); !known || critical {
+		t.Fatalf("container file = (%v, %v), want (false, true)", critical, known)
+	}
+	if _, known := replayPressureCriticalFromStallFiles([]string{filepath.Join(dir, "missing")}); known {
+		t.Fatal("missing stall files reported a reading")
+	}
+}
+
 func TestReplayMemoryAdmissionReservesBudgetAndCancels(t *testing.T) {
 	throttle := newReplayMemoryThrottle()
 	throttle.budget = 100
@@ -166,6 +258,7 @@ func TestReplayMemoryAdmissionReservesBudgetAndCancels(t *testing.T) {
 	throttle.poll = time.Millisecond
 	throttle.available = func() (int64, bool) { return 200, true }
 	throttle.swap = func() (float64, bool) { return 0, true }
+	throttle.pressure = func() (bool, bool) { return false, true }
 	if err := throttle.admit(context.Background(), 0); err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +275,11 @@ func TestReplayMemoryAdmissionReservesBudgetAndCancels(t *testing.T) {
 	if err := throttle.admit(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	throttle.swap = func() (float64, bool) { return .9, true }
+	throttle.pressure = func() (bool, bool) { return true, true }
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel2()
 	if err := throttle.admit(ctx2, 2); err == nil {
-		t.Fatal("swap pressure ignored")
+		t.Fatal("critical memory pressure ignored")
 	}
 	throttle.release(1)
 	if err := throttle.admit(context.Background(), 2); err != nil {

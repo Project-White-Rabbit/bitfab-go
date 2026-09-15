@@ -11,7 +11,14 @@ import (
 	"time"
 )
 
-const replayGiB int64 = 1024 * 1024 * 1024
+const (
+	replayGiB                   int64   = 1024 * 1024 * 1024
+	replayMaxSwapUsedRatio              = 0.85
+	replayCriticalPressureLevel         = 4
+	replayCriticalStallPercent  float64 = 10
+)
+
+var replayStallFiles = []string{"/sys/fs/cgroup/memory.pressure", "/proc/pressure/memory"}
 
 type replayMemoryThrottle struct {
 	mu                  sync.Mutex
@@ -19,6 +26,7 @@ type replayMemoryThrottle struct {
 	peak, budget, floor int64
 	available           func() (int64, bool)
 	swap                func() (float64, bool)
+	pressure            func() (bool, bool)
 	poll                time.Duration
 }
 
@@ -37,7 +45,7 @@ func replayEnvBytes(name string, fallback int64) int64 {
 	return value * 1024 * 1024
 }
 func newReplayMemoryThrottle() *replayMemoryThrottle {
-	return &replayMemoryThrottle{resident: map[int]int64{}, budget: replayEnvBytes("BITFAB_REPLAY_CHILD_MEMORY_MB", 2*replayGiB), floor: replayEnvBytes("BITFAB_REPLAY_MEMORY_FLOOR_MB", 2*replayGiB), available: replayAvailableMemory, swap: replaySwapRatio, poll: 2 * time.Second}
+	return &replayMemoryThrottle{resident: map[int]int64{}, budget: replayEnvBytes("BITFAB_REPLAY_CHILD_MEMORY_MB", 2*replayGiB), floor: replayEnvBytes("BITFAB_REPLAY_MEMORY_FLOOR_MB", 2*replayGiB), available: replayAvailableMemory, swap: replaySwapRatio, pressure: replayMemoryPressureCritical, poll: 2 * time.Second}
 }
 func (t *replayMemoryThrottle) childBudget() int64 {
 	budget := t.budget
@@ -53,7 +61,11 @@ func (t *replayMemoryThrottle) headroom() bool {
 	if len(t.resident) == 0 {
 		return true
 	}
-	if swap, known := t.swap(); known && swap >= 0.85 {
+	if critical, known := t.pressure(); known {
+		if critical {
+			return false
+		}
+	} else if swap, known := t.swap(); known && swap >= replayMaxSwapUsedRatio {
 		return false
 	}
 	available, known := t.available()
@@ -193,6 +205,58 @@ func replaySwapRatio() (float64, bool) {
 		return 0, false
 	}
 	return float64(total-values["SwapFree"]) / float64(total), true
+}
+func replayMemoryPressureCritical() (bool, bool) {
+	if runtime.GOOS == "darwin" {
+		raw, ok := replayReadCommand("sysctl", "-n", "kern.memorystatus_vm_pressure_level")
+		if !ok {
+			return false, false
+		}
+		return replayPressureCriticalFromLevel(raw)
+	}
+	if runtime.GOOS != "linux" {
+		return false, false
+	}
+	return replayPressureCriticalFromStallFiles(replayStallFiles)
+}
+func replayPressureCriticalFromStallFiles(paths []string) (bool, bool) {
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if critical, known := replayPressureCriticalFromStall(string(raw)); known {
+			return critical, true
+		}
+	}
+	return false, false
+}
+func replayPressureCriticalFromLevel(raw string) (bool, bool) {
+	level, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || level < 1 {
+		return false, false
+	}
+	return level >= replayCriticalPressureLevel, true
+}
+func replayPressureCriticalFromStall(raw string) (bool, bool) {
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "full" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			value, found := strings.CutPrefix(field, "avg10=")
+			if !found {
+				continue
+			}
+			percent, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return false, false
+			}
+			return percent >= replayCriticalStallPercent, true
+		}
+	}
+	return false, false
 }
 func replayProcessRSS(pid int) (int64, bool) {
 	if runtime.GOOS == "darwin" {
