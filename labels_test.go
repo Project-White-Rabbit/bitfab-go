@@ -31,6 +31,56 @@ func TestLabels_SaveReplayAssertionPreservesFalseAndAttemptZero(t *testing.T) {
 	}
 }
 
+func TestLabels_SaveAndReadEvidence(t *testing.T) {
+	evidence := Justification{{SpanID: "span", Text: "Returned the right record"}}
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		if r.method == http.MethodGet {
+			return map[string]any{"labels": []any{map[string]any{
+				"traceId": "one", "labelStatus": "labeled", "label": true,
+				"annotation": "good", "evidence": evidence, "approved": false,
+				"passed": 0, "failed": 0, "assertions": []any{},
+			}}}
+		}
+		return map[string]any{"labels": []any{map[string]any{
+			"key": "one", "traceId": "one", "action": "set",
+		}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	ctx := context.Background()
+	if _, err := client.Labels.Save(ctx, LabelUpdate{
+		LabelTarget: LabelTarget{TraceID: "one"}, Label: true,
+		Annotation: "good", Evidence: &evidence,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"labels": []any{map[string]any{
+		"traceId": "one", "label": true, "annotation": "good",
+		"evidence": []any{map[string]any{"spanId": "span", "text": "Returned the right record"}},
+	}}}
+	if !reflect.DeepEqual(server.recorded()[0].body, want) {
+		t.Fatalf("request = %#v, want %#v", server.recorded()[0].body, want)
+	}
+	got, err := client.Labels.Get(ctx, "one")
+	if err != nil || got == nil || got.Evidence == nil || !reflect.DeepEqual(*got.Evidence, evidence) {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+}
+
+func TestLabels_GetLabelEvidenceUsesStubbedAssertionEndpoint(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"traceId": "one", "assertionId": "assertion", "evidence": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	evidence, err := client.Labels.GetLabelEvidence(context.Background(), "one", "assertion")
+	if err != nil || evidence == nil || len(evidence) != 0 {
+		t.Fatalf("GetLabelEvidence = %#v, %v", evidence, err)
+	}
+	request := server.recorded()[0]
+	if request.path != "/api/sdk/traces/labels/label-evidence" || request.query != "assertionId=assertion&traceId=one" {
+		t.Fatalf("request = %+v", request)
+	}
+}
+
 func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		labels := r.body["labels"].([]any)

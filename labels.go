@@ -88,6 +88,7 @@ type LabelUpdate struct {
 	Label      bool
 	Annotation string
 	Confidence LabelConfidence
+	Evidence   *Justification
 	Skip       bool
 	Archive    bool
 }
@@ -111,6 +112,9 @@ func (update LabelUpdate) payload() (map[string]any, error) {
 		if update.Confidence != "" {
 			payload["confidence"] = update.Confidence
 		}
+		if update.Evidence != nil {
+			payload["evidence"] = *update.Evidence
+		}
 	}
 	return payload, nil
 }
@@ -129,6 +133,7 @@ type HumanLabelUpdate struct {
 	Label       bool            `json:"label"`
 	Annotation  string          `json:"annotation"`
 	Confidence  LabelConfidence `json:"confidence,omitempty"`
+	Evidence    *Justification  `json:"evidence,omitempty"`
 }
 
 // HumanLabelOutcome reports a human-authored verdict saved by the server.
@@ -146,6 +151,7 @@ type AssertionVerdict struct {
 	LabelStatus LabelStatus      `json:"labelStatus"`
 	Label       *bool            `json:"label"`
 	Annotation  *string          `json:"annotation"`
+	Evidence    *Justification   `json:"evidence"`
 	Confidence  *LabelConfidence `json:"confidence"`
 	LabelSource LabelSource      `json:"labelSource"`
 	Approved    bool             `json:"approved"`
@@ -157,6 +163,7 @@ type TraceLabels struct {
 	LabelStatus LabelStatus        `json:"labelStatus"`
 	Label       *bool              `json:"label"`
 	Annotation  *string            `json:"annotation"`
+	Evidence    *Justification     `json:"evidence"`
 	Approved    bool               `json:"approved"`
 	Passed      int                `json:"passed"`
 	Failed      int                `json:"failed"`
@@ -283,4 +290,20 @@ func (l *LabelsClient) GetAll(ctx context.Context, traceIDs []string) ([]TraceLa
 		return nil, err
 	}
 	return response.Labels, nil
+}
+
+// GetLabelEvidence suggests evidence for a whole-trace or assertion label.
+// The discovery API is currently stubbed and returns an empty slice.
+func (l *LabelsClient) GetLabelEvidence(ctx context.Context, traceID string, assertionID string) (Justification, error) {
+	query := url.Values{"traceId": {traceID}}
+	if assertionID != "" {
+		query.Set("assertionId", assertionID)
+	}
+	var response struct {
+		Evidence Justification `json:"evidence"`
+	}
+	if err := l.httpClient.get(ctx, "/api/sdk/traces/labels/label-evidence?"+query.Encode(), &response); err != nil {
+		return nil, err
+	}
+	return response.Evidence, nil
 }
