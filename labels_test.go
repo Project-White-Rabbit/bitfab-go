@@ -66,21 +66,6 @@ func TestLabels_SaveAndReadEvidence(t *testing.T) {
 	}
 }
 
-func TestLabels_GetLabelEvidenceUsesStubbedAssertionEndpoint(t *testing.T) {
-	server := newDatasetsServer(t, func(datasetRequest) any {
-		return map[string]any{"traceId": "one", "assertionId": "assertion", "evidence": []any{}}
-	})
-	client := NewClient("test-key", WithServiceURL(server.URL))
-	evidence, err := client.Labels.GetLabelEvidence(context.Background(), "one", "assertion")
-	if err != nil || evidence == nil || len(evidence) != 0 {
-		t.Fatalf("GetLabelEvidence = %#v, %v", evidence, err)
-	}
-	request := server.recorded()[0]
-	if request.path != "/api/sdk/traces/labels/label-evidence" || request.query != "assertionId=assertion&traceId=one" {
-		t.Fatalf("request = %+v", request)
-	}
-}
-
 func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		labels := r.body["labels"].([]any)

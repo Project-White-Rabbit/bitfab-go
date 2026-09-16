@@ -252,7 +252,10 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	}
 	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
 	c.AssertionCategories = &AssertionCategoriesClient{httpClient: c.httpClient}
-	c.Traces = &TracesClient{httpClient: c.httpClient}
+	c.Traces = &TracesClient{
+		httpClient: c.httpClient,
+		Assertions: &TraceAssertionsClient{httpClient: c.httpClient},
+	}
 	c.Labels = &LabelsClient{httpClient: c.httpClient}
 	c.Graders = &GradersClient{httpClient: c.httpClient}
 	startCommitRefResolution()

@@ -239,3 +239,30 @@ func TestTraceTarget_RoundTripsOccurrences(t *testing.T) {
 		}
 	}
 }
+
+func TestTraceAssertions_GetAssertionEvidenceUsesOnlyAssertionID(t *testing.T) {
+	spanName := "lookup-record"
+	want := []PotentialAssertionEvidence{{
+		SpanID:   "span",
+		Text:     "Returned the right record",
+		SpanName: &spanName,
+		Parameters: []AssertionEvidenceParameter{{
+			Name: "recordId",
+			Type: "string",
+		}},
+		SpanType: "function",
+		IsMocked: false,
+	}}
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"traceId": "one", "assertionId": "assertion", "evidence": want}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	evidence, err := client.Traces.Assertions.GetAssertionEvidence(context.Background(), "assertion")
+	if err != nil || !reflect.DeepEqual(evidence, want) {
+		t.Fatalf("GetAssertionEvidence = %#v, %v", evidence, err)
+	}
+	request := server.recorded()[0]
+	if request.path != "/api/sdk/traces/assertions/assertion/evidence" || request.query != "" {
+		t.Fatalf("request = %+v", request)
+	}
+}

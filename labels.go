@@ -291,19 +291,3 @@ func (l *LabelsClient) GetAll(ctx context.Context, traceIDs []string) ([]TraceLa
 	}
 	return response.Labels, nil
 }
-
-// GetLabelEvidence suggests evidence for a whole-trace or assertion label.
-// The discovery API is currently stubbed and returns an empty slice.
-func (l *LabelsClient) GetLabelEvidence(ctx context.Context, traceID string, assertionID string) (Justification, error) {
-	query := url.Values{"traceId": {traceID}}
-	if assertionID != "" {
-		query.Set("assertionId", assertionID)
-	}
-	var response struct {
-		Evidence Justification `json:"evidence"`
-	}
-	if err := l.httpClient.get(ctx, "/api/sdk/traces/labels/label-evidence?"+query.Encode(), &response); err != nil {
-		return nil, err
-	}
-	return response.Evidence, nil
-}
