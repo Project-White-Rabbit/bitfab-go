@@ -32,7 +32,6 @@ type TraceSearchResult struct {
 
 type TracesClient struct {
 	httpClient *httpClient
-	Assertions *TraceAssertionsClient
 }
 
 func (t *TracesClient) Search(ctx context.Context, params TraceSearchParams) (*TraceSearchResult, error) {

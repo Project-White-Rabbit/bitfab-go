@@ -187,6 +187,19 @@ type LabelsClient struct {
 	httpClient *httpClient
 }
 
+// GenerateLabelEvidence generates suggested evidence for an assertion from
+// the selected original or replay trace.
+func (l *LabelsClient) GenerateLabelEvidence(ctx context.Context, traceID, assertionID string) ([]PotentialAssertionEvidence, error) {
+	var response struct {
+		Evidence []PotentialAssertionEvidence `json:"evidence"`
+	}
+	path := "/api/sdk/traces/" + url.PathEscape(traceID) + "/assertions/" + url.PathEscape(assertionID) + "/evidence"
+	if err := l.httpClient.get(ctx, path, &response); err != nil {
+		return nil, err
+	}
+	return response.Evidence, nil
+}
+
 // Save writes one agent-authored verdict, skip, or archive operation.
 func (l *LabelsClient) Save(ctx context.Context, update LabelUpdate, options ...LabelWriteOption) (*LabelOutcome, error) {
 	outcomes, err := l.SaveAll(ctx, []LabelUpdate{update}, options...)

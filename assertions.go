@@ -133,24 +133,6 @@ type PotentialAssertionEvidence struct {
 	IsMocked   bool                         `json:"isMocked"`
 }
 
-// TraceAssertionsClient manages operations addressed by assertion ID.
-type TraceAssertionsClient struct {
-	httpClient *httpClient
-}
-
-// GetAssertionEvidence suggests evidence for an assertion. The assertion ID
-// identifies its owning trace.
-func (a *TraceAssertionsClient) GetAssertionEvidence(ctx context.Context, assertionID string) ([]PotentialAssertionEvidence, error) {
-	var response struct {
-		Evidence []PotentialAssertionEvidence `json:"evidence"`
-	}
-	path := "/api/sdk/traces/assertions/" + url.PathEscape(assertionID) + "/evidence"
-	if err := a.httpClient.get(ctx, path, &response); err != nil {
-		return nil, err
-	}
-	return response.Evidence, nil
-}
-
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
 // criteria, targets, and categories. Point a justification to a nil slice to clear it.

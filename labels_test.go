@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+func TestLabels_GenerateLabelEvidenceUsesSelectedTraceAndAssertion(t *testing.T) {
+	spanName := "lookup-record"
+	want := []PotentialAssertionEvidence{{
+		SpanID:   "span",
+		Text:     "Returned the right record",
+		SpanName: &spanName,
+		Parameters: []AssertionEvidenceParameter{{
+			Name: "recordId",
+			Type: "string",
+		}},
+		SpanType: "function",
+		IsMocked: false,
+	}}
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"traceId": "one", "assertionId": "assertion", "evidence": want}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	evidence, err := client.Labels.GenerateLabelEvidence(context.Background(), "trace", "assertion")
+	if err != nil || !reflect.DeepEqual(evidence, want) {
+		t.Fatalf("GenerateLabelEvidence = %#v, %v", evidence, err)
+	}
+	request := server.recorded()[0]
+	if request.path != "/api/sdk/traces/trace/assertions/assertion/evidence" || request.query != "" {
+		t.Fatalf("request = %+v", request)
+	}
+}
+
 func TestLabels_SaveReplayAssertionPreservesFalseAndAttemptZero(t *testing.T) {
 	server := newDatasetsServer(t, func(datasetRequest) any {
 		return map[string]any{"labels": []any{map[string]any{"key": "original#0", "traceId": "replayed", "action": "set"}}}
