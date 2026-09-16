@@ -124,7 +124,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.seed, "cases", "", "seed cases JSON or JSONL file")
 	fs.StringVar(&out.executeItem, "execute-item", "", "internal replay assignment")
 	fs.StringVar(&out.fromTrace, "from-trace", "", "trace IDs to reseed")
-	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require active assertions")
+	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
 	fs.BoolVar(&out.dbBranch, "db-branch", false, "use historical database branches")
 	fs.BoolVar(&out.noDBBranch, "no-db-branch", false, "disable historical database branches")
@@ -205,6 +205,20 @@ func loadRegistryParams(path string, raw []string) (map[string]any, error) {
 	return params, nil
 }
 
+// hasApprovedAssertion reports whether a trace carries an assertion a person has
+// approved. GetAssertions returns every state so a reviewer can see drafts, but
+// only an approved assertion is checked on a replay, so narrowing on anything
+// else would pick traces the run cannot be judged against. The server applies
+// the same rule when it revalidates the selection.
+func hasApprovedAssertion(assertions []TraceAssertion) bool {
+	for _, assertion := range assertions {
+		if assertion.ApprovalState == ApprovalApproved {
+			return true
+		}
+	}
+	return false
+}
+
 func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, limit int, assertions bool) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("bitfab: replay limit must be positive")
@@ -221,7 +235,7 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		if err != nil {
 			return nil, err
 		}
-		if result.InheritedFrom == nil && len(result.Assertions) > 0 {
+		if result.InheritedFrom == nil && hasApprovedAssertion(result.Assertions) {
 			selected = append(selected, id)
 			if len(selected) == limit {
 				break
@@ -229,7 +243,7 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		}
 	}
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("bitfab: no traces with active assertions matched this selection")
+		return nil, fmt.Errorf("bitfab: no traces with approved assertions matched this selection")
 	}
 	return selected, nil
 }

@@ -27,7 +27,7 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{}, "inheritedFrom": nil})
 		case "/api/sdk/traces/b/assertions":
 			reads = append(reads, "b")
-			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "assertion"}}, "inheritedFrom": nil})
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "assertion", "approvalState": "approved"}}, "inheritedFrom": nil})
 		default:
 			base(w, r)
 		}
@@ -83,9 +83,9 @@ func TestReplayRegistryBoundExplicitOrderingInheritedAndErrors(t *testing.T) {
 		reads = append(reads, r.URL.Path)
 		switch r.URL.Path {
 		case "/api/sdk/traces/replayed/assertions":
-			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "x"}}, "inheritedFrom": "ancestor"})
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "x", "approvalState": "approved"}}, "inheritedFrom": "ancestor"})
 		case "/api/sdk/traces/good/assertions":
-			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "x"}}, "inheritedFrom": nil})
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "x", "approvalState": "approved"}}, "inheritedFrom": nil})
 		default:
 			http.Error(w, "failed", 500)
 		}
@@ -192,5 +192,44 @@ func TestReplayRegistryGradeHookChainsAndDryRunSkips(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatal("dry run invoked grading hook")
+	}
+}
+
+// A trace whose assertions are all still awaiting review is not replayable
+// under --only-with-assertions: only an approved assertion is checked on a
+// replay, so narrowing must skip it exactly as the server's selection does.
+func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	base := replayTestHandler(t, state, replayItems())
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/sdk/traces/draft/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a1", "approvalState": "pending"}}, "inheritedFrom": nil})
+		case "/api/sdk/traces/reviewed/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a2", "approvalState": "approved"}}, "inheritedFrom": nil})
+		default:
+			base(w, r)
+		}
+	})
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{
+		Client:   client,
+		Function: BindReplayFunction("registry", func(string, int) {}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if _, err := RunReplayCLI(context.Background(), registry,
+		[]string{"pipeline", "--trace-ids", "draft,reviewed", "--limit", "1", "--dry-run", "--only-with-assertions", "--no-code-change"},
+		&stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := state.startBody["traceIds"].([]any)
+	if !ok || len(got) != 1 || got[0] != "reviewed" {
+		t.Fatalf("selected trace ids = %#v, want only the reviewed trace", state.startBody["traceIds"])
 	}
 }
