@@ -8,13 +8,9 @@ import (
 )
 
 func TestAssertionCategories_CRUD(t *testing.T) {
-	approvedAt := "2026-09-10T00:00:00Z"
 	category := map[string]any{
 		"id": "category-1", "title": "Timing", "description": "Arrival requirements",
 		"organizationId": "org-1", "createdAt": "2026-09-09T00:00:00Z", "updatedAt": "2026-09-09T00:00:00Z",
-		"justification": []any{map[string]any{"spanId": "span-1", "text": "Shows the arrival time"}},
-		"approvalState": "approved", "approvedBy": map[string]any{"id": "user-1", "fullName": "Ada", "email": nil, "imageUrl": nil},
-		"approvedAt": approvedAt,
 	}
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		if r.method == http.MethodGet && r.path == assertionCategoriesPath {
@@ -28,10 +24,7 @@ func TestAssertionCategories_CRUD(t *testing.T) {
 	saved, err := client.AssertionCategories.Save(context.Background(), SaveAssertionCategoryParams{
 		Title: "Timing", Description: &description,
 	})
-	if err != nil || saved.ID != "category-1" || saved.OrganizationID != "org-1" || saved.ApprovalState != ApprovalApproved ||
-		len(saved.Justification) != 1 || saved.Justification[0].SpanID != "span-1" || saved.ApprovedBy == nil ||
-		saved.ApprovedBy.ID != "user-1" || saved.ApprovedBy.FullName == nil || *saved.ApprovedBy.FullName != "Ada" ||
-		saved.ApprovedBy.Email != nil || saved.ApprovedBy.ImageURL != nil || saved.ApprovedAt == nil || *saved.ApprovedAt != approvedAt {
+	if err != nil || saved.ID != "category-1" || saved.OrganizationID != "org-1" {
 		t.Fatalf("Save = %+v, %v", saved, err)
 	}
 	got, err := client.AssertionCategories.Get(context.Background(), "a/b")
@@ -78,15 +71,8 @@ func TestAssertionCategories_SavePreservesOmittedAndSendsEmptyDescription(t *tes
 		t.Fatal(err)
 	}
 	empty := ""
-	justification := Justification{{SpanID: "span-1", Text: "Shows the category is useful"}}
 	if _, err := client.AssertionCategories.Save(context.Background(), SaveAssertionCategoryParams{
-		ID: "category-1", Title: "Updated", Description: &empty, Justification: &justification,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var clearJustification Justification
-	if _, err := client.AssertionCategories.Save(context.Background(), SaveAssertionCategoryParams{
-		ID: "category-1", Title: "Updated", Justification: &clearJustification,
+		ID: "category-1", Title: "Updated", Description: &empty,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,13 +82,5 @@ func TestAssertionCategories_SavePreservesOmittedAndSendsEmptyDescription(t *tes
 	}
 	if requests[1].body["description"] != "" {
 		t.Fatalf("empty description not sent: %+v", requests[1].body)
-	}
-	if !reflect.DeepEqual(requests[1].body["justification"], []any{map[string]any{
-		"spanId": "span-1", "text": "Shows the category is useful",
-	}}) {
-		t.Fatalf("justification not sent: %+v", requests[1].body)
-	}
-	if justificationValue, ok := requests[2].body["justification"]; !ok || justificationValue != nil {
-		t.Fatalf("justification clear not sent: %+v", requests[2].body)
 	}
 }

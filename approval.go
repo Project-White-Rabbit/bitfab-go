@@ -6,10 +6,10 @@ type JustificationSpan struct {
 	Text   string `json:"text"`
 }
 
-// Justification is span-by-span evidence for an assertion or category.
+// Justification is span-by-span evidence for an assertion decision.
 type Justification []JustificationSpan
 
-// ApprovalState reports whether a person reviewed an assertion or category.
+// ApprovalState reports whether a person reviewed an assertion decision.
 type ApprovalState string
 
 const (
@@ -18,7 +18,7 @@ const (
 	ApprovalRejected ApprovalState = "rejected"
 )
 
-// Approver identifies the person who reviewed an assertion or category.
+// Approver identifies the person who reviewed an assertion decision.
 type Approver struct {
 	ID       string  `json:"id"`
 	FullName *string `json:"fullName"`

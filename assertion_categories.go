@@ -17,22 +17,18 @@ type AssertionCategorySummary struct {
 
 // AssertionCategory is an organization-scoped grouping for assertions.
 type AssertionCategory struct {
-	ApprovalFields
 	AssertionCategorySummary
-	OrganizationID string        `json:"organizationId"`
-	Justification  Justification `json:"justification"`
-	CreatedAt      string        `json:"createdAt"`
-	UpdatedAt      string        `json:"updatedAt"`
+	OrganizationID string `json:"organizationId"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 // SaveAssertionCategoryParams creates a category or updates ID in place.
 // A nil Description preserves the existing description; point to an empty string to clear it.
-// A nil Justification preserves it; point to a nil slice to clear it.
 type SaveAssertionCategoryParams struct {
-	ID            string
-	Title         string
-	Description   *string
-	Justification *Justification
+	ID          string
+	Title       string
+	Description *string
 }
 
 // AssertionCategoriesClient manages the organization's assertion categories.
@@ -52,9 +48,6 @@ func (a *AssertionCategoriesClient) Save(ctx context.Context, params SaveAsserti
 	}
 	if params.Description != nil {
 		payload["description"] = *params.Description
-	}
-	if params.Justification != nil {
-		payload["justification"] = *params.Justification
 	}
 	var response struct {
 		Category AssertionCategory `json:"category"`
