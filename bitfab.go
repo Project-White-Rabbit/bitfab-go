@@ -516,7 +516,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 				spanData["error_source"] = "code"
 			}
 
-			enrichment.apply(spanData)
+			enrichment.apply(spanData, contentOff)
 			rawSpan := map[string]any{
 				"id":         id.spanID,
 				"trace_id":   id.traceID,
@@ -944,11 +944,11 @@ func (s *ActiveSpan) End() {
 			if len(s.contexts) > 0 {
 				spanData["contexts"] = s.contexts
 			}
-			if s.prompt != "" {
+			if s.prompt != "" && !contentOff {
 				spanData["prompt"] = s.prompt
 			}
 
-			s.enrichment.apply(spanData)
+			s.enrichment.apply(spanData, contentOff)
 			rawSpan := map[string]any{
 				"id":         s.spanID,
 				"trace_id":   s.traceID,

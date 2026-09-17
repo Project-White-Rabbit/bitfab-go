@@ -76,8 +76,13 @@ func TestCurrentSpanEnrichmentMatchesActiveSpan(t *testing.T) {
 	nested := withSpanContext(ctx, "trace", "nested")
 	GetCurrentSpan(nested).SetPrompt("wrong")
 	result := map[string]any{}
-	state.apply(result)
+	state.apply(result, false)
 	if result["prompt"] != "prompt" || len(result["contexts"].([]ContextEntry)) != 1 {
 		t.Fatalf("wrong enrichment: %#v", result)
+	}
+	withheld := map[string]any{}
+	state.apply(withheld, true)
+	if _, ok := withheld["prompt"]; ok || len(withheld["contexts"].([]ContextEntry)) != 1 {
+		t.Fatalf("content-off enrichment kept prompt or lost contexts: %#v", withheld)
 	}
 }

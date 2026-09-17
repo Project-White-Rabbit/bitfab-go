@@ -13,7 +13,7 @@ import (
 )
 
 func planTestSpan() map[string]any {
-	return map[string]any{"traceId": "t", "traceFunctionKey": "child", "rootTraceFunctionKey": "root", "rawSpan": map[string]any{"span_origin": MakeSpanOrigin("trace"), "span_data": map[string]any{"name": "secret", "input": "private", "input_meta": "private", "output": "private", "output_meta": "private", "input_serialized": "private", "output_serialized": "private", "error": "failure"}}}
+	return map[string]any{"traceId": "t", "traceFunctionKey": "child", "rootTraceFunctionKey": "root", "rawSpan": map[string]any{"span_origin": MakeSpanOrigin("trace"), "span_data": map[string]any{"name": "secret", "input": "private", "input_meta": "private", "output": "private", "output_meta": "private", "input_serialized": "private", "output_serialized": "private", "prompt": "private", "error": "failure"}}}
 }
 
 func planTestChildSpan(name string) map[string]any {
@@ -34,7 +34,7 @@ func planSpanData(record map[string]any) map[string]any {
 
 func assertWithoutContent(t *testing.T, label string, data map[string]any) {
 	t.Helper()
-	for _, key := range []string{"input", "output", "input_meta", "output_meta", "input_serialized", "output_serialized"} {
+	for _, key := range []string{"input", "output", "input_meta", "output_meta", "input_serialized", "output_serialized", "prompt"} {
 		if _, ok := data[key]; ok {
 			t.Errorf("%s leaked %s", label, key)
 		}
@@ -663,4 +663,97 @@ func TestSimulationPlan_CloseNeverDropsHeldRecords(t *testing.T) {
 			t.Errorf("root lost content: %#v", root)
 		}
 	})
+}
+
+func promptTestNode(ctx context.Context, name string) (result int) {
+	node := EnterAutoNode(ctx, name, name, []any{name}, []any{&result})
+	if node != nil {
+		defer node.End(nil)
+		GetCurrentSpan(node.Context()).SetPrompt(name + " prompt")
+		GetCurrentSpan(node.Context()).AddContext(map[string]any{"step": name})
+	}
+	return 1
+}
+
+func assertPromptWithheld(t *testing.T, byName map[string][]map[string]any, name string) {
+	t.Helper()
+	if len(byName[name]) != 1 {
+		t.Fatalf("%s spans = %#v", name, byName[name])
+	}
+	data := byName[name][0]
+	if _, ok := data["prompt"]; ok || data["content_off_by_simulation_plan"] != true {
+		t.Errorf("%s leaked its prompt: %#v", name, data)
+	}
+	if contexts, _ := data["contexts"].([]any); len(contexts) != 1 {
+		t.Errorf("%s lost its contexts: %#v", name, data)
+	}
+}
+
+func assertPromptKept(t *testing.T, byName map[string][]map[string]any, name string) {
+	t.Helper()
+	if len(byName[name]) != 1 || byName[name][0]["prompt"] != name+" prompt" {
+		t.Fatalf("%s spans = %#v", name, byName[name])
+	}
+}
+
+func TestSimulationPlan_ContentOffWithholdsPrompt(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"prompted": {"secret"}, "optin": {"secret-span", "secret-start"}})
+	_, err := c.Trace(context.Background(), "prompted", func(ctx context.Context) (any, error) {
+		promptTestNode(ctx, "secret")
+		promptTestNode(ctx, "public")
+		return nil, nil
+	}, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = c.Span(context.Background(), "optin", func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).SetPrompt("secret-span prompt")
+		GetCurrentSpan(ctx).AddContext(map[string]any{"step": "secret-span"})
+		return nil, nil
+	}, WithName("secret-span"))
+	_, active := c.Start(context.Background(), "optin", "secret-start")
+	active.SetPrompt("secret-start prompt")
+	active.AddContext(map[string]any{"step": "secret-start"})
+	active.End()
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	byName := sentSpansByName(requests())
+	for _, name := range []string{"secret", "secret-span", "secret-start"} {
+		assertPromptWithheld(t, byName, name)
+	}
+	assertPromptKept(t, byName, "public")
+}
+
+func TestSimulationPlan_UnreadablePlanWithholdsChildPrompt(t *testing.T) {
+	c, requests := subtreeClient(t)
+	plan := newSimulationPlan(func() (map[string]any, error) { return nil, errors.New("offline") }, true)
+	installPlan(t, c, plan)
+	plan.refresh()
+	<-plan.firstReadDone
+	_, err := c.Trace(context.Background(), "unreadable", func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).SetPrompt("unreadable prompt")
+		promptTestNode(ctx, "child")
+		return nil, nil
+	}, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = c.Span(context.Background(), "optin-root", func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).SetPrompt("optin-root prompt")
+		return c.Span(ctx, "optin-root", func(ctx context.Context) (any, error) {
+			GetCurrentSpan(ctx).SetPrompt("optin-child prompt")
+			GetCurrentSpan(ctx).AddContext(map[string]any{"step": "optin-child"})
+			return nil, nil
+		}, WithName("optin-child"))
+	})
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	byName := sentSpansByName(requests())
+	assertPromptWithheld(t, byName, "child")
+	assertPromptWithheld(t, byName, "optin-child")
+	assertPromptKept(t, byName, "unreadable")
+	assertPromptKept(t, byName, "optin-root")
 }

@@ -528,8 +528,8 @@ func autoTraceTruncation(requests []map[string]any, traceID any) map[string]any 
 			continue
 		}
 		metadata, _ := trace["metadata"].(map[string]any)
-		if auto, ok := metadata["bitfabAutoTrace"].(map[string]any); ok {
-			return auto
+		if _, ok := metadata["bitfab.truncated_by"]; ok {
+			return metadata
 		}
 	}
 	return nil
@@ -574,7 +574,7 @@ func TestSubtree_DefaultMaxCapturedSubtreeSpansCapsDiscoveredSpans(t *testing.T)
 	if counts["discovered"] != 512 || counts["discovered-default"] != 1 {
 		t.Fatalf("counts = %#v", counts)
 	}
-	if truncation["truncated"] != true || truncation["maxCapturedSubtreeSpans"] != float64(512) || truncation["maxSpans"] != float64(2048) || truncation["maxDepth"] != float64(30) {
+	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(8) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
 }
@@ -592,7 +592,7 @@ func TestSubtree_DeclaredNodesRecordPastSubtreeLimitUpToMaxSpans(t *testing.T) {
 	if counts["discovered"] != 512 || counts["declared"] != 1535 || counts["declared-default"] != 1 || sumCounts(counts) != 2048 {
 		t.Fatalf("counts = %#v", counts)
 	}
-	if truncation["truncated"] != true {
+	if truncation["bitfab.truncated_by"] != "max_spans,max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(8+165) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
 }
@@ -631,7 +631,7 @@ func TestSubtree_MaxCapturedSubtreeSpansNeverExceedsMaxSpans(t *testing.T) {
 		counts, truncation := traceAndCount(t, c, requests, "capped", opts, func(ctx context.Context) {
 			callAuto(ctx, "discovered", 60)
 		})
-		if counts["discovered"] != 49 || counts["capped"] != 1 || truncation["maxCapturedSubtreeSpans"] != float64(50) {
+		if counts["discovered"] != 49 || counts["capped"] != 1 || truncation["bitfab.truncated_by"] != "max_spans" || truncation["bitfab.dropped_spans"] != float64(11) {
 			t.Fatalf("counts = %#v truncation = %#v", counts, truncation)
 		}
 	}
@@ -675,7 +675,119 @@ func TestSubtree_MaxSpansIsStrictTotalIncludingRoot(t *testing.T) {
 	if total := sumCounts(counts); total != limit || counts["strict"] != 1 {
 		t.Fatalf("sent %d spans for a root with MaxSpans %d: %#v", total, limit, counts)
 	}
-	if truncation["truncated"] != true {
+	if truncation["bitfab.truncated_by"] != "max_spans" || truncation["bitfab.dropped_spans"] != float64(4*20+5-(limit-1)) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
+}
+
+func autoNestedCall(ctx context.Context, symbol string, fn func(context.Context)) {
+	node := EnterAutoNode(ctx, symbol, symbol, nil, nil)
+	if node != nil {
+		defer node.End(nil)
+		ctx = node.Context()
+	}
+	fn(ctx)
+}
+
+func TestSubtree_TruncationMetadataNamesLimitsAndDroppedCount(t *testing.T) {
+	c, requests := subtreeClient(t)
+	depth, spans, captured := 1, 6, 2
+	counts, truncation := traceAndCount(t, c, requests, "truncated", TraceOptions{MaxDepth: &depth, MaxSpans: &spans, MaxCapturedSubtreeSpans: &captured}, func(ctx context.Context) {
+		autoNestedCall(ctx, "outer", func(ctx context.Context) {
+			callAuto(ctx, "too-deep", 3)
+		})
+		callAuto(ctx, "discovered", 4)
+	})
+	if counts["truncated"] != 1 || counts["outer"] != 1 || counts["discovered"] != 1 || counts["too-deep"] != 0 {
+		t.Fatalf("counts = %#v", counts)
+	}
+	if truncation["bitfab.truncated_by"] != "max_depth,max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(6) {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+}
+
+func TestSubtree_UntruncatedTraceCarriesNoTruncationMetadata(t *testing.T) {
+	c, requests := subtreeClient(t)
+	var traceID string
+	_, err := c.Trace(context.Background(), "whole", func(ctx context.Context) (any, error) {
+		traceID = GetCurrentSpan(ctx).TraceID()
+		GetCurrentTrace(ctx).SetMetadata(map[string]any{"ticket": "T-1"})
+		callAuto(ctx, "child", 3)
+		return nil, nil
+	}, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	found := false
+	for _, request := range requests() {
+		trace, _ := request["externalTrace"].(map[string]any)
+		if trace == nil || trace["id"] != traceID {
+			continue
+		}
+		found = true
+		metadata, _ := trace["metadata"].(map[string]any)
+		if metadata["ticket"] != "T-1" || len(metadata) != 1 {
+			t.Fatalf("metadata = %#v", metadata)
+		}
+	}
+	if !found {
+		t.Fatal("trace completion was not sent")
+	}
+}
+
+func TestSubtree_DroppedCallsPastLimitSkipTraceStateLockAndAllocations(t *testing.T) {
+	c, _ := subtreeClient(t)
+	limit := 1
+	_, err := c.Trace(context.Background(), "cheap", func(ctx context.Context) (any, error) {
+		scope := currentAutoScope(ctx)
+		root := scope.frames[0].root
+		parent := scope.frames[0].parent
+		if node := EnterAutoNode(ctx, "dropped", "dropped", nil, nil); node != nil {
+			t.Error("a call dropped past MaxSpans still built an invocation handle")
+		}
+		traceStateStore.Lock()
+		done := make(chan float64)
+		go func() {
+			done <- testing.AllocsPerRun(1000, func() {
+				if r, limited := root.add(parent, 1, "dropped", "function", "dropped", nil, false); r != nil || !limited {
+					t.Error("call past MaxSpans was recorded")
+				}
+			})
+		}()
+		select {
+		case allocs := <-done:
+			traceStateStore.Unlock()
+			if allocs != 0 {
+				t.Errorf("dropped call allocated %v times", allocs)
+			}
+		case <-time.After(5 * time.Second):
+			traceStateStore.Unlock()
+			<-done
+			t.Error("dropped call waited on the trace state lock")
+		}
+		if root.truncatedBy.Load() != truncatedByMaxSpans || root.droppedSpans.Load() < 1001 {
+			t.Errorf("truncatedBy=%d dropped=%d", root.truncatedBy.Load(), root.droppedSpans.Load())
+		}
+		return nil, nil
+	}, TraceOptions{MaxSpans: &limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func BenchmarkSubtree_DroppedCallPastMaxSpans(b *testing.B) {
+	c := newTestClient("http://127.0.0.1:1")
+	defer c.Close(time.Second)
+	limit := 1
+	_, _ = c.Trace(context.Background(), "bench", func(ctx context.Context) (any, error) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			autoTestCall(ctx, "dropped", func() int { return 0 })
+		}
+		return nil, nil
+	}, TraceOptions{MaxSpans: &limit})
 }

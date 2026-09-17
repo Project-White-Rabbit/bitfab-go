@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,9 +54,53 @@ func newHTTPClient(apiKey, serviceURL string) *httpClient {
 		apiKey:     apiKey,
 		serviceURL: serviceURL,
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Transport: sharedTransport(),
+			Timeout:   defaultRequestTimeout,
 		},
 	}
+}
+
+const (
+	defaultRequestTimeout    = 120 * time.Second
+	transportIdleConnTimeout = 90 * time.Second
+	maxDrainedResponseBytes  = 64 << 10
+)
+
+var (
+	sdkTransportOnce sync.Once
+	sdkTransport     *http.Transport
+)
+
+func sharedTransport() *http.Transport {
+	sdkTransportOnce.Do(func() {
+		sdkTransport = newSDKTransport(http.DefaultTransport)
+	})
+	return sdkTransport
+}
+
+func newSDKTransport(base http.RoundTripper) *http.Transport {
+	var transport *http.Transport
+	if defaultTransport, ok := base.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dialer.DialContext,
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+	}
+	transport.MaxIdleConns = max(transport.MaxIdleConns, otelMaxExportConcurrency*2)
+	transport.MaxIdleConnsPerHost = max(transport.MaxIdleConnsPerHost, otelMaxExportConcurrency)
+	transport.IdleConnTimeout = transportIdleConnTimeout
+	return transport
+}
+
+func drainAndClose(body io.ReadCloser) {
+	_, _ = io.CopyN(io.Discard, body, maxDrainedResponseBytes)
+	_ = body.Close()
 }
 
 // httpStatusError is a non-2xx response. The OTLP exporter reads the status to
@@ -204,7 +249,10 @@ func (h *httpClient) sendPreparedMethod(
 ) (map[string]any, error) {
 	client := h.client
 	if timeout > 0 {
-		client = &http.Client{Timeout: timeout}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+		client = &http.Client{Transport: h.client.Transport}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, h.serviceURL+endpoint, bytes.NewReader(prepared.body))
@@ -221,7 +269,7 @@ func (h *httpClient) sendPreparedMethod(
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -245,22 +293,17 @@ func (h *httpClient) sendPreparedMethod(
 }
 
 func (h *httpClient) get(ctx context.Context, endpoint string, result any) error {
-	return h.getWithConnectionClose(ctx, endpoint, result, false)
-}
-
-func (h *httpClient) getWithConnectionClose(ctx context.Context, endpoint string, result any, connectionClose bool) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", h.serviceURL+endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("bitfab: failed to create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+h.resolveAPIKey())
-	req.Close = connectionClose
 
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("bitfab: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)

@@ -3,8 +3,6 @@ package bitfab
 import (
 	"context"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -55,32 +53,39 @@ func AutoCaptureActive() bool {
 }
 
 func autoGoroutineID() uint64 {
-	// Go exposes no goroutine-local storage API. Use only the public stack
-	// formatter, with a checked prefix and a fail-open fallback, never runtime
-	// memory layouts or linkname. The transform's inactive path never reads it.
 	var buffer [64]byte
 	n := runtime.Stack(buffer[:], false)
-	line := string(buffer[:n])
-	if !strings.HasPrefix(line, "goroutine ") {
+	prefix := "goroutine "
+	if n <= len(prefix) || string(buffer[:len(prefix)]) != prefix {
 		return 0
 	}
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0
+	var id uint64
+	for _, b := range buffer[len(prefix):n] {
+		if b < '0' || b > '9' {
+			break
+		}
+		id = id*10 + uint64(b-'0')
 	}
-	id, _ := strconv.ParseUint(fields[1], 10, 64)
 	return id
 }
 
 func currentAutoScope(ctx context.Context) *autoScope {
+	scope, _ := lookupAutoScope(ctx)
+	return scope
+}
+
+func lookupAutoScope(ctx context.Context) (scope *autoScope, onGoroutine bool) {
 	id := autoGoroutineID()
 	autoScopes.RLock()
-	scope := autoScopes.values[id]
+	scope = autoScopes.values[id]
 	autoScopes.RUnlock()
-	if scope == nil && ctx != nil {
+	if scope != nil {
+		return scope, true
+	}
+	if ctx != nil {
 		scope, _ = ctx.Value(autoScopeContextKey{}).(*autoScope)
 	}
-	return scope
+	return scope, false
 }
 
 func pushAutoScope(scope *autoScope) func() {

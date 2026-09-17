@@ -18,13 +18,13 @@ func withSpanEnrichment(ctx context.Context, spanID string) (context.Context, *s
 	return context.WithValue(ctx, spanEnrichmentKey{}, state), state
 }
 
-func (s *spanEnrichment) apply(data map[string]any) {
+func (s *spanEnrichment) apply(data map[string]any, contentOff bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.prompt != "" {
+	if s.prompt != "" && !contentOff {
 		data["prompt"] = s.prompt
 	}
 	if len(s.contexts) > 0 {

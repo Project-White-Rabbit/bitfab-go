@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,9 @@ func (e *MixedTracingError) Error() string {
 
 func normalizeAutoSymbol(s string) string {
 	s = strings.TrimSuffix(s, "-fm")
+	if strings.IndexByte(s, '[') < 0 && strings.IndexByte(s, ']') < 0 {
+		return s
+	}
 	var b strings.Builder
 	depth := 0
 	for _, r := range s {
@@ -138,6 +142,25 @@ type autoRoot struct {
 	managed                                     *managedTraceRoot
 	complete                                    func()
 	completeOnce                                sync.Once
+	closed                                      atomic.Bool
+	spansFull                                   atomic.Bool
+	truncatedBy                                 atomic.Uint32
+	droppedSpans                                atomic.Int64
+}
+
+const (
+	truncatedByMaxDepth uint32 = 1 << iota
+	truncatedByMaxSpans
+	truncatedByMaxCapturedSubtreeSpans
+)
+
+var truncationLimitNames = []struct {
+	flag uint32
+	name string
+}{
+	{truncatedByMaxDepth, "max_depth"},
+	{truncatedByMaxSpans, "max_spans"},
+	{truncatedByMaxCapturedSubtreeSpans, "max_captured_subtree_spans"},
 }
 
 type autoRecord struct {
@@ -153,39 +176,88 @@ type autoRecord struct {
 	enrichment                                        *spanEnrichment
 }
 
-func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, declared bool) *autoRecord {
-	contentOff := root.client.httpClient.simulationPlan.isContentOff(root.key, name)
+func (root *autoRoot) excluded(symbol, name string) bool {
+	for _, pattern := range root.opts.Exclude {
+		if matched, _ := path.Match(pattern, symbol); matched || pattern == symbol || pattern == name || pattern == symbol[strings.LastIndex(symbol, ".")+1:] {
+			return true
+		}
+	}
+	return false
+}
+
+func (root *autoRoot) drop(limit uint32) {
+	if root.closed.Load() {
+		return
+	}
+	root.truncatedBy.Or(limit)
+	root.droppedSpans.Add(1)
+}
+
+func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, declared bool) (*autoRecord, bool) {
+	if root.closed.Load() || root.excluded(symbol, name) {
+		return nil, false
+	}
+	if depth > root.maxDepth {
+		root.drop(truncatedByMaxDepth)
+		return nil, true
+	}
+	if root.spansFull.Load() {
+		root.drop(truncatedByMaxSpans)
+		return nil, true
+	}
+	contentOff := !declared && root.client.httpClient.simulationPlan.isContentOff(root.key, name)
 	root.mu.Lock()
 	defer root.mu.Unlock()
 	if !root.active {
-		return nil
+		return nil, false
 	}
-	for _, pattern := range root.opts.Exclude {
-		if matched, _ := path.Match(pattern, symbol); matched || pattern == symbol || pattern == name || pattern == symbol[strings.LastIndex(symbol, ".")+1:] {
-			return nil
-		}
+	if root.count >= root.maxSpans {
+		root.spansFull.Store(true)
+		root.drop(truncatedByMaxSpans)
+		return nil, true
 	}
-	full := root.count >= root.maxSpans || !contentOff && !declared && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans
-	if depth > root.maxDepth || full {
-		state := createTraceState(root.traceID)
-		state.mu.Lock()
-		if state.Metadata == nil {
-			state.Metadata = map[string]any{}
-		}
-		state.Metadata["bitfabAutoTrace"] = map[string]any{"protocol": "go-auto-v1", "truncated": true, "maxDepth": root.maxDepth, "maxSpans": root.maxSpans, "maxCapturedSubtreeSpans": root.maxCapturedSubtreeSpans}
-		state.mu.Unlock()
-		return nil
+	captured := !contentOff && !declared
+	if captured && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans {
+		root.drop(truncatedByMaxCapturedSubtreeSpans)
+		return nil, true
 	}
 	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input}
 	if parent != nil {
 		r.parentID = parent.id
 	}
 	root.count++
-	if !contentOff && !declared {
+	if root.count >= root.maxSpans {
+		root.spansFull.Store(true)
+	}
+	if captured {
 		root.capturedSubtreeCount++
 	}
 	root.records[r] = true
-	return r
+	return r, false
+}
+
+func (root *autoRoot) recordTruncation() {
+	limits := root.truncatedBy.Load()
+	if limits == 0 {
+		return
+	}
+	state := getTraceState(root.traceID)
+	if state == nil {
+		return
+	}
+	names := make([]string, 0, len(truncationLimitNames))
+	for _, limit := range truncationLimitNames {
+		if limits&limit.flag != 0 {
+			names = append(names, limit.name)
+		}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.Metadata == nil {
+		state.Metadata = map[string]any{}
+	}
+	state.Metadata["bitfab.truncated_by"] = strings.Join(names, ",")
+	state.Metadata["bitfab.dropped_spans"] = int(root.droppedSpans.Load())
 }
 
 func (r *autoRecord) finish(output any, err error) {
@@ -224,7 +296,7 @@ func (r *autoRecord) finish(output any, err error) {
 		for k, v := range r.links {
 			data[k] = v
 		}
-		r.enrichment.apply(data)
+		r.enrichment.apply(data, contentOff)
 		root := r.root
 		if root.managed != nil && root.rootRecord == r {
 			root.managed.mu.Lock()
@@ -266,6 +338,7 @@ func (root *autoRoot) tryComplete() {
 	root.mu.Unlock()
 	if ready {
 		root.completeOnce.Do(func() {
+			root.recordTruncation()
 			if complete != nil {
 				complete()
 			} else {
@@ -278,6 +351,7 @@ func (root *autoRoot) tryComplete() {
 func (root *autoRoot) close() {
 	root.mu.Lock()
 	root.active = false
+	root.closed.Store(true)
 	root.closing = true
 	var unfinished []*autoRecord
 	for r := range root.records {
@@ -434,7 +508,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		frames = append(frames, previous.frames...)
 	}
 	for i, frame := range frames {
-		r := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, true)
+		r, _ := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, true)
 		if r != nil {
 			records = append(records, r)
 			frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}

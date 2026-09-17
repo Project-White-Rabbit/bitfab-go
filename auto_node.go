@@ -40,7 +40,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 	if !AutoCaptureActive() {
 		return nil
 	}
-	scope := currentAutoScope(ctx)
+	scope, onGoroutine := lookupAutoScope(ctx)
 	if scope == nil || scope.suppress {
 		return nil
 	}
@@ -61,14 +61,19 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		next.skipName = ""
 		return &AutoNode{ctx: ctx, restore: pushAutoScope(&next), outputs: outputs}
 	}
-	node := &AutoNode{outputs: outputs, ctx: ctx}
-	frames := append([]autoFrame(nil), scope.frames...)
-	for i, frame := range frames {
+	var records []*autoRecord
+	var finalize SpanFinalizer
+	frames := scope.frames
+	copied := false
+	droppedByLimit, droppedForGood := true, true
+	for i, frame := range scope.frames {
 		opts, configured := frame.root.client.nodeOptions(symbol)
 		if len(wrapper) > 0 && wrapper[0] && !configured && !frame.root.opts.IncludeWrappers {
+			droppedByLimit = false
 			continue
 		}
 		if opts.Capture != nil && !*opts.Capture {
+			droppedByLimit = false
 			continue
 		}
 		nodeName, kind := name, "function"
@@ -78,15 +83,28 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		if opts.Type != "" {
 			kind = opts.Type
 		}
-		r := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, configured)
+		r, limited := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, configured)
 		if r == nil {
+			droppedByLimit = droppedByLimit && limited
+			droppedForGood = droppedForGood && (frame.depth+1 > frame.root.maxDepth || frame.root.spansFull.Load())
 			continue
 		}
-		node.records = append(node.records, r)
+		records = append(records, r)
 		r.testRunID = opts.TestRunID
-		node.finalize = opts.Finalize
+		finalize = opts.Finalize
+		if !copied {
+			frames = append([]autoFrame(nil), scope.frames...)
+			copied = true
+		}
 		frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
 	}
+	if len(records) == 0 && droppedByLimit && onGoroutine && (scope.skipName == "" || droppedForGood) {
+		return nil
+	}
+	if !copied {
+		frames = append([]autoFrame(nil), scope.frames...)
+	}
+	node := &AutoNode{outputs: outputs, ctx: ctx, records: records, finalize: finalize}
 	if len(node.records) > 0 {
 		r := node.records[len(node.records)-1]
 		opts, _ := r.root.client.nodeOptions(symbol)

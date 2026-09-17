@@ -416,7 +416,7 @@ func stripPlanContent(payload map[string]any) map[string]any {
 	kept := make(map[string]any, len(data))
 	for field, value := range data {
 		switch field {
-		case "input", "input_meta", "output", "output_meta", "input_serialized", "output_serialized":
+		case "input", "input_meta", "output", "output_meta", "input_serialized", "output_serialized", "prompt":
 			continue
 		}
 		kept[field] = value
@@ -487,6 +487,6 @@ func (h *httpClient) getSimulationPlan() (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), simulationPlanReadTimeout)
 	defer cancel()
 	var body map[string]any
-	err := h.getWithConnectionClose(ctx, "/api/sdk/sim-plan", &body, true)
+	err := h.get(ctx, "/api/sdk/sim-plan", &body)
 	return body, err
 }
