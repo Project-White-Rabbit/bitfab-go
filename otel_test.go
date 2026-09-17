@@ -296,17 +296,17 @@ func TestOtel_StatusCodeMappingIsNotIdentity(t *testing.T) {
 func TestOtel_DirectRequestsAreCountBounded(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, func(cfg *otelTransportConfig) {
-		cfg.maxExportBatchSize = 512
+		cfg.maxExportBatchSize = 1_200
 	})
 
-	for i := range 300 {
+	for i := range 1_100 {
 		transport.submit(operationExternalSpan, map[string]any{"index": i}, nil)
 	}
 	transport.flush(10 * time.Second)
 
 	requests := sender.recorded()
-	if len(requests) != 3 {
-		t.Fatalf("requests = %d, want 3 (300 carriers at %d per request)", len(requests), otelDirectMaxRequestBatchSize)
+	if len(requests) != 5 {
+		t.Fatalf("requests = %d, want 5 (1100 carriers at %d per request)", len(requests), otelDirectMaxRequestBatchSize)
 	}
 	for _, request := range requests {
 		carriers := carriersIn(t, []recordedRequest{request})
@@ -314,8 +314,8 @@ func TestOtel_DirectRequestsAreCountBounded(t *testing.T) {
 			t.Errorf("request held %d carriers, want at most %d", len(carriers), otelDirectMaxRequestBatchSize)
 		}
 	}
-	if total := len(carriersIn(t, requests)); total != 300 {
-		t.Errorf("delivered %d carriers, want all 300", total)
+	if total := len(carriersIn(t, requests)); total != 1_100 {
+		t.Errorf("delivered %d carriers, want all 1100", total)
 	}
 }
 

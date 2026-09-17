@@ -32,7 +32,7 @@ const (
 	otelMaxDecompressedBytes      = 8_000_000
 	otelMaxQueueSize              = 16_384
 	otelDirectMaxExportBatch      = 512
-	otelDirectMaxRequestBatchSize = 128
+	otelDirectMaxRequestBatchSize = 256
 	otelDefaultExportConcurrency  = 32
 	otelMaxExportConcurrency      = 64
 
