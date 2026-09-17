@@ -68,7 +68,7 @@ func TestSimulationPlan_HoldStripAndDrain(t *testing.T) {
 	defer plan.stop()
 	var recorded recordedSubmissions
 	original := planTestSpan()
-	plan.sendSpan(original, recorded.submit)
+	plan.sendSpan(original, simulationPlanApplies, recorded.submit, func() {})
 	<-entered
 	plan.sendTrace(map[string]any{"traceId": "t", "completed": true}, recorded.submit)
 	plan.sendTrace(map[string]any{"traceId": "unrelated", "completed": true}, recorded.submit)
@@ -95,7 +95,7 @@ func TestSimulationPlan_CompletionWaitsForSubmission(t *testing.T) {
 	plan := newSimulationPlan(func() (map[string]any, error) { close(entered); <-release; return planTestPolicy(), nil }, true)
 	defer plan.stop()
 	completed := make(chan struct{})
-	plan.sendSpan(planTestSpan(), func(map[string]any) { close(draining); <-submitted })
+	plan.sendSpan(planTestSpan(), simulationPlanApplies, func(map[string]any) { close(draining); <-submitted }, func() {})
 	<-entered
 	close(release)
 	<-draining
@@ -126,7 +126,7 @@ func TestSimulationPlan_FrameworkAndMissingEndpoint(t *testing.T) {
 	sent := make(chan map[string]any, 2)
 	span := planTestChildSpan("secret")
 	span["rawSpan"].(map[string]any)["span_origin"] = MakeSpanOrigin("langgraph")
-	plan.sendSpan(span, func(p map[string]any) { sent <- p })
+	plan.sendSpan(span, simulationPlanApplies, func(p map[string]any) { sent <- p }, func() {})
 	select {
 	case got := <-sent:
 		if planSpanData(got)["input"] != "private" {
@@ -135,7 +135,7 @@ func TestSimulationPlan_FrameworkAndMissingEndpoint(t *testing.T) {
 	default:
 		t.Fatal("framework held")
 	}
-	plan.sendSpan(planTestChildSpan("secret"), func(p map[string]any) { sent <- p })
+	plan.sendSpan(planTestChildSpan("secret"), simulationPlanApplies, func(p map[string]any) { sent <- p }, func() {})
 	if !plan.release(time.Second, false) {
 		t.Fatal("404 failed to release")
 	}
@@ -156,13 +156,13 @@ func TestSimulationPlan_FailedFirstReadSendsWithoutContent(t *testing.T) {
 	defer plan.stop()
 	var recorded recordedSubmissions
 	for i := 0; i < simulationPlanMaxHeld+1; i++ {
-		plan.sendSpan(planTestChildSpan("public"), recorded.submit)
+		plan.sendSpan(planTestChildSpan("public"), simulationPlanApplies, recorded.submit, func() {})
 	}
 	<-entered
 	framework := planTestChildSpan("public")
 	framework["rawSpan"].(map[string]any)["span_origin"] = MakeSpanOrigin("langgraph")
-	plan.sendSpan(planTestSpan(), recorded.submit)
-	plan.sendSpan(framework, recorded.submit)
+	plan.sendSpan(planTestSpan(), simulationPlanApplies, recorded.submit, func() {})
+	plan.sendSpan(framework, simulationPlanApplies, recorded.submit, func() {})
 	plan.mu.Lock()
 	held := len(plan.held)
 	plan.mu.Unlock()
@@ -185,7 +185,7 @@ func TestSimulationPlan_FailedFirstReadSendsWithoutContent(t *testing.T) {
 	if !plan.release(time.Second, false) {
 		t.Fatal("failed read did not release held records")
 	}
-	plan.sendSpan(planTestChildSpan("public"), recorded.submit)
+	plan.sendSpan(planTestChildSpan("public"), simulationPlanApplies, recorded.submit, func() {})
 	sent := recorded.snapshot()
 	if len(sent) != simulationPlanMaxHeld+4 {
 		t.Fatalf("sent %d records", len(sent))
@@ -210,7 +210,7 @@ func TestSimulationPlan_FailedFirstReadSendsWithoutContent(t *testing.T) {
 	disabled := newSimulationPlan(func() (map[string]any, error) { t.Error("disabled read"); return nil, nil }, false)
 	defer disabled.stop()
 	got := make(chan map[string]any, 1)
-	disabled.sendSpan(planTestChildSpan("public"), func(p map[string]any) { got <- p })
+	disabled.sendSpan(planTestChildSpan("public"), simulationPlanApplies, func(p map[string]any) { got <- p }, func() {})
 	select {
 	case record := <-got:
 		if planSpanData(record)["input"] != "private" {
@@ -245,7 +245,7 @@ func TestSimulationPlan_LaterReadAppliesPlanAndFailedRefreshKeepsIt(t *testing.T
 	}
 	send := func(name string) map[string]any {
 		var got map[string]any
-		plan.sendSpan(planTestChildSpan(name), func(record map[string]any) { got = record })
+		plan.sendSpan(planTestChildSpan(name), simulationPlanApplies, func(record map[string]any) { got = record }, func() {})
 		if got == nil {
 			t.Fatalf("%s was held", name)
 		}
@@ -276,7 +276,7 @@ func TestSimulationPlan_CloseSendsHeldRecordsWithoutContent(t *testing.T) {
 	client.httpClient.simulationPlan = plan
 	defer client.Close(0)
 	var recorded recordedSubmissions
-	plan.sendSpan(planTestChildSpan("public"), recorded.submit)
+	plan.sendSpan(planTestChildSpan("public"), simulationPlanApplies, recorded.submit, func() {})
 	<-entered
 	if client.FlushTraces(0) {
 		t.Fatal("flush reported delivery while records remain held")
@@ -303,14 +303,14 @@ func TestSimulationPlan_UnreadablePlanSkipsContentAndKeepsLimits(t *testing.T) {
 	installPlan(t, c, plan)
 	plan.refresh()
 	<-plan.firstReadDone
-	three := 3
+	two := 2
 	var rootCalls, childCalls atomic.Int32
 	_, err := c.Trace(context.Background(), "unreadable", func(ctx context.Context) (any, error) {
 		for i := 0; i < 5; i++ {
 			_, _ = planTestNode(ctx, "child", &childCalls)
 		}
 		return planMarshalCounter{&rootCalls}, nil
-	}, TraceOptions{MaxSpans: &three, Input: []any{planMarshalCounter{&rootCalls}}})
+	}, TraceOptions{MaxCapturedSubtreeSpans: &two, Input: []any{planMarshalCounter{&rootCalls}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,8 +324,8 @@ func TestSimulationPlan_UnreadablePlanSkipsContentAndKeepsLimits(t *testing.T) {
 		t.Error("root content was never built")
 	}
 	byName := sentSpansByName(requests())
-	if len(byName["child"]) != three-1 {
-		t.Fatalf("child spans = %d, want %d under MaxSpans %d", len(byName["child"]), three-1, three)
+	if len(byName["child"]) != two {
+		t.Fatalf("child spans = %d, want %d under MaxCapturedSubtreeSpans %d", len(byName["child"]), two, two)
 	}
 	for _, data := range byName["child"] {
 		if _, ok := data["input"]; ok || data["content_off_by_simulation_plan"] != true || data["error"] != "child failed" {
@@ -608,8 +608,8 @@ func TestSimulationPlan_CloseNeverDropsHeldRecords(t *testing.T) {
 			once.Do(func() { close(draining); <-unblock })
 			recorded.submit(record)
 		}
-		plan.sendSpan(planTestTraceSpan("t", "secret", true), blocking)
-		plan.sendSpan(planTestTraceSpan("t", "public", true), recorded.submit)
+		plan.sendSpan(planTestTraceSpan("t", "secret", true), simulationPlanApplies, blocking, func() {})
+		plan.sendSpan(planTestTraceSpan("t", "public", true), simulationPlanApplies, recorded.submit, func() {})
 		<-entered
 		plan.sendTrace(map[string]any{"traceId": "t", "completed": true}, recorded.submit)
 		close(release)
@@ -643,8 +643,8 @@ func TestSimulationPlan_CloseNeverDropsHeldRecords(t *testing.T) {
 		client := NewClient("key", WithSimulationPlan(false))
 		client.httpClient.simulationPlan = plan
 		var recorded recordedSubmissions
-		plan.sendSpan(planTestTraceSpan("t", "public", true), recorded.submit)
-		plan.sendSpan(planTestTraceSpan("t", "answer", false), recorded.submit)
+		plan.sendSpan(planTestTraceSpan("t", "public", true), simulationPlanApplies, recorded.submit, func() {})
+		plan.sendSpan(planTestTraceSpan("t", "answer", false), simulationPlanApplies, recorded.submit, func() {})
 		<-entered
 		plan.sendTrace(map[string]any{"traceId": "t", "completed": true}, recorded.submit)
 		if !client.Close(0) {
@@ -720,10 +720,142 @@ func TestSimulationPlan_ContentOffWithholdsPrompt(t *testing.T) {
 		t.Fatal("flush")
 	}
 	byName := sentSpansByName(requests())
-	for _, name := range []string{"secret", "secret-span", "secret-start"} {
+	if len(byName["secret"]) != 0 {
+		t.Fatalf("error-free content-off child was sent: %#v", byName["secret"])
+	}
+	for _, name := range []string{"secret-span", "secret-start"} {
 		assertPromptWithheld(t, byName, name)
 	}
 	assertPromptKept(t, byName, "public")
+}
+
+func planTestQuietSpan(name string, parent bool) map[string]any {
+	span := planTestTraceSpan("t", name, parent)
+	delete(planSpanData(span), "error")
+	return span
+}
+
+func TestSimulationPlan_LoadedPlanSkipsErrorFreeContentOffChildren(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	plan := newSimulationPlan(func() (map[string]any, error) { return planTestPolicy(), nil }, true)
+	defer plan.stop()
+	plan.refresh()
+	<-plan.firstReadDone
+	framework := planTestQuietSpan("secret", true)
+	framework["rawSpan"].(map[string]any)["span_origin"] = MakeSpanOrigin("langgraph")
+	cases := []struct {
+		label string
+		span  map[string]any
+		sent  bool
+	}{
+		{"error-free child", planTestQuietSpan("secret", true), false},
+		{"errored child", planTestTraceSpan("t", "secret", true), true},
+		{"root", planTestQuietSpan("secret", false), true},
+		{"framework child", framework, true},
+		{"listed child", planTestQuietSpan("public", true), true},
+	}
+	for _, tc := range cases {
+		var recorded recordedSubmissions
+		discarded := 0
+		plan.sendSpan(tc.span, simulationPlanApplies, recorded.submit, func() { discarded++ })
+		sent := recorded.snapshot()
+		if tc.sent != (len(sent) == 1) || tc.sent == (discarded == 1) || len(sent)+discarded != 1 {
+			t.Fatalf("%s: sent %d, discarded %d", tc.label, len(sent), discarded)
+		}
+		if !tc.sent {
+			continue
+		}
+		data := planSpanData(sent[0])
+		switch tc.label {
+		case "errored child":
+			assertWithoutContent(t, tc.label, data)
+		case "root":
+			if _, ok := data["input"]; ok || data["content_off_by_simulation_plan"] != true {
+				t.Errorf("root = %#v", data)
+			}
+		default:
+			if data["input"] != "private" || data["content_off_by_simulation_plan"] != nil {
+				t.Errorf("%s lost content: %#v", tc.label, data)
+			}
+		}
+	}
+}
+
+func TestSimulationPlan_HeldContentOffChildIsDiscardedOnRelease(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	plan := newSimulationPlan(func() (map[string]any, error) { close(entered); <-release; return planTestPolicy(), nil }, true)
+	defer plan.stop()
+	var recorded recordedSubmissions
+	var discarded atomic.Int32
+	plan.sendSpan(planTestQuietSpan("secret", true), simulationPlanApplies, recorded.submit, func() { discarded.Add(1) })
+	plan.sendSpan(planTestTraceSpan("t", "secret", true), simulationPlanApplies, recorded.submit, func() { discarded.Add(1) })
+	<-entered
+	plan.sendTrace(map[string]any{"traceId": "t", "completed": true}, recorded.submit)
+	if sent := recorded.snapshot(); len(sent) != 0 || discarded.Load() != 0 {
+		t.Fatalf("released before the first read: sent %d, discarded %d", len(sent), discarded.Load())
+	}
+	close(release)
+	if !plan.release(time.Second, false) {
+		t.Fatal("plan did not drain")
+	}
+	if discarded.Load() != 1 {
+		t.Fatalf("discarded = %d, want 1", discarded.Load())
+	}
+	byLabel := deliveredOnce(t, recorded.snapshot(), []string{"secret", "completion:t"})
+	assertWithoutContent(t, "errored secret", planSpanData(byLabel["secret"]))
+}
+
+func TestSimulationPlan_HeldDeclaredNodeKeepsContentOnRelease(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	plan := newSimulationPlan(func() (map[string]any, error) { close(entered); <-release; return planTestPolicy(), nil }, true)
+	defer plan.stop()
+	var recorded recordedSubmissions
+	plan.sendSpan(planTestQuietSpan("secret", true), simulationPlanIgnored, recorded.submit, func() { t.Error("declared node was discarded") })
+	<-entered
+	if sent := recorded.snapshot(); len(sent) != 0 {
+		t.Fatalf("declared node sent before the first read: %d", len(sent))
+	}
+	close(release)
+	if !plan.release(time.Second, false) {
+		t.Fatal("plan did not drain")
+	}
+	sent := recorded.snapshot()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d records", len(sent))
+	}
+	if data := planSpanData(sent[0]); data["input"] != "private" || data["prompt"] != "private" || data["content_off_by_simulation_plan"] != nil {
+		t.Fatalf("declared node = %#v", data)
+	}
+}
+
+func TestSimulationPlan_SkippedSpanIsNotCountedInCompletion(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"optin": {"secret-start"}})
+	ctx, root := c.Start(context.Background(), "optin", "root")
+	_, child := c.Start(ctx, "optin", "secret-start")
+	child.End()
+	root.End()
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	sent := requests()
+	if byName := sentSpansByName(sent); len(byName["secret-start"]) != 0 || len(byName["root"]) != 1 {
+		t.Fatalf("spans = %#v", byName)
+	}
+	completions := 0
+	for _, request := range sent {
+		if request["expectedSpanCount"] != nil {
+			completions++
+			if request["expectedSpanCount"] != float64(1) {
+				t.Fatalf("expected span count = %v, want 1", request["expectedSpanCount"])
+			}
+		}
+	}
+	if completions != 1 {
+		t.Fatalf("completions = %d, want 1", completions)
+	}
 }
 
 func TestSimulationPlan_UnreadablePlanWithholdsChildPrompt(t *testing.T) {

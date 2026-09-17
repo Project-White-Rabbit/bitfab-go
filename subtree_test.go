@@ -154,7 +154,7 @@ func TestSubtree_FinalizerDeadlineAndManagedRoot(t *testing.T) {
 
 func TestSubtree_LimitsAndMixedGuard(t *testing.T) {
 	c, requests := subtreeClient(t)
-	one := 1
+	zero := 0
 	_, err := c.Trace(context.Background(), "limited", func(ctx context.Context) (any, error) {
 		autoTestCall(ctx, "child", func() int { return 1 })
 		_, err := c.Span(ctx, "wrong", func(context.Context) (any, error) { t.Fatal("mixed body ran"); return nil, nil })
@@ -163,7 +163,7 @@ func TestSubtree_LimitsAndMixedGuard(t *testing.T) {
 			t.Fatalf("mixed error=%v", err)
 		}
 		return 1, nil
-	}, TraceOptions{MaxSpans: &one})
+	}, TraceOptions{MaxDepth: &zero})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,27 +497,94 @@ func TestSimulationPlan_LoadedPlanNeverBuildsContentOffContent(t *testing.T) {
 	}
 }
 
-func TestSubtree_ContentOffSpansCountTowardMaxSpansOnly(t *testing.T) {
+func TestSubtree_ContentOffSpansAreNotSentOrCountedInCompletion(t *testing.T) {
 	c, requests := subtreeClient(t)
 	loadContentOffPlan(t, c, map[string][]string{"limited": {"secret"}})
-	total, subtree := 10, 2
-	_, err := c.Trace(context.Background(), "limited", func(ctx context.Context) (any, error) {
-		for _, symbol := range []string{"secret", "public", "secret"} {
-			for i := 0; i < 5; i++ {
-				autoTestCall(ctx, symbol, func() int { return i })
+	var traceID string
+	counts, truncation := traceAndCount(t, c, requests, "limited", TraceOptions{}, func(ctx context.Context) {
+		traceID = GetCurrentSpan(ctx).TraceID()
+		callAuto(ctx, "public", 1)
+		callAuto(ctx, "secret", 3)
+		callAuto(ctx, "public", 2)
+	})
+	if counts["secret"] != 0 || counts["public"] != 3 || counts["limited"] != 1 {
+		t.Fatalf("counts = %#v", counts)
+	}
+	if truncation != nil {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+	completions := 0
+	for _, request := range requests() {
+		if trace, _ := request["externalTrace"].(map[string]any); trace != nil && trace["id"] == traceID && request["expectedSpanCount"] != nil {
+			completions++
+			if request["expectedSpanCount"] != float64(4) {
+				t.Fatalf("expected span count = %v, want 4", request["expectedSpanCount"])
 			}
 		}
-		return nil, nil
-	}, TraceOptions{MaxSpans: &total, MaxCapturedSubtreeSpans: &subtree})
-	if err != nil {
+	}
+	if completions != 1 {
+		t.Fatalf("completions = %d, want 1", completions)
+	}
+}
+
+func TestSubtree_DeclaredNodeIgnoresContentOffPlan(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"override": {"shared"}})
+	if err := c.Node("declared-shared", NodeOptions{Name: "shared"}); err != nil {
 		t.Fatal(err)
 	}
-	if !c.FlushTraces(time.Second) {
-		t.Fatal("flush")
+	counts, _ := traceAndCount(t, c, requests, "override", TraceOptions{}, func(ctx context.Context) {
+		promptTestNode(ctx, "declared-shared")
+		promptTestNode(ctx, "shared")
+	})
+	if counts["shared"] != 1 || counts["override"] != 1 {
+		t.Fatalf("counts = %#v", counts)
 	}
-	byName := sentSpansByName(requests())
-	if len(byName["secret"]) != 7 || len(byName["public"]) != subtree || len(byName["limited"]) != 1 {
-		t.Fatalf("secret=%d public=%d root=%d", len(byName["secret"]), len(byName["public"]), len(byName["limited"]))
+	data := sentSpansByName(requests())["shared"][0]
+	if data["function_name"] != "declared-shared" || data["input"] == nil || data["output"] == nil || data["prompt"] != "declared-shared prompt" || data["content_off_by_simulation_plan"] != nil {
+		t.Fatalf("declared node = %#v", data)
+	}
+}
+
+func TestSubtree_NestedTraceRecordIgnoresContentOffPlan(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"outer": {"inner"}})
+	counts, _ := traceAndCount(t, c, requests, "outer", TraceOptions{}, func(ctx context.Context) {
+		_, _ = c.Trace(ctx, "inner-key", func(context.Context) (any, error) { return "private", nil }, TraceOptions{Name: "inner", Input: []any{"private"}})
+	})
+	if counts["inner"] != 1 {
+		t.Fatalf("counts = %#v", counts)
+	}
+	for _, data := range sentSpansByName(requests())["inner"] {
+		if data["nested_trace_id"] == nil {
+			continue
+		}
+		if data["input"] == nil || data["output"] != "private" || data["content_off_by_simulation_plan"] != nil || data["nested_trace_function_key"] != "inner-key" || data["nested_root_span_id"] == nil {
+			t.Fatalf("nested trace record = %#v", data)
+		}
+		return
+	}
+	t.Fatal("nested trace record was not sent")
+}
+
+func TestSubtree_ContentOffSpanChildrenKeepOriginalParent(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"parented": {"secret"}})
+	var secretID string
+	counts, _ := traceAndCount(t, c, requests, "parented", TraceOptions{}, func(ctx context.Context) {
+		autoNestedCall(ctx, "secret", func(ctx context.Context) {
+			secretID = GetCurrentSpan(ctx).ID()
+			callAuto(ctx, "public", 1)
+		})
+	})
+	if counts["secret"] != 0 || counts["public"] != 1 || counts["parented"] != 1 {
+		t.Fatalf("counts = %#v", counts)
+	}
+	for _, request := range requests() {
+		raw, _ := request["rawSpan"].(map[string]any)
+		if raw != nil && raw["span_data"].(map[string]any)["name"] == "public" && (secretID == "" || raw["parent_id"] != secretID) {
+			t.Fatalf("public parent = %v, want %q", raw["parent_id"], secretID)
+		}
 	}
 }
 
@@ -579,73 +646,59 @@ func TestSubtree_DefaultMaxCapturedSubtreeSpansCapsDiscoveredSpans(t *testing.T)
 	}
 }
 
-func TestSubtree_DeclaredNodesRecordPastSubtreeLimitUpToMaxSpans(t *testing.T) {
+func TestSubtree_ContentOffSpansDoNotCountTowardSubtreeLimit(t *testing.T) {
 	c, requests := subtreeClient(t)
-	if err := c.Node("declared", NodeOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	counts, truncation := traceAndCount(t, c, requests, "declared-default", TraceOptions{}, func(ctx context.Context) {
-		callAuto(ctx, "declared", 9000)
-		callAuto(ctx, "discovered", 520)
-		callAuto(ctx, "declared", 700)
-	})
-	if counts["discovered"] != 500 || counts["declared"] != 9499 || counts["declared-default"] != 1 || sumCounts(counts) != 10000 {
-		t.Fatalf("counts = %#v", counts)
-	}
-	if truncation["bitfab.truncated_by"] != "max_spans,max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(20+201) {
-		t.Fatalf("truncation = %#v", truncation)
-	}
-}
-
-func TestSubtree_ContentOffSpansCountTowardDefaultMaxSpansOnly(t *testing.T) {
-	c, requests := subtreeClient(t)
-	loadContentOffPlan(t, c, map[string][]string{"hidden-default": {"secret", "secret-declared"}})
+	loadContentOffPlan(t, c, map[string][]string{"hidden": {"secret", "secret-declared"}})
 	for _, symbol := range []string{"declared", "secret-declared"} {
 		if err := c.Node(symbol, NodeOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	counts, _ := traceAndCount(t, c, requests, "hidden-default", TraceOptions{}, func(ctx context.Context) {
-		callAuto(ctx, "secret", 100)
-		callAuto(ctx, "discovered", 520)
-		callAuto(ctx, "secret-declared", 50)
-		callAuto(ctx, "declared", 9400)
-		callAuto(ctx, "secret", 10)
+	subtree := 20
+	counts, truncation := traceAndCount(t, c, requests, "hidden", TraceOptions{MaxCapturedSubtreeSpans: &subtree}, func(ctx context.Context) {
+		callAuto(ctx, "secret", 30)
+		callAuto(ctx, "discovered", 25)
 		callAuto(ctx, "secret-declared", 10)
+		callAuto(ctx, "declared", 60)
+		callAuto(ctx, "secret", 5)
+		callAuto(ctx, "secret-declared", 5)
 	})
-	if counts["secret"] != 100 || counts["secret-declared"] != 50 || counts["discovered"] != 500 || counts["declared"] != 9349 || sumCounts(counts) != 10000 {
+	if counts["secret"] != 0 || counts["discovered"] != subtree || counts["secret-declared"] != 15 || counts["declared"] != 60 || counts["hidden"] != 1 {
 		t.Fatalf("counts = %#v", counts)
+	}
+	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(5) {
+		t.Fatalf("truncation = %#v", truncation)
 	}
 }
 
-func TestSubtree_MaxCapturedSubtreeSpansNeverExceedsMaxSpans(t *testing.T) {
+func TestSubtree_ManyDeclaredNodesAllRecord(t *testing.T) {
 	c, requests := subtreeClient(t)
-	negative, zero, fifty, hundred := -1, 0, 50, 100
-	if _, err := c.Trace(context.Background(), "negative", func(context.Context) (any, error) { t.Fatal("body ran"); return nil, nil }, TraceOptions{MaxCapturedSubtreeSpans: &negative}); err == nil {
-		t.Fatal("negative MaxCapturedSubtreeSpans was accepted")
+	if err := c.Node("declared", NodeOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := c.Trace(context.Background(), "zero", func(context.Context) (any, error) { t.Fatal("body ran"); return nil, nil }, TraceOptions{MaxSpans: &zero}); err == nil {
-		t.Fatal("MaxSpans of zero was accepted")
+	counts, truncation := traceAndCount(t, c, requests, "many", TraceOptions{}, func(ctx context.Context) {
+		callAuto(ctx, "declared", 10050)
+		callAuto(ctx, "discovered", 520)
+	})
+	if counts["declared"] != 10050 || counts["discovered"] != 500 || counts["many"] != 1 {
+		t.Fatalf("counts = %#v", counts)
 	}
-	for _, opts := range []TraceOptions{{MaxSpans: &fifty}, {MaxSpans: &fifty, MaxCapturedSubtreeSpans: &hundred}} {
-		counts, truncation := traceAndCount(t, c, requests, "capped", opts, func(ctx context.Context) {
-			callAuto(ctx, "discovered", 60)
-		})
-		if counts["discovered"] != 49 || counts["capped"] != 1 || truncation["bitfab.truncated_by"] != "max_spans" || truncation["bitfab.dropped_spans"] != float64(11) {
-			t.Fatalf("counts = %#v truncation = %#v", counts, truncation)
+	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(20) {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+}
+
+func TestSubtree_NegativeTraceLimitsAreRejected(t *testing.T) {
+	c, _ := subtreeClient(t)
+	negative := -1
+	for _, opts := range []TraceOptions{{MaxDepth: &negative}, {MaxCapturedSubtreeSpans: &negative}} {
+		if _, err := c.Trace(context.Background(), "negative", func(context.Context) (any, error) { t.Fatal("body ran"); return nil, nil }, opts); err == nil {
+			t.Fatalf("negative limit was accepted: %#v", opts)
 		}
 	}
 }
 
-func sumCounts(counts map[string]int) int {
-	total := 0
-	for _, count := range counts {
-		total += count
-	}
-	return total
-}
-
-func TestSubtree_MaxSpansIsStrictTotalIncludingRoot(t *testing.T) {
+func TestSubtree_MaxCapturedSubtreeSpansIsStrictUnderConcurrency(t *testing.T) {
 	c, requests := subtreeClient(t)
 	loadContentOffPlan(t, c, map[string][]string{"strict": {"secret", "secret-declared"}})
 	for _, symbol := range []string{"declared", "secret-declared"} {
@@ -654,9 +707,9 @@ func TestSubtree_MaxSpansIsStrictTotalIncludingRoot(t *testing.T) {
 		}
 	}
 	limit := 10
-	counts, truncation := traceAndCount(t, c, requests, "strict", TraceOptions{MaxSpans: &limit}, func(ctx context.Context) {
+	counts, truncation := traceAndCount(t, c, requests, "strict", TraceOptions{MaxCapturedSubtreeSpans: &limit}, func(ctx context.Context) {
 		var wg sync.WaitGroup
-		for _, symbol := range []string{"declared", "discovered", "secret", "secret-declared"} {
+		for _, symbol := range []string{"declared", "discovered", "discovered-other", "secret", "secret-declared"} {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -672,10 +725,10 @@ func TestSubtree_MaxSpansIsStrictTotalIncludingRoot(t *testing.T) {
 		}()
 		wg.Wait()
 	})
-	if total := sumCounts(counts); total != limit || counts["strict"] != 1 {
-		t.Fatalf("sent %d spans for a root with MaxSpans %d: %#v", total, limit, counts)
+	if counts["discovered"]+counts["discovered-other"] != limit || counts["declared"] != 20 || counts["secret-declared"] != 20 || counts["nested"] != 5 || counts["secret"] != 0 || counts["strict"] != 1 {
+		t.Fatalf("counts = %#v", counts)
 	}
-	if truncation["bitfab.truncated_by"] != "max_spans" || truncation["bitfab.dropped_spans"] != float64(4*20+5-(limit-1)) {
+	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(2*20-limit) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
 }
@@ -691,8 +744,8 @@ func autoNestedCall(ctx context.Context, symbol string, fn func(context.Context)
 
 func TestSubtree_TruncationMetadataNamesLimitsAndDroppedCount(t *testing.T) {
 	c, requests := subtreeClient(t)
-	depth, spans, captured := 1, 6, 2
-	counts, truncation := traceAndCount(t, c, requests, "truncated", TraceOptions{MaxDepth: &depth, MaxSpans: &spans, MaxCapturedSubtreeSpans: &captured}, func(ctx context.Context) {
+	depth, captured := 1, 2
+	counts, truncation := traceAndCount(t, c, requests, "truncated", TraceOptions{MaxDepth: &depth, MaxCapturedSubtreeSpans: &captured}, func(ctx context.Context) {
 		autoNestedCall(ctx, "outer", func(ctx context.Context) {
 			callAuto(ctx, "too-deep", 3)
 		})
@@ -740,20 +793,20 @@ func TestSubtree_UntruncatedTraceCarriesNoTruncationMetadata(t *testing.T) {
 
 func TestSubtree_DroppedCallsPastLimitSkipTraceStateLockAndAllocations(t *testing.T) {
 	c, _ := subtreeClient(t)
-	limit := 1
+	limit := 0
 	_, err := c.Trace(context.Background(), "cheap", func(ctx context.Context) (any, error) {
 		scope := currentAutoScope(ctx)
 		root := scope.frames[0].root
 		parent := scope.frames[0].parent
 		if node := EnterAutoNode(ctx, "dropped", "dropped", nil, nil); node != nil {
-			t.Error("a call dropped past MaxSpans still built an invocation handle")
+			t.Error("a call dropped past MaxDepth still built an invocation handle")
 		}
 		traceStateStore.Lock()
 		done := make(chan float64)
 		go func() {
 			done <- testing.AllocsPerRun(1000, func() {
-				if r, limited := root.add(parent, 1, "dropped", "function", "dropped", nil, false); r != nil || !limited {
-					t.Error("call past MaxSpans was recorded")
+				if r, limited := root.add(parent, 1, "dropped", "function", "dropped", nil, simulationPlanApplies); r != nil || !limited {
+					t.Error("call past MaxDepth was recorded")
 				}
 			})
 		}()
@@ -768,20 +821,20 @@ func TestSubtree_DroppedCallsPastLimitSkipTraceStateLockAndAllocations(t *testin
 			<-done
 			t.Error("dropped call waited on the trace state lock")
 		}
-		if root.truncatedBy.Load() != truncatedByMaxSpans || root.droppedSpans.Load() < 1001 {
+		if root.truncatedBy.Load() != truncatedByMaxDepth || root.droppedSpans.Load() < 1001 {
 			t.Errorf("truncatedBy=%d dropped=%d", root.truncatedBy.Load(), root.droppedSpans.Load())
 		}
 		return nil, nil
-	}, TraceOptions{MaxSpans: &limit})
+	}, TraceOptions{MaxDepth: &limit})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func BenchmarkSubtree_DroppedCallPastMaxSpans(b *testing.B) {
+func BenchmarkSubtree_DroppedCallPastMaxDepth(b *testing.B) {
 	c := newTestClient("http://127.0.0.1:1")
 	defer c.Close(time.Second)
-	limit := 1
+	limit := 0
 	_, _ = c.Trace(context.Background(), "bench", func(ctx context.Context) (any, error) {
 		b.ReportAllocs()
 		b.ResetTimer()
@@ -789,5 +842,5 @@ func BenchmarkSubtree_DroppedCallPastMaxSpans(b *testing.B) {
 			autoTestCall(ctx, "dropped", func() int { return 0 })
 		}
 		return nil, nil
-	}, TraceOptions{MaxSpans: &limit})
+	}, TraceOptions{MaxDepth: &limit})
 }

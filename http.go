@@ -373,6 +373,10 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, me
 
 // sendExternalSpan queues a span payload on this client's trace transport.
 func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
+	h.sendExternalSpanWithPlanPolicy(payload, simulationPlanApplies, extraDropped...)
+}
+
+func (h *httpClient) sendExternalSpanWithPlanPolicy(payload map[string]any, policy simulationPlanPolicy, extraDropped ...string) {
 	if raw, ok := payload["rawSpan"].(map[string]any); ok && raw["span_origin"] == nil {
 		clonedRaw := make(map[string]any, len(raw)+1)
 		for key, value := range raw {
@@ -386,13 +390,17 @@ func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...st
 		cloned["rawSpan"] = clonedRaw
 		payload = cloned
 	}
-	h.simulationPlan.sendSpan(payload, func(record map[string]any) {
+	h.simulationPlan.sendSpan(payload, policy, func(record map[string]any) {
 		ref := carrierRefForPayload(record)
 		if ref != nil && ref.spanID != "" {
 			h.traceCompletion.record(ref.traceID, ref.spanID)
 		}
 		h.recordSubmittedCarrier(ref)
 		h.submit(operationExternalSpan, record, carrierMeta{ref: ref}, extraDropped...)
+	}, func() {
+		if ref := carrierRefForPayload(payload); ref != nil {
+			h.traceCompletion.forget(ref.traceID, ref.spanID)
+		}
 	})
 }
 

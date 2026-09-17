@@ -83,10 +83,14 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		if opts.Type != "" {
 			kind = opts.Type
 		}
-		r, limited := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, configured)
+		planPolicy := simulationPlanApplies
+		if configured {
+			planPolicy = simulationPlanIgnored
+		}
+		r, limited := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, planPolicy)
 		if r == nil {
 			droppedByLimit = droppedByLimit && limited
-			droppedForGood = droppedForGood && (frame.depth+1 > frame.root.maxDepth || frame.root.spansFull.Load())
+			droppedForGood = droppedForGood && (frame.depth+1 > frame.root.maxDepth)
 			continue
 		}
 		records = append(records, r)

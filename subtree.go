@@ -20,7 +20,7 @@ type SpanFinalizer func(any) (any, error)
 type TraceOptions struct {
 	Name, Type, TestRunID   string
 	Input                   []any
-	MaxDepth, MaxSpans      *int
+	MaxDepth                *int
 	MaxCapturedSubtreeSpans *int
 	Exclude                 []string
 	CaptureWhen             CaptureWhen
@@ -129,28 +129,26 @@ func (c *Client) nodeOptions(symbol string) (NodeOptions, bool) {
 }
 
 type autoRoot struct {
-	client                                      *Client
-	key, traceID                                string
-	opts                                        TraceOptions
-	ctx                                         context.Context
-	mu                                          sync.Mutex
-	active, closing                             bool
-	count, capturedSubtreeCount                 int
-	maxDepth, maxSpans, maxCapturedSubtreeSpans int
-	records                                     map[*autoRecord]bool
-	rootRecord                                  *autoRecord
-	managed                                     *managedTraceRoot
-	complete                                    func()
-	completeOnce                                sync.Once
-	closed                                      atomic.Bool
-	spansFull                                   atomic.Bool
-	truncatedBy                                 atomic.Uint32
-	droppedSpans                                atomic.Int64
+	client                            *Client
+	key, traceID                      string
+	opts                              TraceOptions
+	ctx                               context.Context
+	mu                                sync.Mutex
+	active, closing                   bool
+	capturedSubtreeCount              int
+	maxDepth, maxCapturedSubtreeSpans int
+	records                           map[*autoRecord]bool
+	rootRecord                        *autoRecord
+	managed                           *managedTraceRoot
+	complete                          func()
+	completeOnce                      sync.Once
+	closed                            atomic.Bool
+	truncatedBy                       atomic.Uint32
+	droppedSpans                      atomic.Int64
 }
 
 const (
 	truncatedByMaxDepth uint32 = 1 << iota
-	truncatedByMaxSpans
 	truncatedByMaxCapturedSubtreeSpans
 )
 
@@ -159,7 +157,6 @@ var truncationLimitNames = []struct {
 	name string
 }{
 	{truncatedByMaxDepth, "max_depth"},
-	{truncatedByMaxSpans, "max_spans"},
 	{truncatedByMaxCapturedSubtreeSpans, "max_captured_subtree_spans"},
 }
 
@@ -174,6 +171,7 @@ type autoRecord struct {
 	mockSource                                        MockSource
 	testRunID                                         string
 	enrichment                                        *spanEnrichment
+	planPolicy                                        simulationPlanPolicy
 }
 
 func (root *autoRoot) excluded(symbol, name string) bool {
@@ -193,7 +191,7 @@ func (root *autoRoot) drop(limit uint32) {
 	root.droppedSpans.Add(1)
 }
 
-func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, declared bool) (*autoRecord, bool) {
+func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, planPolicy simulationPlanPolicy) (*autoRecord, bool) {
 	if root.closed.Load() || root.excluded(symbol, name) {
 		return nil, false
 	}
@@ -201,33 +199,21 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 		root.drop(truncatedByMaxDepth)
 		return nil, true
 	}
-	if root.spansFull.Load() {
-		root.drop(truncatedByMaxSpans)
-		return nil, true
-	}
+	declared := planPolicy != simulationPlanApplies
 	contentOff := !declared && root.client.httpClient.simulationPlan.isContentOff(root.key, name)
 	root.mu.Lock()
 	defer root.mu.Unlock()
 	if !root.active {
 		return nil, false
 	}
-	if root.count >= root.maxSpans {
-		root.spansFull.Store(true)
-		root.drop(truncatedByMaxSpans)
-		return nil, true
-	}
 	captured := !contentOff && !declared
 	if captured && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans {
 		root.drop(truncatedByMaxCapturedSubtreeSpans)
 		return nil, true
 	}
-	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input}
+	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input, planPolicy: planPolicy}
 	if parent != nil {
 		r.parentID = parent.id
-	}
-	root.count++
-	if root.count >= root.maxSpans {
-		root.spansFull.Store(true)
 	}
 	if captured {
 		root.capturedSubtreeCount++
@@ -275,7 +261,7 @@ func (r *autoRecord) finish(output any, err error) {
 		}()
 		data := map[string]any{"name": r.name, "type": r.kind, "function_name": r.functionName}
 		var dropped []string
-		contentOff := r.root.client.httpClient.simulationPlan.withholdsContent(r.root.key, r.name, r.parentID == "", "trace")
+		contentOff := r.planPolicy != simulationPlanIgnored && r.root.client.httpClient.simulationPlan.withholdsContent(r.root.key, r.name, r.parentID == "", "trace")
 		if contentOff {
 			data["content_off_by_simulation_plan"] = true
 		}
@@ -326,7 +312,7 @@ func (r *autoRecord) finish(output any, err error) {
 				payload["mockTarget"] = "output"
 				payload["mockSource"] = string(r.mockSource)
 			}
-			root.client.httpClient.sendExternalSpan(payload, dropped...)
+			root.client.httpClient.sendExternalSpanWithPlanPolicy(payload, r.planPolicy, dropped...)
 		}
 	})
 }
@@ -454,11 +440,8 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if fn == nil {
 		return nil, fmt.Errorf("bitfab: Trace requires a function")
 	}
-	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxSpans != nil && *opts.MaxSpans < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 {
+	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 {
 		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
-	}
-	if opts.MaxSpans != nil && *opts.MaxSpans == 0 {
-		return nil, fmt.Errorf("bitfab: MaxSpans must be at least 1 because the root span counts toward it")
 	}
 	if !c.shouldRecord(ctx) {
 		return fn(ctx)
@@ -491,24 +474,20 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		c.httpClient.simulationPlan.refresh()
 		c.httpClient.simulationPlan.awaitFirstRead(ctx)
 	}
-	maxDepth, maxSpans, maxCapturedSubtreeSpans := 30, 10000, 500
+	maxDepth, maxCapturedSubtreeSpans := 30, 500
 	if opts.MaxDepth != nil {
 		maxDepth = *opts.MaxDepth
-	}
-	if opts.MaxSpans != nil {
-		maxSpans = *opts.MaxSpans
 	}
 	if opts.MaxCapturedSubtreeSpans != nil {
 		maxCapturedSubtreeSpans = *opts.MaxCapturedSubtreeSpans
 	}
-	maxCapturedSubtreeSpans = min(maxCapturedSubtreeSpans, maxSpans)
 	var frames []autoFrame
 	var records []*autoRecord
 	if previous != nil {
 		frames = append(frames, previous.frames...)
 	}
 	for i, frame := range frames {
-		r, _ := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, true)
+		r, _ := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, simulationPlanIgnored)
 		if r != nil {
 			records = append(records, r)
 			frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
@@ -516,7 +495,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	}
 	var root *autoRoot
 	if len(frames) == 0 || currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
-		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, count: 1, maxDepth: maxDepth, maxSpans: maxSpans, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
+		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
 		if len(frames) == 0 && managed != nil && currentSpan(ctx) != nil {
 			root.traceID = currentSpan(ctx).traceID
 			root.managed = managed

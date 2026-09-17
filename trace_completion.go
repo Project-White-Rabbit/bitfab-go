@@ -54,6 +54,14 @@ func (t *traceCompletion) record(traceID, spanID string) {
 	}
 }
 
+func (t *traceCompletion) forget(traceID, spanID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state := t.traces[traceID]; state != nil {
+		delete(state.spanIDs, spanID)
+	}
+}
+
 func (t *traceCompletion) end(traceID, spanID string) {
 	t.mu.Lock()
 	state := t.traces[traceID]

@@ -14,10 +14,19 @@ const simulationPlanRefreshInterval = 60 * time.Second
 const simulationPlanRetryInterval = 10 * time.Second
 const simulationPlanMaxHeld = 1000
 
+type simulationPlanPolicy uint8
+
+const (
+	simulationPlanApplies simulationPlanPolicy = iota
+	simulationPlanIgnored
+)
+
 type heldPlanRecord struct {
 	payload map[string]any
 	key     string
+	policy  simulationPlanPolicy
 	submit  func(map[string]any)
+	discard func()
 }
 
 type simulationPlan struct {
@@ -227,7 +236,19 @@ func (p *simulationPlan) submit(entry heldPlanRecord) {
 	if entry.key == "" {
 		entry.submit(entry.payload)
 	} else {
-		entry.submit(p.prepare(entry.payload, entry.key))
+		p.deliver(entry)
+	}
+}
+
+func (p *simulationPlan) deliver(entry heldPlanRecord) {
+	if entry.policy == simulationPlanIgnored {
+		entry.submit(entry.payload)
+		return
+	}
+	if payload, send := p.prepare(entry.payload, entry.key); send {
+		entry.submit(payload)
+	} else {
+		entry.discard()
 	}
 }
 
@@ -237,14 +258,14 @@ func (p *simulationPlan) submitWithoutPlan(entry heldPlanRecord) {
 			warnOnce("sim-plan-held-span-dropped", fmt.Sprintf("held record could not be sent: %v", value))
 		}
 	}()
-	if entry.key == "" {
+	if entry.key == "" || entry.policy == simulationPlanIgnored {
 		entry.submit(entry.payload)
 	} else {
 		entry.submit(withoutPlanContent(entry.payload))
 	}
 }
 
-func (p *simulationPlan) prepare(payload map[string]any, key string) map[string]any {
+func (p *simulationPlan) prepare(payload map[string]any, key string) (map[string]any, bool) {
 	p.mu.Lock()
 	loaded, withheld := p.contentOff != nil, p.unavailable || p.closing || p.stopped
 	p.mu.Unlock()
@@ -252,9 +273,9 @@ func (p *simulationPlan) prepare(payload map[string]any, key string) map[string]
 		return p.apply(payload, key)
 	}
 	if withheld {
-		return withoutPlanContent(payload)
+		return withoutPlanContent(payload), true
 	}
-	return payload
+	return payload, true
 }
 
 func planTraceID(payload map[string]any) string {
@@ -308,7 +329,7 @@ func (p *simulationPlan) holdAndRelease(entry heldPlanRecord) {
 	}
 }
 
-func (p *simulationPlan) sendSpan(payload map[string]any, submit func(map[string]any)) {
+func (p *simulationPlan) sendSpan(payload map[string]any, policy simulationPlanPolicy, submit func(map[string]any), discard func()) {
 	if p == nil || p.isDisabled() {
 		submit(payload)
 		return
@@ -325,17 +346,13 @@ func (p *simulationPlan) sendSpan(payload map[string]any, submit func(map[string
 		return
 	}
 	p.mu.Lock()
-	if p.stopped {
-		p.mu.Unlock()
-		submit(p.prepare(payload, key))
-		return
-	}
-	if p.contentOff == nil && !p.unavailable && !p.closing {
-		p.holdAndRelease(heldPlanRecord{payload, key, submit})
+	entry := heldPlanRecord{payload, key, policy, submit, discard}
+	if !p.stopped && p.contentOff == nil && !p.unavailable && !p.closing {
+		p.holdAndRelease(entry)
 		return
 	}
 	p.mu.Unlock()
-	submit(p.prepare(payload, key))
+	p.deliver(entry)
 }
 
 func (p *simulationPlan) sendTrace(payload map[string]any, submit func(map[string]any)) {
@@ -354,7 +371,7 @@ func (p *simulationPlan) sendTrace(payload map[string]any, submit func(map[strin
 		}
 	}
 	if !p.stopped && id != "" && held {
-		p.holdAndRelease(heldPlanRecord{payload, "", submit})
+		p.holdAndRelease(heldPlanRecord{payload, "", simulationPlanApplies, submit, nil})
 		return
 	}
 	p.mu.Unlock()
@@ -385,9 +402,9 @@ func (p *simulationPlan) withholdsContent(key, name string, root bool, instrumen
 	return p.unavailable && !root
 }
 
-func (p *simulationPlan) apply(payload map[string]any, key string) map[string]any {
+func (p *simulationPlan) apply(payload map[string]any, key string) (map[string]any, bool) {
 	if recordedByFramework(payload) {
-		return payload
+		return payload, true
 	}
 	raw, _ := payload["rawSpan"].(map[string]any)
 	data, _ := raw["span_data"].(map[string]any)
@@ -396,9 +413,12 @@ func (p *simulationPlan) apply(payload map[string]any, key string) map[string]an
 	off := p.contentOff[key][name]
 	p.mu.Unlock()
 	if !off {
-		return payload
+		return payload, true
 	}
-	return stripPlanContent(payload)
+	if parent, _ := raw["parent_id"].(string); parent != "" && data["error"] == nil {
+		return nil, false
+	}
+	return stripPlanContent(payload), true
 }
 
 func withoutPlanContent(payload map[string]any) map[string]any {
