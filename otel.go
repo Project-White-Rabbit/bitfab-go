@@ -30,7 +30,7 @@ const (
 
 	otelMaxRequestBytes           = 3_000_000
 	otelMaxDecompressedBytes      = 8_000_000
-	otelMaxQueueSize              = 8_192
+	otelMaxQueueSize              = 16_384
 	otelDirectMaxExportBatch      = 512
 	otelDirectMaxRequestBatchSize = 128
 	otelDefaultExportConcurrency  = 32
@@ -386,6 +386,7 @@ type deliveryTrackingExporter struct {
 func (d *deliveryTrackingExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	err := d.exporter.ExportSpans(ctx, spans)
 	if err != nil {
+		recordReplayDeliveryProblem(fmt.Sprintf("failed to export a span batch: %v", err))
 		d.mu.Lock()
 		d.failedExports++
 		d.mu.Unlock()

@@ -10,16 +10,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type replayAssignment struct {
-	TestRunID     string           `json:"testRunId"`
-	ServerItem    replayServerItem `json:"serverItem"`
-	Attempt       int              `json:"attempt"`
-	LocalTraceID  string           `json:"localTraceId"`
-	ResultPath    string           `json:"resultPath"`
-	HookErrorPath string           `json:"hookErrorPath"`
+	TestRunID         string           `json:"testRunId"`
+	ServerItem        replayServerItem `json:"serverItem"`
+	Attempt           int              `json:"attempt"`
+	LocalTraceID      string           `json:"localTraceId"`
+	ResultPath        string           `json:"resultPath"`
+	HookErrorPath     string           `json:"hookErrorPath"`
+	DeliveryErrorPath string           `json:"deliveryErrorPath"`
 }
 
 type replayChildResult struct {
@@ -52,13 +54,20 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 	if err != nil {
 		return ReplayItem{}, err
 	}
+	deliveryTimeout := replayPersistenceTimeout
+	if normalized.Concurrency != nil && normalized.Concurrency.ChildDeliveryTimeout > 0 {
+		deliveryTimeout = normalized.Concurrency.ChildDeliveryTimeout
+	}
+	problems := collectReplayDeliveryProblems()
+	defer problems.stop()
 	client := entry.Client
 	client.httpClient.trackTraceDeliveries([]string{assignment.LocalTraceID})
 	item := client.runReplayItem(ctx, entry.TraceFunctionKey, callable, normalized, assignment.TestRunID, assignment.ServerItem, assignment.LocalTraceID)
 	if item.localTraceID != "" {
-		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.TestRunID, []string{item.localTraceID})
+		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.TestRunID, []string{item.localTraceID}, deliveryTimeout)
 		if persistErr != nil {
 			setReplaySetupError(&item, persistErr)
+			problems.add(persistErr.Error())
 		} else if id := persisted[item.localTraceID]; id != "" {
 			item.TraceID = &id
 		}
@@ -89,7 +98,64 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 			normalized.Concurrency.OnItemFinishInChildProcess(ReplayItemFinishEvent{TestRunID: assignment.TestRunID, Item: item})
 		}()
 	}
+	if !normalized.DryRun && !client.FlushTraces(deliveryTimeout) {
+		problems.add(fmt.Sprintf("delivery was not confirmed within ChildDeliveryTimeout (%s). Spans that failed or were still sending when the child exited may never reach Bitfab.", deliveryTimeout))
+	}
+	if report := problems.report(fmt.Sprintf("%s#%d", item.OriginalTraceID, item.Attempt)); report != "" {
+		fmt.Fprint(stderr, report)
+		if assignment.DeliveryErrorPath != "" {
+			_ = os.WriteFile(assignment.DeliveryErrorPath, []byte(report), 0600)
+		}
+	}
 	return item, nil
+}
+
+type replayDeliveryProblems struct {
+	mu       sync.Mutex
+	messages []string
+	counts   map[string]int
+}
+
+var activeReplayDeliveryProblems atomic.Pointer[replayDeliveryProblems]
+
+func collectReplayDeliveryProblems() *replayDeliveryProblems {
+	problems := &replayDeliveryProblems{counts: map[string]int{}}
+	activeReplayDeliveryProblems.Store(problems)
+	return problems
+}
+
+func recordReplayDeliveryProblem(message string) {
+	if problems := activeReplayDeliveryProblems.Load(); problems != nil {
+		problems.add(message)
+	}
+}
+
+func (p *replayDeliveryProblems) stop() {
+	activeReplayDeliveryProblems.CompareAndSwap(p, nil)
+}
+
+func (p *replayDeliveryProblems) add(message string) {
+	message = strings.TrimPrefix(message, "bitfab: ")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.counts[message] == 0 {
+		p.messages = append(p.messages, message)
+	}
+	p.counts[message]++
+}
+
+func (p *replayDeliveryProblems) report(label string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var report strings.Builder
+	for _, message := range p.messages {
+		fmt.Fprintf(&report, "[replay] span delivery problem for %s: %s", label, message)
+		if count := p.counts[message]; count > 1 {
+			fmt.Fprintf(&report, " (x%d)", count)
+		}
+		report.WriteString("\n")
+	}
+	return report.String()
 }
 
 func (c *Client) runReplayProcesses(ctx context.Context, options ReplayOptions, start startReplayResponse, traceIDs []string, result *ReplayResult) {
@@ -157,6 +223,7 @@ func (c *Client) runReplayProcesses(ctx context.Context, options ReplayOptions, 
 func runReplayChild(ctx context.Context, options ReplayOptions, dir string, index int, throttle *replayMemoryThrottle, assignment replayAssignment) ReplayItem {
 	assignment.ResultPath = filepath.Join(dir, fmt.Sprintf("result-%d.json", index))
 	assignment.HookErrorPath = filepath.Join(dir, fmt.Sprintf("hook-%d.txt", index))
+	assignment.DeliveryErrorPath = filepath.Join(dir, fmt.Sprintf("delivery-%d.txt", index))
 	path := filepath.Join(dir, fmt.Sprintf("assignment-%d.json", index))
 	item := baseReplayItem(assignment.ServerItem)
 	if err := ctx.Err(); err != nil {
@@ -213,6 +280,9 @@ func runReplayChild(ctx context.Context, options ReplayOptions, dir string, inde
 			err = childCtx.Err()
 			waiting = false
 		}
+	}
+	if report, readErr := os.ReadFile(assignment.DeliveryErrorPath); readErr == nil {
+		fmt.Fprint(command.stderr, string(report))
 	}
 	if raw, readErr := os.ReadFile(assignment.ResultPath); readErr == nil {
 		var childResult replayChildResult

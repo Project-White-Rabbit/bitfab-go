@@ -283,7 +283,7 @@ func TestWaitForReplayPersistencePollsUntilComplete(t *testing.T) {
 	client.httpClient.recordSubmittedCarrier(&carrierRef{traceID: "local-1", spanID: "span-2"})
 	client.httpClient.recordSubmittedCarrier(&carrierRef{traceID: "local-1"})
 
-	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"})
+	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"}, replayPersistenceTimeout)
 	if err != nil {
 		t.Fatalf("waitForReplayPersistence: %v", err)
 	}
@@ -311,12 +311,33 @@ func TestWaitForReplayPersistenceUsesCarrierAcknowledgementsWithoutPolling(t *te
 		"traceIds": map[string]any{"local-1": "server-1"},
 	})
 
-	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"})
+	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"}, replayPersistenceTimeout)
 	if err != nil {
 		t.Fatalf("waitForReplayPersistence: %v", err)
 	}
 	if statusCalls.Load() != 0 || persisted["local-1"] != "server-1" {
 		t.Fatalf("status calls=%d persisted=%#v", statusCalls.Load(), persisted)
+	}
+}
+
+func TestWaitForReplayPersistenceUsesTheTimeoutItIsGiven(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writeReplayTestJSON(t, writer, map[string]any{"traceIds": map[string]string{}})
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	client.httpClient.trackTraceDeliveries([]string{"local-1"})
+	client.httpClient.recordSubmittedCarrier(&carrierRef{traceID: "local-1", spanID: "span-1"})
+	client.httpClient.recordSubmittedCarrier(&carrierRef{traceID: "local-1"})
+
+	started := time.Now()
+	_, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"}, 150*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "not fully persisted") {
+		t.Fatalf("error = %v, want a persistence deadline error", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("waited %s, want the 150ms timeout", elapsed)
 	}
 }
 
@@ -333,7 +354,7 @@ func TestWaitForReplayPersistenceHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := client.waitForReplayPersistence(ctx, "run-1", []string{"local-1"})
+	_, err := client.waitForReplayPersistence(ctx, "run-1", []string{"local-1"}, replayPersistenceTimeout)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
@@ -343,7 +364,7 @@ func TestWaitForReplayPersistenceSkipsFlushWhenNoTraceClosed(t *testing.T) {
 	client := newTestClient("http://127.0.0.1:1")
 	defer client.Close(time.Second)
 	client.httpClient.trackTraceDeliveries([]string{"local-1"})
-	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"})
+	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"}, replayPersistenceTimeout)
 	if err != nil || len(persisted) != 0 {
 		t.Fatalf("persisted=%#v error=%v", persisted, err)
 	}

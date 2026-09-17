@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,10 +153,68 @@ func TestReplayProcessConcurrencyValidation(t *testing.T) {
 		{Concurrency: &ReplayConcurrency{Primitive: "goroutine", OnItemFinishInChildProcess: func(ReplayItemFinishEvent) {}}},
 		{Concurrency: &ReplayConcurrency{}, Attempts: 2},
 		{Concurrency: &ReplayConcurrency{MaxConcurrency: -1}},
+		{Concurrency: &ReplayConcurrency{Primitive: "goroutine", ChildDeliveryTimeout: time.Minute}},
+		{Concurrency: &ReplayConcurrency{Primitive: "process", ChildDeliveryTimeout: -time.Second}, processCommand: &replayProcessCommand{}},
 	} {
 		if _, err := normalizeReplayOptions(&options); err == nil {
 			t.Fatalf("accepted invalid concurrency: %+v", options)
 		}
+	}
+}
+
+func TestReplayChildDeliveryTimeoutDefaults(t *testing.T) {
+	command := &replayProcessCommand{}
+	for _, testCase := range []struct {
+		concurrency ReplayConcurrency
+		want        time.Duration
+	}{
+		{ReplayConcurrency{Primitive: "process"}, 30 * time.Second},
+		{ReplayConcurrency{Primitive: "process", ChildDeliveryTimeout: 3 * time.Minute}, 3 * time.Minute},
+		{ReplayConcurrency{Primitive: "goroutine"}, 0},
+	} {
+		concurrency := testCase.concurrency
+		normalized, err := normalizeReplayConcurrency(ReplayOptions{Concurrency: &concurrency, processCommand: command})
+		if err != nil {
+			t.Fatalf("normalize %+v: %v", testCase.concurrency, err)
+		}
+		if got := normalized.Concurrency.ChildDeliveryTimeout; got != testCase.want {
+			t.Fatalf("ChildDeliveryTimeout = %s, want %s", got, testCase.want)
+		}
+	}
+}
+
+func TestReplayChildDeliveryFailureReachesTheParent(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "registry")
+	build := exec.Command("go", "build", "-o", binary, "./testdata/process_registry")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, output)
+	}
+	state := &replayTestServerState{}
+	base := replayTestHandler(t, state, replayItems())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == otelTracesEndpoint {
+			http.Error(w, "rejected", http.StatusBadRequest)
+			return
+		}
+		base(w, r)
+	}))
+	defer server.Close()
+	command := exec.Command(binary, "pipeline")
+	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_DISABLE_CODE_CHANGE_CAPTURE=1", "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200", "BITFAB_TEST_HOOK_SPAN=1")
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	started := time.Now()
+	_ = command.Run()
+	if elapsed := time.Since(started); elapsed > 25*time.Second {
+		t.Fatalf("children ignored ChildDeliveryTimeout: took %s", elapsed)
+	}
+	output := stderr.String()
+	if !strings.Contains(output, "[replay] span delivery problem for original-trace-1#0: failed to export a span batch: bitfab: HTTP 400: rejected") {
+		t.Fatalf("export failure not surfaced to the parent:\n%s", output)
+	}
+	if !strings.Contains(output, "delivery was not confirmed within ChildDeliveryTimeout (200ms)") {
+		t.Fatalf("post-hook flush result not surfaced to the parent:\n%s", output)
 	}
 }
 

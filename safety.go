@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	mrand "math/rand"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -99,6 +100,9 @@ var warnedKeys sync.Map
 // the signal without the flood. Keys should identify the specific degradation
 // so each distinct issue warns once, not just the first one seen.
 func warnOnce(key, message string) {
+	if strings.HasPrefix(key, "otel-") {
+		recordReplayDeliveryProblem(message)
+	}
 	if _, loaded := warnedKeys.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}

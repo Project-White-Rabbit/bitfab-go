@@ -14,6 +14,7 @@ type ReplayConcurrency struct {
 	MaxConcurrency             int
 	MemoryThrottle             *bool
 	ChildTimeout               time.Duration
+	ChildDeliveryTimeout       time.Duration
 	OnItemFinishInChildProcess func(ReplayItemFinishEvent)
 }
 
@@ -61,6 +62,15 @@ func normalizeReplayConcurrency(options ReplayOptions) (ReplayOptions, error) {
 	}
 	if config.ChildTimeout == 0 {
 		config.ChildTimeout = 40 * time.Minute
+	}
+	if config.ChildDeliveryTimeout < 0 {
+		return options, fmt.Errorf("bitfab: child delivery timeout must be positive")
+	}
+	if config.Primitive != "process" && config.ChildDeliveryTimeout != 0 {
+		return options, fmt.Errorf("bitfab: child delivery timeout requires process concurrency, since goroutine concurrency starts no child process")
+	}
+	if config.Primitive == "process" && config.ChildDeliveryTimeout == 0 {
+		config.ChildDeliveryTimeout = replayPersistenceTimeout
 	}
 	if config.MemoryThrottle == nil {
 		enabled := config.Primitive == "process"

@@ -491,7 +491,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		c.httpClient.simulationPlan.refresh()
 		c.httpClient.simulationPlan.awaitFirstRead(ctx)
 	}
-	maxDepth, maxSpans, maxCapturedSubtreeSpans := 30, 2048, 512
+	maxDepth, maxSpans, maxCapturedSubtreeSpans := 30, 10000, 500
 	if opts.MaxDepth != nil {
 		maxDepth = *opts.MaxDepth
 	}

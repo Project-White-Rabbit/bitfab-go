@@ -17,13 +17,17 @@ func main() {
 	if !slices.Contains(os.Args, "--execute-item") {
 		_ = os.Setenv("BITFAB_PARENT_MUTATION", "parent-only")
 	}
-	client := bitfab.NewClient("key", bitfab.WithServiceURL(os.Getenv("BITFAB_TEST_SERVICE_URL")), bitfab.WithCaptureEnabled(false), bitfab.WithSimulationPlan(false))
+	client := bitfab.NewClient("key", bitfab.WithServiceURL(os.Getenv("BITFAB_TEST_SERVICE_URL")), bitfab.WithCaptureEnabled(os.Getenv("BITFAB_TEST_HOOK_SPAN") == "1"), bitfab.WithSimulationPlan(false))
 	defer client.Close(time.Second)
 	registry := bitfab.NewReplayRegistry()
 	memory := false
 	timeout := time.Duration(0)
 	if millis, err := strconv.Atoi(os.Getenv("BITFAB_TEST_CHILD_TIMEOUT_MS")); err == nil {
 		timeout = time.Duration(millis) * time.Millisecond
+	}
+	deliveryTimeout := time.Duration(0)
+	if millis, err := strconv.Atoi(os.Getenv("BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS")); err == nil {
+		deliveryTimeout = time.Duration(millis) * time.Millisecond
 	}
 	err := registry.Register("pipeline", bitfab.ReplayRegistration{Client: client, TraceFunctionKey: "process", Function: func(ctx context.Context, name string, count int) (map[string]any, error) {
 		calls++
@@ -41,7 +45,10 @@ func main() {
 			branch = value.DatabaseURL()
 		}
 		return map[string]any{"pid": os.Getpid(), "calls": calls, "name": name, "count": count, "branch": branch}, nil
-	}, Options: bitfab.ReplayOptions{Mock: bitfab.MockNone, DisableCodeChangeCapture: true, Concurrency: &bitfab.ReplayConcurrency{Primitive: "process", Attempts: 2, MaxConcurrency: 2, MemoryThrottle: &memory, ChildTimeout: timeout, OnItemFinishInChildProcess: func(event bitfab.ReplayItemFinishEvent) {
+	}, Options: bitfab.ReplayOptions{Mock: bitfab.MockNone, DisableCodeChangeCapture: true, Concurrency: &bitfab.ReplayConcurrency{Primitive: "process", Attempts: 2, MaxConcurrency: 2, MemoryThrottle: &memory, ChildTimeout: timeout, ChildDeliveryTimeout: deliveryTimeout, OnItemFinishInChildProcess: func(event bitfab.ReplayItemFinishEvent) {
+		if os.Getenv("BITFAB_TEST_HOOK_SPAN") == "1" {
+			_, _ = client.Span(context.Background(), "grading", func(ctx context.Context) (any, error) { return "graded", nil })
+		}
 		if event.Item.TraceID == nil {
 			panic("child hook lacks persisted trace ID")
 		}

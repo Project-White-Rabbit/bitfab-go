@@ -609,7 +609,7 @@ func (c *Client) Replay(
 		}
 	}
 
-	persisted, err := c.waitForReplayPersistence(ctx, start.TestRunID, executedTraceIDs)
+	persisted, err := c.waitForReplayPersistence(ctx, start.TestRunID, executedTraceIDs, replayPersistenceTimeout)
 	if err != nil {
 		return ReplayResult{}, newReplayRunError(err, result)
 	}
@@ -1136,7 +1136,7 @@ func setReplaySetupError(item *ReplayItem, err error) {
 	item.ReplayError = err
 }
 
-func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string, traceIDs []string) (map[string]string, error) {
+func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string, traceIDs []string, timeout time.Duration) (map[string]string, error) {
 	if len(traceIDs) == 0 {
 		return map[string]string{}, nil
 	}
@@ -1144,7 +1144,7 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 		c.httpClient.takeTraceDeliveries(traceIDs)
 		return map[string]string{}, nil
 	}
-	flushed := c.FlushTraces(replayPersistenceTimeout)
+	flushed := c.FlushTraces(timeout)
 	deliveries := c.httpClient.takeTraceDeliveries(traceIDs)
 	expected := make(map[string]int, len(deliveries))
 	readBackTraceIDs := make(map[string]string, len(deliveries))
@@ -1163,7 +1163,7 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 		return readBackTraceIDs, nil
 	}
 
-	deadline := time.Now().Add(replayPersistenceTimeout)
+	deadline := time.Now().Add(timeout)
 	missing := len(expected)
 	for {
 		status, err := c.getReplayStatus(ctx, testRunID, expected)

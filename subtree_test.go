@@ -571,10 +571,10 @@ func TestSubtree_DefaultMaxCapturedSubtreeSpansCapsDiscoveredSpans(t *testing.T)
 	counts, truncation := traceAndCount(t, c, requests, "discovered-default", TraceOptions{}, func(ctx context.Context) {
 		callAuto(ctx, "discovered", 520)
 	})
-	if counts["discovered"] != 512 || counts["discovered-default"] != 1 {
+	if counts["discovered"] != 500 || counts["discovered-default"] != 1 {
 		t.Fatalf("counts = %#v", counts)
 	}
-	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(8) {
+	if truncation["bitfab.truncated_by"] != "max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(20) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
 }
@@ -585,14 +585,14 @@ func TestSubtree_DeclaredNodesRecordPastSubtreeLimitUpToMaxSpans(t *testing.T) {
 		t.Fatal(err)
 	}
 	counts, truncation := traceAndCount(t, c, requests, "declared-default", TraceOptions{}, func(ctx context.Context) {
-		callAuto(ctx, "declared", 1000)
+		callAuto(ctx, "declared", 9000)
 		callAuto(ctx, "discovered", 520)
 		callAuto(ctx, "declared", 700)
 	})
-	if counts["discovered"] != 512 || counts["declared"] != 1535 || counts["declared-default"] != 1 || sumCounts(counts) != 2048 {
+	if counts["discovered"] != 500 || counts["declared"] != 9499 || counts["declared-default"] != 1 || sumCounts(counts) != 10000 {
 		t.Fatalf("counts = %#v", counts)
 	}
-	if truncation["bitfab.truncated_by"] != "max_spans,max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(8+165) {
+	if truncation["bitfab.truncated_by"] != "max_spans,max_captured_subtree_spans" || truncation["bitfab.dropped_spans"] != float64(20+201) {
 		t.Fatalf("truncation = %#v", truncation)
 	}
 }
@@ -609,11 +609,11 @@ func TestSubtree_ContentOffSpansCountTowardDefaultMaxSpansOnly(t *testing.T) {
 		callAuto(ctx, "secret", 100)
 		callAuto(ctx, "discovered", 520)
 		callAuto(ctx, "secret-declared", 50)
-		callAuto(ctx, "declared", 1400)
+		callAuto(ctx, "declared", 9400)
 		callAuto(ctx, "secret", 10)
 		callAuto(ctx, "secret-declared", 10)
 	})
-	if counts["secret"] != 100 || counts["secret-declared"] != 50 || counts["discovered"] != 512 || counts["declared"] != 1385 || sumCounts(counts) != 2048 {
+	if counts["secret"] != 100 || counts["secret-declared"] != 50 || counts["discovered"] != 500 || counts["declared"] != 9349 || sumCounts(counts) != 10000 {
 		t.Fatalf("counts = %#v", counts)
 	}
 }
