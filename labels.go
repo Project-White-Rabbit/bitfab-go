@@ -189,9 +189,9 @@ type LabelsClient struct {
 
 // GenerateLabelEvidence generates suggested evidence for an assertion from
 // the selected original or replay trace.
-func (l *LabelsClient) GenerateLabelEvidence(ctx context.Context, traceID, assertionID string) ([]PotentialAssertionEvidence, error) {
+func (l *LabelsClient) GenerateLabelEvidence(ctx context.Context, traceID, assertionID string) ([]AssertionLabelEvidence, error) {
 	var response struct {
-		Evidence []PotentialAssertionEvidence `json:"evidence"`
+		Evidence []AssertionLabelEvidence `json:"evidence"`
 	}
 	path := "/api/sdk/traces/" + url.PathEscape(traceID) + "/assertions/" + url.PathEscape(assertionID) + "/evidence"
 	if err := l.httpClient.get(ctx, path, &response); err != nil {

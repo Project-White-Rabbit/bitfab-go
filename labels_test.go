@@ -10,7 +10,7 @@ import (
 
 func TestLabels_GenerateLabelEvidenceUsesSelectedTraceAndAssertion(t *testing.T) {
 	spanName := "lookup-record"
-	want := []PotentialAssertionEvidence{{
+	want := []AssertionLabelEvidence{{
 		SpanID:   "span",
 		Text:     "Returned the right record",
 		SpanName: &spanName,

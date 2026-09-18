@@ -195,8 +195,12 @@ type ReplayOptions struct {
 	Concurrency    *ReplayConcurrency
 	processCommand *replayProcessCommand
 	// Attempts repeats each selected trace 1–100 times. Zero defaults to one.
-	Attempts                 int
-	OnlyWithAssertions       bool
+	Attempts           int
+	OnlyWithAssertions bool
+	// JudgeAssertions judges every approved assertion on each replay as it
+	// finishes and saves the verdict as that assertion's agent label. Off
+	// unless asked: each judgement costs model calls.
+	JudgeAssertions          bool
 	DryRun                   bool
 	Limit                    int
 	TraceIDs                 []string
@@ -746,6 +750,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.OnlyWithAssertions {
 		payload["onlyWithAssertions"] = true
+	}
+	if options.JudgeAssertions {
+		payload["judgeAssertions"] = true
 	}
 	if options.AdaptInputs != nil {
 		payload["includeOriginalMetadata"] = true

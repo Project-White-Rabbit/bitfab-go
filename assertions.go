@@ -123,15 +123,16 @@ type AssertionEvidenceParameter struct {
 	Type string `json:"type"`
 }
 
-// PotentialAssertionEvidence is suggested assertion evidence enriched with the
+// AssertionLabelEvidence is suggested assertion evidence enriched with the
 // span context a judge needs to interpret it.
-type PotentialAssertionEvidence struct {
-	SpanID     string                       `json:"spanId"`
-	Text       string                       `json:"text"`
-	SpanName   *string                      `json:"spanName"`
-	Parameters []AssertionEvidenceParameter `json:"parameters"`
-	SpanType   string                       `json:"spanType"`
-	IsMocked   bool                         `json:"isMocked"`
+type AssertionLabelEvidence struct {
+	SpanID      string                       `json:"spanId"`
+	Text        string                       `json:"text"`
+	SourceField string                       `json:"sourceField"`
+	SpanName    *string                      `json:"spanName"`
+	Parameters  []AssertionEvidenceParameter `json:"parameters"`
+	SpanType    string                       `json:"spanType"`
+	IsMocked    bool                         `json:"isMocked"`
 }
 
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
