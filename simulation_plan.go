@@ -402,6 +402,21 @@ func (p *simulationPlan) withholdsContent(key, name string, root bool, instrumen
 	return p.unavailable && !root
 }
 
+// dropsSpan reports whether apply would discard a span with this name once the
+// plan has loaded, so a descendant opening now can tell whether this span will
+// still be there to be its parent.
+func (p *simulationPlan) dropsSpan(key, name string, root bool) bool {
+	if p == nil || p.isDisabled() || key == "" || name == "" || root {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped || p.contentOff == nil {
+		return false
+	}
+	return p.contentOff[key][name]
+}
+
 func (p *simulationPlan) apply(payload map[string]any, key string) (map[string]any, bool) {
 	if recordedByFramework(payload) {
 		return payload, true

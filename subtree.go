@@ -611,6 +611,18 @@ func finishManagedAutoSpan(ctx context.Context, spanID string, send func()) {
 	root.tryComplete()
 }
 
+func managedAutoSpanDropped(ctx context.Context, plan *simulationPlan, spanID, key, name string, root bool) bool {
+	if managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot); managed != nil {
+		managed.mu.Lock()
+		if managed.root != nil && managed.spanID == spanID {
+			key = managed.root.key
+			name, _ = managed.data["name"].(string)
+		}
+		managed.mu.Unlock()
+	}
+	return plan.dropsSpan(key, name, root)
+}
+
 func managedAutoSpanContentOff(ctx context.Context, plan *simulationPlan, spanID, key, name string, root bool) bool {
 	instrumentation := "span"
 	if managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot); managed != nil {

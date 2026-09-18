@@ -462,7 +462,10 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 
 	// Execute fn with the new span pushed onto the context stack, unless replay
 	// selected this child span for recorded or overridden output substitution.
-	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
+	nearestCapturedAncestor := nearestCapturedAncestorSpanID(ctx)
+	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, func() bool {
+		return !managedAutoSpanDropped(ctx, c.httpClient.simulationPlan, id.spanID, traceFunctionKey, cfg.name, id.parentSpanID == "")
+	})
 	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
 	result, intercepted, mockSource, mockErr := c.resolveReplayMock(
 		ctx,
@@ -529,6 +532,9 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			}
 			if id.parentSpanID != "" {
 				rawSpan["parent_id"] = id.parentSpanID
+			}
+			if nearestCapturedAncestor != "" && nearestCapturedAncestor != id.parentSpanID {
+				rawSpan["nearest_captured_ancestor_id"] = nearestCapturedAncestor
 			}
 			replay := currentReplayContext(ctx)
 			if replay != nil && replay.inputSourceSpanID != "" {
@@ -686,19 +692,23 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 		return ctx, &ActiveSpan{}
 	}
 
-	childCtx := withSpanContext(ctx, id.traceID, id.spanID)
+	nearestCapturedAncestor := nearestCapturedAncestorSpanID(ctx)
+	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, func() bool {
+		return !c.httpClient.simulationPlan.dropsSpan(traceFunctionKey, spanName, id.parentSpanID == "")
+	})
 	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
 
 	span := &ActiveSpan{
-		enrichment:       enrichment,
-		client:           c,
-		traceFunctionKey: traceFunctionKey,
-		traceID:          id.traceID,
-		spanID:           id.spanID,
-		parentSpanID:     id.parentSpanID,
-		startedAt:        nowISOTimestamp(),
-		cfg:              cfg,
-		isRootSpan:       id.isRootSpan,
+		nearestCapturedAncestorSpanID: nearestCapturedAncestor,
+		enrichment:                    enrichment,
+		client:                        c,
+		traceFunctionKey:              traceFunctionKey,
+		traceID:                       id.traceID,
+		spanID:                        id.spanID,
+		parentSpanID:                  id.parentSpanID,
+		startedAt:                     nowISOTimestamp(),
+		cfg:                           cfg,
+		isRootSpan:                    id.isRootSpan,
 	}
 	if replay := currentReplayContext(ctx); replay != nil {
 		span.testRunID = replay.testRunID
@@ -822,24 +832,25 @@ func (f *Function) Start(ctx context.Context, spanName string, opts ...SpanOptio
 // ActiveSpan represents an in-progress span created by Start.
 // Call End() to complete the span and send it to the API.
 type ActiveSpan struct {
-	enrichment        *spanEnrichment
-	autoRestore       func()
-	client            *Client
-	traceFunctionKey  string
-	traceID           string
-	spanID            string
-	parentSpanID      string
-	startedAt         string
-	cfg               spanConfig
-	input             any
-	output            any
-	spanErr           error
-	contexts          []ContextEntry
-	prompt            string
-	isRootSpan        bool
-	testRunID         string
-	inputSourceSpanID string
-	once              sync.Once
+	enrichment                    *spanEnrichment
+	autoRestore                   func()
+	client                        *Client
+	traceFunctionKey              string
+	traceID                       string
+	spanID                        string
+	parentSpanID                  string
+	nearestCapturedAncestorSpanID string
+	startedAt                     string
+	cfg                           spanConfig
+	input                         any
+	output                        any
+	spanErr                       error
+	contexts                      []ContextEntry
+	prompt                        string
+	isRootSpan                    bool
+	testRunID                     string
+	inputSourceSpanID             string
+	once                          sync.Once
 }
 
 // SetInput records the span's input data. Pass one or more arguments.
@@ -961,6 +972,9 @@ func (s *ActiveSpan) End() {
 			}
 			if s.parentSpanID != "" {
 				rawSpan["parent_id"] = s.parentSpanID
+			}
+			if s.nearestCapturedAncestorSpanID != "" && s.nearestCapturedAncestorSpanID != s.parentSpanID {
+				rawSpan["nearest_captured_ancestor_id"] = s.nearestCapturedAncestorSpanID
 			}
 			if s.inputSourceSpanID != "" {
 				rawSpan["input_source_span_id"] = s.inputSourceSpanID

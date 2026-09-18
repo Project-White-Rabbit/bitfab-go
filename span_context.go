@@ -11,8 +11,9 @@ type spanStackKey struct{}
 
 // spanEntry represents a single entry in the span stack.
 type spanEntry struct {
-	traceID string
-	spanID  string
+	traceID           string
+	spanID            string
+	sendsOnCompletion func() bool
 }
 
 // currentSpan returns the top of the span stack from the context, or nil if empty.
@@ -27,11 +28,31 @@ func currentSpan(ctx context.Context) *spanEntry {
 
 // withSpanContext pushes a new span entry onto the context's span stack.
 func withSpanContext(ctx context.Context, traceID, spanID string) context.Context {
+	return withSendingSpanContext(ctx, traceID, spanID, nil)
+}
+
+// withSendingSpanContext pushes a span entry that can say, when a descendant
+// opens, whether this span will still be sent once the simulation plan has been
+// applied. A nil sendsOnCompletion means the span is always sent.
+func withSendingSpanContext(ctx context.Context, traceID, spanID string, sendsOnCompletion func() bool) context.Context {
 	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
 	newStack := make([]spanEntry, len(stack)+1)
 	copy(newStack, stack)
-	newStack[len(stack)] = spanEntry{traceID: traceID, spanID: spanID}
+	newStack[len(stack)] = spanEntry{traceID: traceID, spanID: spanID, sendsOnCompletion: sendsOnCompletion}
 	return context.WithValue(ctx, spanStackKey{}, newStack)
+}
+
+// nearestCapturedAncestorSpanID returns the closest span above this point in the
+// recorded call chain that will still be sent, walking the stack outward.
+func nearestCapturedAncestorSpanID(ctx context.Context) string {
+	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
+	for index := len(stack) - 1; index >= 0; index-- {
+		entry := stack[index]
+		if entry.sendsOnCompletion == nil || entry.sendsOnCompletion() {
+			return entry.spanID
+		}
+	}
+	return ""
 }
 
 // ContextEntry represents a single context entry containing multiple key-value pairs.

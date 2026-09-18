@@ -439,6 +439,92 @@ func sentSpansByName(requests []map[string]any) map[string][]map[string]any {
 	return byName
 }
 
+func TestSimulationPlan_SpanUnderTurnedOffCallsCarriesNearestCapturedAncestor(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{"lanes": {"gated_invoke", "lane_call"}})
+
+	_, err := c.Span(context.Background(), "lanes", func(ctx context.Context) (any, error) {
+		return c.Span(ctx, "lanes", func(ctx context.Context) (any, error) {
+			return c.Span(ctx, "lanes", func(ctx context.Context) (any, error) {
+				for _, lane := range []string{"authority", "claims"} {
+					_, _ = c.Span(ctx, "lanes", func(ctx context.Context) (any, error) {
+						return c.Span(ctx, "lanes", func(context.Context) (any, error) {
+							return lane, nil
+						}, WithName("critique"))
+					}, WithName("lane_call"))
+				}
+				return nil, nil
+			}, WithName("gated_invoke"))
+		}, WithName("confirm_outbound"))
+	}, WithName("process"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+
+	var confirmOutboundSpanID string
+	var critiques []map[string]any
+	for _, request := range requests() {
+		raw, ok := request["rawSpan"].(map[string]any)
+		if !ok {
+			continue
+		}
+		data, _ := raw["span_data"].(map[string]any)
+		switch name, _ := data["name"].(string); name {
+		case "gated_invoke", "lane_call":
+			t.Fatalf("%q was sent even though the plan turned its capture off", name)
+		case "confirm_outbound":
+			confirmOutboundSpanID, _ = raw["id"].(string)
+		case "critique":
+			critiques = append(critiques, raw)
+		}
+	}
+
+	if confirmOutboundSpanID == "" {
+		t.Fatal("confirm_outbound was not sent")
+	}
+	if len(critiques) != 2 {
+		t.Fatalf("expected 2 critique spans, got %d", len(critiques))
+	}
+	for _, raw := range critiques {
+		if parent, _ := raw["parent_id"].(string); parent == confirmOutboundSpanID {
+			t.Error("critique recorded confirm_outbound as its parent; the recorded chain should be untouched")
+		}
+		if ancestor, _ := raw["nearest_captured_ancestor_id"].(string); ancestor != confirmOutboundSpanID {
+			t.Errorf("nearest_captured_ancestor_id = %q, want %q", ancestor, confirmOutboundSpanID)
+		}
+	}
+}
+
+func TestSimulationPlan_SpanWhoseParentWasSentCarriesNoNearestCapturedAncestor(t *testing.T) {
+	c, requests := subtreeClient(t)
+	loadContentOffPlan(t, c, map[string][]string{})
+
+	_, err := c.Span(context.Background(), "plain", func(ctx context.Context) (any, error) {
+		return c.Span(ctx, "plain", func(context.Context) (any, error) {
+			return "done", nil
+		}, WithName("helper"))
+	}, WithName("process"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+
+	for _, request := range requests() {
+		raw, ok := request["rawSpan"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, present := raw["nearest_captured_ancestor_id"]; present {
+			t.Error("a span whose own parent was sent carried a nearest captured ancestor")
+		}
+	}
+}
+
 func TestSimulationPlan_LoadedPlanNeverBuildsContentOffContent(t *testing.T) {
 	c, requests := subtreeClient(t)
 	loadContentOffPlan(t, c, map[string][]string{"planned": {"secret"}, "optin": {"secret-span", "secret-start"}, "managed": {"managed"}})
