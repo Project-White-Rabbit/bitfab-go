@@ -239,3 +239,66 @@ func TestTraceTarget_RoundTripsOccurrences(t *testing.T) {
 		}
 	}
 }
+
+func TestAssertions_AssigneeRejectsSetAndClear(t *testing.T) {
+	client := NewClient("test-key")
+	email := "dana@bitfab.dev"
+	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace",
+		Assertions: []SaveAssertion{{
+			Assertion: "works", AssigneeEmail: &email, ClearAssigneeEmail: true,
+		}},
+	})
+	if err == nil {
+		t.Fatal("setting and clearing an assignee was accepted")
+	}
+}
+
+func TestAssertions_AssigneeOmissionSettingClearingAndReadback(t *testing.T) {
+	email := "dana@bitfab.dev"
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		if r.method == http.MethodGet {
+			return map[string]any{"assertions": []any{map[string]any{
+				"id": "assertion-1", "traceId": "trace", "assertion": "Arrives on time", "source": "agent",
+				"assignee": map[string]any{
+					"id": "user-9", "fullName": "Dana Reviewer", "email": email, "imageUrl": nil,
+				},
+			}}, "inheritedFrom": nil}
+		}
+		return map[string]any{"assertions": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	for _, assertion := range []SaveAssertion{
+		{Assertion: "Preserve the assignee"},
+		{Assertion: "Route it to Dana", AssigneeEmail: &email},
+		{Assertion: "Leave it to nobody", ClearAssigneeEmail: true},
+	} {
+		if _, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+			TraceID: "trace", Assertions: []SaveAssertion{assertion},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requests := server.recorded()
+	sent := func(index int) map[string]any {
+		return requests[index].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	}
+	if _, ok := sent(0)["assigneeEmail"]; ok {
+		t.Fatalf("omitted assignee sent: %+v", sent(0))
+	}
+	if sent(1)["assigneeEmail"] != email {
+		t.Fatalf("assignee email = %+v", sent(1))
+	}
+	if cleared, ok := sent(2)["assigneeEmail"]; !ok || cleared != nil {
+		t.Fatalf("cleared assignee = %+v", sent(2))
+	}
+
+	result, err := client.Traces.GetAssertions(context.Background(), "trace")
+	if err != nil || len(result.Assertions) != 1 {
+		t.Fatalf("GetAssertions = %+v, %v", result, err)
+	}
+	got := result.Assertions[0]
+	if got.Assignee == nil || got.Assignee.Email == nil || *got.Assignee.Email != email {
+		t.Fatalf("assignee = %+v", got.Assignee)
+	}
+}

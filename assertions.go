@@ -111,6 +111,7 @@ type TraceAssertion struct {
 	Category               *AssertionCategorySummary `json:"category"`
 	Justification          Justification             `json:"justification"`
 	CategoryJustification  Justification             `json:"categoryJustification"`
+	Assignee               *Assignee                 `json:"assignee"`
 	CreatedAt              string                    `json:"createdAt"`
 	UpdatedAt              string                    `json:"updatedAt"`
 }
@@ -135,7 +136,7 @@ type PotentialAssertionEvidence struct {
 
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
-// criteria, targets, and categories. Point a justification to a nil slice to clear it.
+// criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
@@ -145,10 +146,12 @@ type SaveAssertion struct {
 	CategoryAssertionID         *string
 	Justification               *Justification
 	CategoryJustification       *Justification
+	AssigneeEmail               *string
 	ClearPassCriteria           bool
 	ClearFailCriteria           bool
 	ClearTargetOnEvaluatedTrace bool
 	ClearCategoryAssertionID    bool
+	ClearAssigneeEmail          bool
 }
 
 func (assertion SaveAssertion) payload() (map[string]any, error) {
@@ -191,6 +194,14 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 		payload["category_assertion_id"] = nil
 	} else if assertion.CategoryAssertionID != nil {
 		payload["category_assertion_id"] = *assertion.CategoryAssertionID
+	}
+	if assertion.ClearAssigneeEmail {
+		if assertion.AssigneeEmail != nil {
+			return nil, fmt.Errorf("bitfab: cannot set and clear an assertion assignee together")
+		}
+		payload["assigneeEmail"] = nil
+	} else if assertion.AssigneeEmail != nil {
+		payload["assigneeEmail"] = *assertion.AssigneeEmail
 	}
 	if assertion.Justification != nil {
 		payload["justification"] = *assertion.Justification

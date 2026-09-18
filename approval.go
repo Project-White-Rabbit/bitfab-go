@@ -26,6 +26,9 @@ type Approver struct {
 	ImageURL *string `json:"imageUrl"`
 }
 
+// Assignee identifies the organization member on the hook for reviewing an assertion.
+type Assignee = Approver
+
 // ApprovalFields are read-only; only a person in Bitfab sets them.
 type ApprovalFields struct {
 	ApprovalState ApprovalState `json:"approvalState"`
