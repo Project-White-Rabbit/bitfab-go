@@ -302,3 +302,30 @@ func TestAssertions_AssigneeOmissionSettingClearingAndReadback(t *testing.T) {
 		t.Fatalf("assignee = %+v", got.Assignee)
 	}
 }
+
+func TestAssertions_GetAssertionsReportsGeneration(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{
+			"assertions":    []any{},
+			"inheritedFrom": nil,
+			"generation": map[string]any{
+				"status":       "completed",
+				"error":        nil,
+				"assertionIds": []any{"draft-1"},
+				"startedAt":    "2026-09-18T00:00:00.000Z",
+				"finishedAt":   "2026-09-18T00:01:00.000Z",
+			},
+		}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	result, err := client.Traces.GetAssertions(context.Background(), "trace")
+	if err != nil || result.Generation == nil {
+		t.Fatalf("GetAssertions = %+v, %v", result, err)
+	}
+	if result.Generation.Status != AssertionGenerationCompleted ||
+		!reflect.DeepEqual(result.Generation.AssertionIDs, []string{"draft-1"}) ||
+		result.Generation.FinishedAt == nil {
+		t.Fatalf("generation = %+v", result.Generation)
+	}
+}

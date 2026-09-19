@@ -128,26 +128,51 @@ type GraderRerun struct {
 }
 
 // RerunGradersOptions configures RerunGraders. GraderIDs defaults to every
-// grader assigned to the dataset. The zero value waits for the run to finish
-// (up to Timeout, default 90s, polling every PollInterval, default 1s); set
-// NoWait to return as soon as the run is queued.
+// grader assigned to the dataset. Timeout bounds the wait and defaults to 90s.
 type RerunGradersOptions struct {
-	GraderIDs    []string
-	NoWait       bool
-	Timeout      time.Duration
-	PollInterval time.Duration
+	GraderIDs []string
+	Timeout   time.Duration
 }
 
-// RerunGradersResult is the run RerunGraders started or joined, in the last
-// state it observed.
+// RerunGradersResult is the completed run RerunGraders started or joined.
 type RerunGradersResult struct {
 	Run            GraderRerun `json:"run"`
 	JoinedExisting bool        `json:"joinedExisting"`
 }
 
+// GraderRerunError is returned by RerunGraders when the run ends errored.
+type GraderRerunError struct {
+	DatasetID string
+	Run       GraderRerun
+}
+
+func (e *GraderRerunError) Error() string {
+	reason := "no reason recorded"
+	if e.Run.Error != nil && *e.Run.Error != "" {
+		reason = *e.Run.Error
+	}
+	return fmt.Sprintf("bitfab: grader rerun on dataset %s errored: %s", e.DatasetID, reason)
+}
+
+// GraderRerunTimeoutError is returned by RerunGraders when Timeout elapses
+// before the run finishes. The run keeps going on Bitfab. Read it later with
+// GetGraderRerun and Run.ID.
+type GraderRerunTimeoutError struct {
+	DatasetID string
+	Timeout   time.Duration
+	Run       GraderRerun
+}
+
+func (e *GraderRerunTimeoutError) Error() string {
+	return fmt.Sprintf(
+		"bitfab: grader rerun %s on dataset %s still %s after %s. It keeps going on Bitfab, read it later with GetGraderRerun",
+		e.Run.ID, e.DatasetID, e.Run.Status, e.Timeout,
+	)
+}
+
 const (
-	defaultRerunTimeout      = 90 * time.Second
-	defaultRerunPollInterval = time.Second
+	defaultRerunTimeout = 90 * time.Second
+	rerunPollGap        = time.Second
 )
 
 // DatasetsClient creates, reads, and modifies datasets for the authenticated
@@ -299,10 +324,12 @@ func (d *DatasetsClient) RemoveGraders(ctx context.Context, datasetID string, gr
 	return &result, nil
 }
 
-// RerunGraders re-runs graders over every trace in the dataset. An unassigned
-// grader id is rejected. Unless options.NoWait is set it waits for the run to
-// finish (bounded by options.Timeout) and returns the last state seen either
-// way. A request matching an in-flight run joins it.
+// RerunGraders re-runs graders over every trace in the dataset and blocks
+// until the run finishes. An unassigned grader id is rejected. A request
+// matching an in-flight run joins it. An errored run returns a
+// *GraderRerunError, and a run still going after options.Timeout returns a
+// *GraderRerunTimeoutError. Run it in a goroutine to do other work meanwhile,
+// and cancel it with ctx.
 func (d *DatasetsClient) RerunGraders(ctx context.Context, datasetID string, options RerunGradersOptions) (*RerunGradersResult, error) {
 	payload := map[string]any{}
 	if options.GraderIDs != nil {
@@ -312,25 +339,24 @@ func (d *DatasetsClient) RerunGraders(ctx context.Context, datasetID string, opt
 	if err := d.post(ctx, datasetPath(datasetID, "/rerunGraders"), payload, &started); err != nil {
 		return nil, err
 	}
-	if options.NoWait {
-		return &started, nil
-	}
 
 	timeout := options.Timeout
 	if timeout <= 0 {
 		timeout = defaultRerunTimeout
 	}
-	interval := options.PollInterval
-	if interval <= 0 {
-		interval = defaultRerunPollInterval
-	}
 	deadline := time.Now().Add(timeout)
 	run := started.Run
-	for !run.Status.Terminal() && time.Now().Before(deadline) {
+	for !run.Status.Terminal() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, &GraderRerunTimeoutError{DatasetID: datasetID, Timeout: timeout, Run: run}
+		}
+		timer := time.NewTimer(min(rerunPollGap, remaining))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil, ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 		latest, err := d.GetGraderRerun(ctx, datasetID, run.ID)
 		if err != nil {
@@ -339,6 +365,9 @@ func (d *DatasetsClient) RerunGraders(ctx context.Context, datasetID string, opt
 		if latest != nil {
 			run = *latest
 		}
+	}
+	if run.Status == GraderRerunErrored {
+		return nil, &GraderRerunError{DatasetID: datasetID, Run: run}
 	}
 	return &RerunGradersResult{Run: run, JoinedExisting: started.JoinedExisting}, nil
 }

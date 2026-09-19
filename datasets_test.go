@@ -3,9 +3,11 @@ package bitfab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,23 +231,18 @@ func TestDatasets_MembershipAndGraderEndpoints(t *testing.T) {
 	}
 }
 
-func TestDatasets_RerunGradersPollsUntilSettled(t *testing.T) {
+func TestDatasets_RerunGradersPollsUntilCompleted(t *testing.T) {
 	polls := 0
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		if r.method == http.MethodPost {
 			return map[string]any{"run": testRerun("pending"), "joinedExisting": false}
 		}
 		polls++
-		if polls == 1 {
-			return map[string]any{"run": testRerun("running")}
-		}
 		return map[string]any{"run": testRerun("completed")}
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 
-	result, err := client.Datasets.RerunGraders(context.Background(), testDatasetID, RerunGradersOptions{
-		PollInterval: time.Millisecond,
-	})
+	result, err := client.Datasets.RerunGraders(context.Background(), testDatasetID, RerunGradersOptions{})
 	if err != nil {
 		t.Fatalf("RerunGraders: %v", err)
 	}
@@ -256,25 +253,24 @@ func TestDatasets_RerunGradersPollsUntilSettled(t *testing.T) {
 	if len(requests[0].body) != 0 {
 		t.Errorf("start body = %v, want empty", requests[0].body)
 	}
-	if polls != 2 || requests[1].query != "runId="+testRerun("pending")["id"].(string) {
+	if polls != 1 || requests[1].query != "runId="+testRerun("pending")["id"].(string) {
 		t.Errorf("polls = %d, query = %q", polls, requests[1].query)
 	}
 }
 
-func TestDatasets_RerunGradersNoWaitForwardsGraderIDs(t *testing.T) {
+func TestDatasets_RerunGradersReturnsAtOnceWhenStartIsCompleted(t *testing.T) {
 	server := newDatasetsServer(t, func(datasetRequest) any {
-		return map[string]any{"run": testRerun("pending"), "joinedExisting": true}
+		return map[string]any{"run": testRerun("completed"), "joinedExisting": true}
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 
 	result, err := client.Datasets.RerunGraders(context.Background(), testDatasetID, RerunGradersOptions{
 		GraderIDs: []string{"g1"},
-		NoWait:    true,
 	})
 	if err != nil {
 		t.Fatalf("RerunGraders: %v", err)
 	}
-	if !result.JoinedExisting || result.Run.Status != GraderRerunPending {
+	if !result.JoinedExisting || result.Run.Status != GraderRerunCompleted {
 		t.Errorf("result = %+v", result)
 	}
 	requests := server.recorded()
@@ -286,7 +282,28 @@ func TestDatasets_RerunGradersNoWaitForwardsGraderIDs(t *testing.T) {
 	}
 }
 
-func TestDatasets_RerunGradersStopsAtTimeout(t *testing.T) {
+func TestDatasets_RerunGradersReturnsErrorWhenErrored(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		run := testRerun("errored")
+		run["error"] = "grader crashed"
+		return map[string]any{"run": run, "joinedExisting": false}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	result, err := client.Datasets.RerunGraders(context.Background(), testDatasetID, RerunGradersOptions{})
+	var rerunErr *GraderRerunError
+	if !errors.As(err, &rerunErr) {
+		t.Fatalf("err = %v, want *GraderRerunError", err)
+	}
+	if result != nil || rerunErr.Run.Status != GraderRerunErrored {
+		t.Errorf("result = %+v, run = %+v", result, rerunErr.Run)
+	}
+	if !strings.Contains(err.Error(), testDatasetID) || !strings.Contains(err.Error(), "grader crashed") {
+		t.Errorf("message = %q", err.Error())
+	}
+}
+
+func TestDatasets_RerunGradersReturnsTimeoutError(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		if r.method == http.MethodPost {
 			return map[string]any{"run": testRerun("pending"), "joinedExisting": false}
@@ -296,14 +313,35 @@ func TestDatasets_RerunGradersStopsAtTimeout(t *testing.T) {
 	client := NewClient("test-key", WithServiceURL(server.URL))
 
 	result, err := client.Datasets.RerunGraders(context.Background(), testDatasetID, RerunGradersOptions{
-		Timeout:      5 * time.Millisecond,
-		PollInterval: time.Millisecond,
+		Timeout: 5 * time.Millisecond,
 	})
-	if err != nil {
-		t.Fatalf("RerunGraders: %v", err)
+	var timeoutErr *GraderRerunTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("err = %v, want *GraderRerunTimeoutError", err)
 	}
-	if result.Run.Status.Terminal() {
-		t.Errorf("status = %q, want non-terminal", result.Run.Status)
+	if result != nil || timeoutErr.Run.Status != GraderRerunRunning {
+		t.Errorf("result = %+v, run = %+v", result, timeoutErr.Run)
+	}
+	if !strings.Contains(err.Error(), "GetGraderRerun") {
+		t.Errorf("message = %q", err.Error())
+	}
+}
+
+func TestDatasets_RerunGradersStopsOnContextCancel(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"run": testRerun("pending"), "joinedExisting": false}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	result, err := client.Datasets.RerunGraders(ctx, testDatasetID, RerunGradersOptions{})
+	if !errors.Is(err, context.DeadlineExceeded) || result != nil {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Errorf("returned after %s, want prompt return on cancel", elapsed)
 	}
 }
 

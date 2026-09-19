@@ -213,10 +213,31 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 	return payload, nil
 }
 
-// TraceAssertionsResult includes the ancestor supplying inherited assertions.
+// AssertionGenerationStatus is where a trace's assertion generation stands.
+type AssertionGenerationStatus string
+
+const (
+	AssertionGenerationRunning   AssertionGenerationStatus = "running"
+	AssertionGenerationCompleted AssertionGenerationStatus = "completed"
+	AssertionGenerationFailed    AssertionGenerationStatus = "failed"
+)
+
+// AssertionGeneration reports the latest assertion generation on a trace.
+// AssertionIDs name the drafts a completed generation saved.
+type AssertionGeneration struct {
+	Status       AssertionGenerationStatus `json:"status"`
+	Error        *string                   `json:"error"`
+	AssertionIDs []string                  `json:"assertionIds"`
+	StartedAt    string                    `json:"startedAt"`
+	FinishedAt   *string                   `json:"finishedAt"`
+}
+
+// TraceAssertionsResult includes the ancestor supplying inherited assertions
+// and the trace's assertion generation, nil when none ran.
 type TraceAssertionsResult struct {
-	Assertions    []TraceAssertion `json:"assertions"`
-	InheritedFrom *string          `json:"inheritedFrom"`
+	Assertions    []TraceAssertion     `json:"assertions"`
+	InheritedFrom *string              `json:"inheritedFrom"`
+	Generation    *AssertionGeneration `json:"generation"`
 }
 
 // TraceAssertionsUpdate is one trace's assertions in a batch save.
