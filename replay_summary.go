@@ -50,5 +50,5 @@ func renderReplaySummary(pipeline string, result ReplayResult, stderr io.Writer)
 	if errors > 0 {
 		fmt.Fprintf(stderr, "  Errors:   %d\n", errors)
 	}
-	fmt.Fprintf(stderr, "\n  %s\n", result.TestRunURL)
+	fmt.Fprintf(stderr, "\n  %s\n", result.ExperimentURL)
 }

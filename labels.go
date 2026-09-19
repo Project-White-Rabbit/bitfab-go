@@ -46,7 +46,7 @@ const (
 )
 
 // LabelTarget names exactly one TraceID or OriginalTraceID. A replay verdict
-// uses OriginalTraceID with WithLabelTestRunID and, optionally, a zero-based
+// uses OriginalTraceID with WithLabelExperimentID and, optionally, a zero-based
 // Attempt. AssertionID narrows either target to one assertion.
 type LabelTarget struct {
 	TraceID         string
@@ -171,13 +171,21 @@ type TraceLabels struct {
 }
 
 type labelWriteConfig struct {
-	testRunID string
+	experimentID string
+	testRunID    string
 }
 
 // LabelWriteOption configures an agent label write.
 type LabelWriteOption func(*labelWriteConfig)
 
-// WithLabelTestRunID resolves OriginalTraceID and Attempt against a replay run.
+// WithLabelExperimentID resolves OriginalTraceID and Attempt against a replay experiment.
+func WithLabelExperimentID(experimentID string) LabelWriteOption {
+	return func(config *labelWriteConfig) { config.experimentID = experimentID }
+}
+
+// WithLabelTestRunID resolves OriginalTraceID and Attempt against a replay experiment.
+//
+// Deprecated: Use WithLabelExperimentID instead.
 func WithLabelTestRunID(testRunID string) LabelWriteOption {
 	return func(config *labelWriteConfig) { config.testRunID = testRunID }
 }
@@ -213,11 +221,15 @@ func (l *LabelsClient) Save(ctx context.Context, update LabelUpdate, options ...
 }
 
 // SaveAll sends up to 200 agent-authored verdict updates in one request.
-// OriginalTraceID targets use the run supplied by WithLabelTestRunID.
+// OriginalTraceID targets use the experiment supplied by WithLabelExperimentID.
 func (l *LabelsClient) SaveAll(ctx context.Context, updates []LabelUpdate, options ...LabelWriteOption) ([]LabelOutcome, error) {
 	config := labelWriteConfig{}
 	for _, option := range options {
 		option(&config)
+	}
+	experimentID, err := resolveExperimentID(config.experimentID, config.testRunID)
+	if err != nil {
+		return nil, err
 	}
 	labels := make([]map[string]any, 0, len(updates))
 	for _, update := range updates {
@@ -228,8 +240,8 @@ func (l *LabelsClient) SaveAll(ctx context.Context, updates []LabelUpdate, optio
 		labels = append(labels, payload)
 	}
 	payload := map[string]any{"labels": labels}
-	if config.testRunID != "" {
-		payload["testRunId"] = config.testRunID
+	if experimentID != "" {
+		setExperimentIDKeys(payload, experimentID)
 	}
 	var response struct {
 		Labels []LabelOutcome `json:"labels"`

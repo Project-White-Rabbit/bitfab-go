@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestFunctionReplayAndBindReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Function.Replay returned error: %v", err)
 	}
-	if result.TestRunID != "run-1" || len(result.Items) != 0 {
+	if result.ExperimentID != "run-1" || len(result.Items) != 0 {
 		t.Fatalf("result = %#v", result)
 	}
 	state.mu.Lock()
@@ -107,10 +108,11 @@ func TestReportReplayProgressWritesExactWireFormat(t *testing.T) {
 	t.Cleanup(func() { os.Stderr = original })
 
 	progress := ReplayItemStartProgress{
-		Type:      "started",
-		TestRunID: "run-1",
-		Started:   1,
-		Total:     2,
+		Type:         "started",
+		ExperimentID: "run-1",
+		TestRunID:    "run-1",
+		Started:      1,
+		Total:        2,
 		Item: AdaptContext{
 			OriginalTraceID: "trace-1",
 			OriginalSpanID:  "span-1",
@@ -130,6 +132,9 @@ func TestReportReplayProgressWritesExactWireFormat(t *testing.T) {
 	const prefix = "@@bitfab:progress "
 	if !strings.HasPrefix(string(wire), prefix) || !strings.HasSuffix(string(wire), "\n") {
 		t.Fatalf("wire output = %q", wire)
+	}
+	if !strings.Contains(string(wire), `"experimentId":"run-1"`) || !strings.Contains(string(wire), `"testRunId":"run-1"`) {
+		t.Fatalf("wire output lacks experiment ID keys: %q", wire)
 	}
 	var decoded ReplayItemStartProgress
 	if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(string(wire), prefix))), &decoded); err != nil {
@@ -266,6 +271,10 @@ func TestWaitForReplayPersistencePollsUntilComplete(t *testing.T) {
 		if request.URL.Path != "/api/sdk/replay/status" {
 			http.NotFound(writer, request)
 			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body["experimentId"] != "run-1" || body["testRunId"] != "run-1" {
+			t.Errorf("status body = %#v, err = %v", body, err)
 		}
 		if calls.Add(1) == 1 {
 			writeReplayTestJSON(t, writer, map[string]any{"traceIds": map[string]string{}})
@@ -508,5 +517,70 @@ func TestStartReplayPayloadCarriesDatasetIDs(t *testing.T) {
 	}
 	if len(legacy.DatasetIDs) != 1 || legacy.DatasetIDs[0] != "dataset-a" {
 		t.Fatalf("expected DatasetID to fold into DatasetIDs, got %v", legacy.DatasetIDs)
+	}
+}
+
+func TestReplayProgressCarriesExperimentIDAndDeprecatedAlias(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	var mu sync.Mutex
+	var starts []ReplayItemStartProgress
+	var finishes []ReplayItemFinishProgress
+	result, err := client.Replay(
+		context.Background(),
+		"progress-workflow",
+		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
+		&ReplayOptions{
+			OnItemStart: func(event ReplayItemStartProgress) {
+				mu.Lock()
+				defer mu.Unlock()
+				starts = append(starts, event)
+			},
+			OnItemFinish: func(event ReplayItemFinishProgress) {
+				mu.Lock()
+				defer mu.Unlock()
+				finishes = append(finishes, event)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	if result.ExperimentID != "run-1" || result.TestRunID != result.ExperimentID || result.TestRunURL != result.ExperimentURL {
+		t.Fatalf("result identity = %#v", result)
+	}
+	if len(starts) != 2 || len(finishes) != 2 {
+		t.Fatalf("starts=%d finishes=%d", len(starts), len(finishes))
+	}
+	for _, event := range starts {
+		if event.ExperimentID != "run-1" || event.TestRunID != event.ExperimentID {
+			t.Fatalf("start event = %#v", event)
+		}
+	}
+	for _, event := range finishes {
+		if event.ExperimentID != "run-1" || event.TestRunID != event.ExperimentID {
+			t.Fatalf("finish event = %#v", event)
+		}
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(encoded), `"experimentId":"run-1"`) || !strings.Contains(string(encoded), `"testRunId":"run-1"`) {
+			t.Fatalf("finish JSON = %s", encoded)
+		}
+	}
+	serialized, err := SerializeReplayResult(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"experimentId":"run-1"`, `"experimentUrl":"`, `"testRunId":"run-1"`, `"testRunUrl":"`} {
+		if !strings.Contains(serialized, key) {
+			t.Fatalf("serialized result lacks %s: %s", key, serialized)
+		}
 	}
 }

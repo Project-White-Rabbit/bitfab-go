@@ -144,17 +144,25 @@ func replayErrorJSON(err error) any {
 
 // ReplayResult contains every replayed item and the experiment it created.
 type ReplayResult struct {
-	Attempts   int          `json:"attempts"`
-	Items      []ReplayItem `json:"items"`
-	TestRunID  string       `json:"testRunId"`
-	TestRunURL string       `json:"testRunUrl"`
+	Attempts      int          `json:"attempts"`
+	Items         []ReplayItem `json:"items"`
+	ExperimentID  string       `json:"experimentId"`
+	ExperimentURL string       `json:"experimentUrl"`
+	// Deprecated: Use ExperimentID instead.
+	TestRunID string `json:"testRunId"`
+	// Deprecated: Use ExperimentURL instead.
+	TestRunURL string `json:"testRunUrl"`
 }
 
 // ReplayError is a whole-run failure that retains all items collected before it failed.
 type ReplayError struct {
-	Message    string
-	Items      []ReplayItem
-	TestRunID  string
+	Message       string
+	Items         []ReplayItem
+	ExperimentID  string
+	ExperimentURL string
+	// Deprecated: Use ExperimentID instead.
+	TestRunID string
+	// Deprecated: Use ExperimentURL instead.
 	TestRunURL string
 	Cause      error
 }
@@ -170,7 +178,9 @@ func (err *ReplayError) Unwrap() error {
 
 // ReplayItemStartProgress is emitted when a replay worker starts an item.
 type ReplayItemStartProgress struct {
-	Type      string       `json:"type"`
+	Type         string `json:"type"`
+	ExperimentID string `json:"experimentId"`
+	// Deprecated: Use ExperimentID instead.
 	TestRunID string       `json:"testRunId"`
 	Started   int          `json:"started"`
 	Completed int          `json:"completed"`
@@ -182,12 +192,21 @@ type ReplayItemStartProgress struct {
 
 // ReplayItemFinishProgress is emitted exactly once after each item settles.
 type ReplayItemFinishProgress struct {
+	ExperimentID string `json:"experimentId"`
+	// Deprecated: Use ExperimentID instead.
 	TestRunID string     `json:"testRunId"`
 	Completed int        `json:"completed"`
 	Total     int        `json:"total"`
 	Succeeded int        `json:"succeeded"`
 	Errored   int        `json:"errored"`
 	Item      ReplayItem `json:"item"`
+}
+
+// ReplayExperimentStart is passed to ReplayOptions.OnExperimentStart once,
+// right after the server creates the experiment and before any item runs.
+type ReplayExperimentStart struct {
+	ExperimentID  string `json:"experimentId"`
+	ExperimentURL string `json:"experimentUrl"`
 }
 
 // ReplayOptions configures Client.Replay.
@@ -219,6 +238,7 @@ type ReplayOptions struct {
 	AdaptInputs              ReplayInputAdapter
 	OnItemStart              func(ReplayItemStartProgress)
 	OnItemFinish             func(ReplayItemFinishProgress)
+	OnExperimentStart        func(ReplayExperimentStart)
 	dbBranchSettings         map[string]any
 }
 
@@ -276,9 +296,11 @@ func (item replayServerItem) originalSpanID() string {
 }
 
 type startReplayResponse struct {
-	TestRunID  string             `json:"testRunId"`
-	TestRunURL string             `json:"testRunUrl"`
-	Items      []replayServerItem `json:"items"`
+	ExperimentID        string             `json:"experimentId"`
+	ExperimentURL       string             `json:"experimentUrl"`
+	LegacyExperimentID  string             `json:"testRunId"`
+	LegacyExperimentURL string             `json:"testRunUrl"`
+	Items               []replayServerItem `json:"items"`
 }
 
 type externalReplaySpan struct {
@@ -579,11 +601,19 @@ func (c *Client) Replay(
 			start.Items = append(start.Items, source)
 		}
 	}
+	experimentURL := c.replayURL(start.ExperimentURL)
 	result := ReplayResult{
-		Attempts:   resolved.Attempts,
-		Items:      make([]ReplayItem, len(start.Items)),
-		TestRunID:  start.TestRunID,
-		TestRunURL: c.replayURL(start.TestRunURL),
+		Attempts:      resolved.Attempts,
+		Items:         make([]ReplayItem, len(start.Items)),
+		ExperimentID:  start.ExperimentID,
+		ExperimentURL: experimentURL,
+		TestRunID:     start.ExperimentID,
+		TestRunURL:    experimentURL,
+	}
+	if resolved.OnExperimentStart != nil {
+		safelyCall(func() {
+			resolved.OnExperimentStart(ReplayExperimentStart{ExperimentID: result.ExperimentID, ExperimentURL: result.ExperimentURL})
+		})
 	}
 
 	localTraceIDs := make([]string, len(start.Items))
@@ -600,7 +630,7 @@ func (c *Client) Replay(
 		c.runReplayItems(ctx, traceFunctionKey, callable, resolved, start, localTraceIDs, &result)
 	}
 	if resolved.DryRun {
-		_, _ = c.completeReplay(ctx, start.TestRunID)
+		_, _ = c.completeReplay(ctx, start.ExperimentID)
 		if err := writeReplayResultFile(result); err != nil {
 			log.Printf("Bitfab: %v", err)
 		}
@@ -613,7 +643,7 @@ func (c *Client) Replay(
 		}
 	}
 
-	persisted, err := c.waitForReplayPersistence(ctx, start.TestRunID, executedTraceIDs, replayPersistenceTimeout)
+	persisted, err := c.waitForReplayPersistence(ctx, start.ExperimentID, executedTraceIDs, replayPersistenceTimeout)
 	if err != nil {
 		return ReplayResult{}, newReplayRunError(err, result)
 	}
@@ -623,7 +653,7 @@ func (c *Client) Replay(
 		}
 	}
 
-	complete, err := c.completeReplay(ctx, start.TestRunID)
+	complete, err := c.completeReplay(ctx, start.ExperimentID)
 	if err != nil {
 		return ReplayResult{}, newReplayRunError(err, result)
 	}
@@ -735,11 +765,13 @@ func (c *Client) replayURL(path string) string {
 
 func newReplayRunError(cause error, result ReplayResult) *ReplayError {
 	return &ReplayError{
-		Message:    cause.Error(),
-		Items:      result.Items,
-		TestRunID:  result.TestRunID,
-		TestRunURL: result.TestRunURL,
-		Cause:      cause,
+		Message:       cause.Error(),
+		Items:         result.Items,
+		ExperimentID:  result.ExperimentID,
+		ExperimentURL: result.ExperimentURL,
+		TestRunID:     result.ExperimentID,
+		TestRunURL:    result.ExperimentURL,
+		Cause:         cause,
 	}
 }
 
@@ -812,8 +844,14 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if err := json.Unmarshal(encoded, &start); err != nil {
 		return startReplayResponse{}, fmt.Errorf("bitfab: decode start replay response: %w", err)
 	}
-	if start.TestRunID == "" {
-		return startReplayResponse{}, fmt.Errorf("bitfab: start replay response omitted testRunId")
+	if start.ExperimentID == "" {
+		start.ExperimentID = start.LegacyExperimentID
+	}
+	if start.ExperimentURL == "" {
+		start.ExperimentURL = start.LegacyExperimentURL
+	}
+	if start.ExperimentID == "" {
+		return startReplayResponse{}, fmt.Errorf("bitfab: start replay response omitted the experiment ID")
 	}
 	return start, nil
 }
@@ -851,19 +889,19 @@ func (c *Client) runReplayItems(
 			defer workers.Done()
 			for index := range jobs {
 				serverItem := start.Items[index]
-				progress.reportStart(options.OnItemStart, start.TestRunID, serverItem)
+				progress.reportStart(options.OnItemStart, start.ExperimentID, serverItem)
 				item := c.runReplayItem(
 					ctx,
 					traceFunctionKey,
 					callable,
 					options,
-					start.TestRunID,
+					start.ExperimentID,
 					serverItem,
 					localTraceIDs[index],
 				)
 				c.fillFinishedReplayTraceID(&item, &flushMu)
 				result.Items[index] = item
-				progress.reportFinish(options.OnItemFinish, start.TestRunID, item)
+				progress.reportFinish(options.OnItemFinish, start.ExperimentID, item)
 			}
 		}()
 	}
@@ -897,7 +935,7 @@ type replayProgressState struct {
 	total     int
 }
 
-func (state *replayProgressState) reportStart(callback func(ReplayItemStartProgress), testRunID string, item replayServerItem) {
+func (state *replayProgressState) reportStart(callback func(ReplayItemStartProgress), experimentID string, item replayServerItem) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.started++
@@ -908,13 +946,14 @@ func (state *replayProgressState) reportStart(callback func(ReplayItemStartProgr
 	originalSpanID := item.originalSpanID()
 	safelyCall(func() {
 		callback(ReplayItemStartProgress{
-			Type:      "started",
-			TestRunID: testRunID,
-			Started:   state.started,
-			Completed: state.completed,
-			Total:     state.total,
-			Succeeded: state.succeeded,
-			Errored:   state.errored,
+			Type:         "started",
+			ExperimentID: experimentID,
+			TestRunID:    experimentID,
+			Started:      state.started,
+			Completed:    state.completed,
+			Total:        state.total,
+			Succeeded:    state.succeeded,
+			Errored:      state.errored,
 			Item: AdaptContext{
 				OriginalTraceID: originalTraceID,
 				Attempt:         item.attempt,
@@ -926,7 +965,7 @@ func (state *replayProgressState) reportStart(callback func(ReplayItemStartProgr
 	})
 }
 
-func (state *replayProgressState) reportFinish(callback func(ReplayItemFinishProgress), testRunID string, item ReplayItem) {
+func (state *replayProgressState) reportFinish(callback func(ReplayItemFinishProgress), experimentID string, item ReplayItem) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.completed++
@@ -940,12 +979,13 @@ func (state *replayProgressState) reportFinish(callback func(ReplayItemFinishPro
 	}
 	safelyCall(func() {
 		callback(ReplayItemFinishProgress{
-			TestRunID: testRunID,
-			Completed: state.completed,
-			Total:     state.total,
-			Succeeded: state.succeeded,
-			Errored:   state.errored,
-			Item:      item,
+			ExperimentID: experimentID,
+			TestRunID:    experimentID,
+			Completed:    state.completed,
+			Total:        state.total,
+			Succeeded:    state.succeeded,
+			Errored:      state.errored,
+			Item:         item,
 		})
 	})
 }
@@ -997,7 +1037,7 @@ func (c *Client) runReplayItem(
 	traceFunctionKey string,
 	callable *replayCallable,
 	options ReplayOptions,
-	testRunID string,
+	experimentID string,
 	serverItem replayServerItem,
 	localTraceID string,
 ) ReplayItem {
@@ -1010,7 +1050,7 @@ func (c *Client) runReplayItem(
 		item.DBBranchTimings = nil
 	}
 	if options.DBBranch != nil && !options.DryRun && lease == nil && leaseError == nil {
-		resolved, err := c.resolveReplayDBBranch(ctx, testRunID, item.OriginalTraceID, options.dbBranchSettings, serverItem.attempt)
+		resolved, err := c.resolveReplayDBBranch(ctx, experimentID, item.OriginalTraceID, options.dbBranchSettings, serverItem.attempt)
 		if err != nil {
 			setReplaySetupError(&item, err)
 			return item
@@ -1088,7 +1128,7 @@ func (c *Client) runReplayItem(
 	}
 	replayCtx := withReplayContext(ctx, &replayContext{
 		attempt:            serverItem.attempt,
-		testRunID:          testRunID,
+		experimentID:       experimentID,
 		traceID:            localTraceID,
 		inputSourceSpanID:  span.ID,
 		inputSourceTraceID: span.ExternalTraceID,
@@ -1143,7 +1183,7 @@ func setReplaySetupError(item *ReplayItem, err error) {
 	item.ReplayError = err
 }
 
-func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string, traceIDs []string, timeout time.Duration) (map[string]string, error) {
+func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID string, traceIDs []string, timeout time.Duration) (map[string]string, error) {
 	if len(traceIDs) == 0 {
 		return map[string]string{}, nil
 	}
@@ -1173,7 +1213,7 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 	deadline := time.Now().Add(timeout)
 	missing := len(expected)
 	for {
-		status, err := c.getReplayStatus(ctx, testRunID, expected)
+		status, err := c.getReplayStatus(ctx, experimentID, expected)
 		if err == nil {
 			missing = 0
 			for traceID := range expected {
@@ -1197,8 +1237,8 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 				cause = " Delivery was also not confirmed before the flush deadline, so the spans likely never reached the server."
 			}
 			return nil, fmt.Errorf(
-				"bitfab: replay traces were not fully persisted before the delivery deadline (test run %s, missing %d of %d traces).%s",
-				testRunID,
+				"bitfab: replay traces were not fully persisted before the delivery deadline (experiment %s, missing %d of %d traces).%s",
+				experimentID,
 				missing,
 				len(expected),
 				cause,
@@ -1214,9 +1254,10 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, testRunID string,
 	}
 }
 
-func (c *Client) getReplayStatus(ctx context.Context, testRunID string, expected map[string]int) (replayStatusResponse, error) {
+func (c *Client) getReplayStatus(ctx context.Context, experimentID string, expected map[string]int) (replayStatusResponse, error) {
 	response, err := c.httpClient.request(ctx, "/api/sdk/replay/status", map[string]any{
-		"testRunId":          testRunID,
+		"experimentId":       experimentID,
+		"testRunId":          experimentID,
 		"expectedSpanCounts": expected,
 	}, 30*time.Second)
 	if err != nil {
@@ -1236,9 +1277,10 @@ func (c *Client) getReplayStatus(ctx context.Context, testRunID string, expected
 	return status, nil
 }
 
-func (c *Client) completeReplay(ctx context.Context, testRunID string) (completeReplayResponse, error) {
+func (c *Client) completeReplay(ctx context.Context, experimentID string) (completeReplayResponse, error) {
 	response, err := c.httpClient.request(ctx, "/api/sdk/replay/complete", map[string]any{
-		"testRunId": testRunID,
+		"experimentId": experimentID,
+		"testRunId":    experimentID,
 	}, 30*time.Second)
 	if err != nil {
 		return completeReplayResponse{}, fmt.Errorf("bitfab: complete replay: %w", err)

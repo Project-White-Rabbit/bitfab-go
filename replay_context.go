@@ -10,7 +10,7 @@ type replayContextKey struct{}
 
 type replayContext struct {
 	attempt            int
-	testRunID          string
+	experimentID       string
 	traceID            string
 	inputSourceSpanID  string
 	inputSourceTraceID string

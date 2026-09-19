@@ -196,21 +196,21 @@ func TestSpan_PanicIsRecordedAndRethrown(t *testing.T) {
 	}
 }
 
-func TestSpanTestRunID_ReplayWinsAndExplicitAppliesOutsideReplay(t *testing.T) {
+func TestSpanExperimentID_ReplayWinsAndExplicitAppliesOutsideReplay(t *testing.T) {
 	for _, replaying := range []bool{false, true} {
 		t.Run(map[bool]string{false: "explicit", true: "replay"}[replaying], func(t *testing.T) {
 			c, requests := subtreeClient(t)
 			ctx := context.Background()
 			want := "explicit"
 			if replaying {
-				ctx = withReplayContext(ctx, &replayContext{testRunID: "experiment"})
+				ctx = withReplayContext(ctx, &replayContext{experimentID: "experiment"})
 				want = "experiment"
 			}
-			_, err := c.Span(ctx, "closure", func(context.Context) (any, error) { return 1, nil }, WithTestRunID("explicit"))
+			_, err := c.Span(ctx, "closure", func(context.Context) (any, error) { return 1, nil }, WithExperimentID("explicit"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, span := c.Start(ctx, "handle", "handle", WithTestRunID("explicit"), WithFinalize(func(any) (any, error) { return "final", nil }))
+			_, span := c.Start(ctx, "handle", "handle", WithExperimentID("explicit"), WithFinalize(func(any) (any, error) { return "final", nil }))
 			span.SetOutput("raw")
 			span.End()
 			span.End()
@@ -218,10 +218,47 @@ func TestSpanTestRunID_ReplayWinsAndExplicitAppliesOutsideReplay(t *testing.T) {
 				t.Fatal("flush")
 			}
 			for _, request := range requests() {
-				if request["testRunId"] != want {
-					t.Fatalf("attribution=%v want=%s", request["testRunId"], want)
+				if request["experimentId"] != want || request["testRunId"] != want {
+					t.Fatalf("attribution=%v legacy=%v want=%s", request["experimentId"], request["testRunId"], want)
 				}
 			}
 		})
+	}
+}
+
+func TestSpanDeprecatedTestRunIDMatchesExperimentIDAndConflictsFail(t *testing.T) {
+	c, requests := subtreeClient(t)
+	ctx := context.Background()
+	if _, err := c.Span(ctx, "closure", func(context.Context) (any, error) { return 1, nil }, WithTestRunID("legacy")); err != nil {
+		t.Fatal(err)
+	}
+	_, span := c.Start(ctx, "handle", "handle", WithExperimentID("legacy"), WithTestRunID("legacy"))
+	span.End()
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	for _, request := range requests() {
+		if request["experimentId"] != "legacy" || request["testRunId"] != "legacy" {
+			t.Fatalf("attribution=%v legacy=%v", request["experimentId"], request["testRunId"])
+		}
+	}
+	ran := false
+	_, err := c.Span(ctx, "closure", func(context.Context) (any, error) { ran = true; return 1, nil }, WithExperimentID("one"), WithTestRunID("two"))
+	if err == nil || ran {
+		t.Fatalf("conflict err=%v ran=%v", err, ran)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Start accepted conflicting experiment IDs")
+			}
+		}()
+		c.Start(ctx, "handle", "handle", WithExperimentID("one"), WithTestRunID("two"))
+	}()
+	if _, err := c.Trace(ctx, "trace", func(context.Context) (any, error) { return 1, nil }, TraceOptions{ExperimentID: "one", TestRunID: "two"}); err == nil {
+		t.Fatal("Trace accepted conflicting experiment IDs")
+	}
+	if err := c.Node(func() {}, NodeOptions{ExperimentID: "one", TestRunID: "two"}); err == nil {
+		t.Fatal("Node accepted conflicting experiment IDs")
 	}
 }

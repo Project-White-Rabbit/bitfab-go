@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -231,5 +233,46 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 	got, ok := state.startBody["traceIds"].([]any)
 	if !ok || len(got) != 1 || got[0] != "reviewed" {
 		t.Fatalf("selected trace ids = %#v, want only the reviewed trace", state.startBody["traceIds"])
+	}
+}
+
+func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone}}); err != nil {
+		t.Fatal(err)
+	}
+	startLine := "[replay] Experiment run-1: " + server.URL + "/experiments/run-1\n"
+
+	var stderr bytes.Buffer
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline"}, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	output := stderr.String()
+	replaying := strings.Index(output, "[replay] Replaying")
+	started := strings.Index(output, startLine)
+	summary := strings.Index(output, "Summary")
+	if replaying < 0 || started < replaying || summary < started {
+		t.Fatalf("stderr = %s", output)
+	}
+
+	state.mu.Lock()
+	state.completeErr = true
+	state.mu.Unlock()
+	stderr.Reset()
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline"}, io.Discard, &stderr)
+	var replayErr *ReplayError
+	if !errors.As(err, &replayErr) || replayErr.ExperimentID != "run-1" {
+		t.Fatalf("error = %T %v", err, err)
+	}
+	output = stderr.String()
+	failureLine := "\nExperiment run-1: " + server.URL + "/experiments/run-1\n"
+	if !strings.Contains(output, startLine) || strings.Index(output, failureLine) <= strings.Index(output, startLine) {
+		t.Fatalf("stderr = %s", output)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,11 +45,11 @@ func TestLabels_SaveReplayAssertionPreservesFalseAndAttemptZero(t *testing.T) {
 	result, err := client.Labels.Save(context.Background(), LabelUpdate{
 		LabelTarget: LabelTarget{OriginalTraceID: "original", Attempt: &attempt, AssertionID: "assertion"},
 		Label:       false, Annotation: "arrived late", Confidence: LabelConfidenceHigh,
-	}, WithLabelTestRunID("run"))
+	}, WithLabelExperimentID("run"))
 	if err != nil || result.TraceID != "replayed" || result.Action != LabelActionSet {
 		t.Fatalf("Save = %+v, %v", result, err)
 	}
-	want := map[string]any{"testRunId": "run", "labels": []any{map[string]any{
+	want := map[string]any{"experimentId": "run", "testRunId": "run", "labels": []any{map[string]any{
 		"originalTraceId": "original", "attempt": float64(0), "assertionId": "assertion",
 		"label": false, "annotation": "arrived late", "confidence": "High",
 	}}}
@@ -115,17 +116,17 @@ func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 		{LabelTarget: LabelTarget{TraceID: "one"}, Label: true, Annotation: "works"},
 		{LabelTarget: LabelTarget{TraceID: "two", AssertionID: "check"}, Skip: true},
 		{LabelTarget: LabelTarget{OriginalTraceID: "three"}, Archive: true},
-	}, WithLabelTestRunID("run"))
+	}, WithLabelExperimentID("run"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	attempt := 2
 	target := LabelTarget{OriginalTraceID: "original", Attempt: &attempt, AssertionID: "assertion"}
-	skipped, err := client.Labels.Skip(ctx, target, WithLabelTestRunID("run"))
+	skipped, err := client.Labels.Skip(ctx, target, WithLabelExperimentID("run"))
 	if err != nil || skipped.Action != LabelActionSkipped {
 		t.Fatalf("Skip = %+v, %v", skipped, err)
 	}
-	archived, err := client.Labels.Archive(ctx, target, WithLabelTestRunID("run"))
+	archived, err := client.Labels.Archive(ctx, target, WithLabelExperimentID("run"))
 	if err != nil || archived.Action != LabelActionArchived {
 		t.Fatalf("Archive = %+v, %v", archived, err)
 	}
@@ -134,7 +135,7 @@ func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	}
 	requests := server.recorded()
 	for index, action := range []string{"skip", "archive"} {
-		want := map[string]any{"testRunId": "run", "labels": []any{map[string]any{
+		want := map[string]any{"experimentId": "run", "testRunId": "run", "labels": []any{map[string]any{
 			"originalTraceId": "original", "attempt": float64(2), "assertionId": "assertion", action: true,
 		}}}
 		if !reflect.DeepEqual(requests[index+1].body, want) {
@@ -242,5 +243,34 @@ func TestLabels_InvalidTargetsDoNotSendPartialBatch(t *testing.T) {
 	}
 	if len(server.recorded()) != 0 {
 		t.Fatal("invalid batch sent a request")
+	}
+}
+
+func TestLabels_ExperimentIDAcceptsDeprecatedTestRunIDAndRejectsConflicts(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"labels": []any{map[string]any{"key": "original#0", "traceId": "replayed", "action": "skipped"}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	ctx := context.Background()
+	target := LabelTarget{OriginalTraceID: "original"}
+	for _, options := range [][]LabelWriteOption{
+		{WithLabelExperimentID("experiment")},
+		{WithLabelTestRunID("experiment")},
+		{WithLabelExperimentID("experiment"), WithLabelTestRunID("experiment")},
+	} {
+		if _, err := client.Labels.Skip(ctx, target, options...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, request := range server.recorded() {
+		if request.body["experimentId"] != "experiment" || request.body["testRunId"] != "experiment" {
+			t.Fatalf("request %d body = %#v", index, request.body)
+		}
+	}
+	if _, err := client.Labels.Skip(ctx, target, WithLabelExperimentID("one"), WithLabelTestRunID("two")); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("conflict error = %v", err)
+	}
+	if len(server.recorded()) != 3 {
+		t.Fatal("conflicting options reached the server")
 	}
 }

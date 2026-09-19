@@ -63,7 +63,7 @@ type TraceState struct {
 	TraceID            string
 	SessionID          string
 	Name               string
-	TestRunID          string
+	ExperimentID       string
 	InputSourceTraceID string
 	IngestionType      string
 	DBSnapshotRef      *DBSnapshotRef

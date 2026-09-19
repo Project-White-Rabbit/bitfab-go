@@ -311,6 +311,7 @@ type SpanOption func(*spanConfig)
 
 type spanConfig struct {
 	finalize       SpanFinalizer
+	experimentID   string
 	testRunID      string
 	name           string
 	spanType       string
@@ -356,10 +357,32 @@ func WithFinalize(finalize SpanFinalizer) SpanOption {
 	return func(c *spanConfig) { c.finalize = finalize }
 }
 
-// WithTestRunID attributes a span and the trace it starts to a test run.
+// WithExperimentID attributes a span and the trace it starts to an experiment.
 // Replay attribution takes precedence so items remain in their experiment.
+func WithExperimentID(experimentID string) SpanOption {
+	return func(c *spanConfig) { c.experimentID = experimentID }
+}
+
+// WithTestRunID attributes a span and the trace it starts to an experiment.
+//
+// Deprecated: Use WithExperimentID instead.
 func WithTestRunID(testRunID string) SpanOption {
 	return func(c *spanConfig) { c.testRunID = testRunID }
+}
+
+func setExperimentIDKeys(payload map[string]any, experimentID string) {
+	payload["experimentId"] = experimentID
+	payload["testRunId"] = experimentID
+}
+
+func resolveExperimentID(experimentID, testRunID string) (string, error) {
+	if experimentID != "" && testRunID != "" && experimentID != testRunID {
+		return "", fmt.Errorf("bitfab: experiment ID %q conflicts with the deprecated TestRunID %q; pass only the experiment ID", experimentID, testRunID)
+	}
+	if experimentID != "" {
+		return experimentID, nil
+	}
+	return testRunID, nil
 }
 
 // WithCaptureWhen controls whether a span may start a new trace.
@@ -426,6 +449,11 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	experimentID, err := resolveExperimentID(cfg.experimentID, cfg.testRunID)
+	if err != nil {
+		return nil, err
+	}
+	cfg.experimentID = experimentID
 	cfg.captureWhen = normalizeCaptureWhen(cfg.captureWhen, traceFunctionKey)
 	if cfg.captureWhen == CaptureWhenNested && currentSpan(ctx) == nil {
 		return fn(ctx)
@@ -451,10 +479,10 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	}
 
 	replayAtStart := currentReplayContext(ctx)
-	if id.isRootSpan && cfg.testRunID != "" && (replayAtStart == nil || replayAtStart.testRunID == "") {
+	if id.isRootSpan && cfg.experimentID != "" && (replayAtStart == nil || replayAtStart.experimentID == "") {
 		state := getTraceState(id.traceID)
 		state.mu.Lock()
-		state.TestRunID = cfg.testRunID
+		state.ExperimentID = cfg.experimentID
 		state.mu.Unlock()
 	}
 	prepareManagedAutoSpan(ctx, id)
@@ -556,11 +584,11 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 					"traceFunctionKey": traceFunctionKey,
 					"rawSpan":          rawSpan,
 				}
-				if replay != nil && replay.testRunID != "" {
-					payload["testRunId"] = replay.testRunID
+				if replay != nil && replay.experimentID != "" {
+					setExperimentIDKeys(payload, replay.experimentID)
 				}
-				if cfg.testRunID != "" && (replay == nil || replay.testRunID == "") {
-					payload["testRunId"] = cfg.testRunID
+				if cfg.experimentID != "" && (replay == nil || replay.experimentID == "") {
+					setExperimentIDKeys(payload, cfg.experimentID)
 				}
 				if mocked {
 					payload["mocked"] = true
@@ -634,7 +662,7 @@ func (c *Client) beginSpan(ctx context.Context) (id spanIdentity, ok bool) {
 		state := createTraceState(traceID)
 		state.DBSnapshotRef = c.buildDBSnapshotRef(state.StartedAt)
 		if replay := currentReplayContext(ctx); replay != nil {
-			state.TestRunID = replay.testRunID
+			state.ExperimentID = replay.experimentID
 			state.InputSourceTraceID = replay.inputSourceTraceID
 			state.replay = replay
 		}
@@ -671,6 +699,11 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	experimentID, err := resolveExperimentID(cfg.experimentID, cfg.testRunID)
+	if err != nil {
+		panic(err)
+	}
+	cfg.experimentID = experimentID
 	cfg.captureWhen = normalizeCaptureWhen(cfg.captureWhen, traceFunctionKey)
 	if cfg.captureWhen == CaptureWhenNested && currentSpan(ctx) == nil {
 		return ctx, &ActiveSpan{}
@@ -711,17 +744,17 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 		isRootSpan:                    id.isRootSpan,
 	}
 	if replay := currentReplayContext(ctx); replay != nil {
-		span.testRunID = replay.testRunID
+		span.experimentID = replay.experimentID
 		span.inputSourceSpanID = replay.inputSourceSpanID
 	}
 
 	replayAtStart := currentReplayContext(ctx)
-	if cfg.testRunID != "" && (replayAtStart == nil || replayAtStart.testRunID == "") {
-		span.testRunID = cfg.testRunID
+	if cfg.experimentID != "" && (replayAtStart == nil || replayAtStart.experimentID == "") {
+		span.experimentID = cfg.experimentID
 		if id.isRootSpan {
 			state := getTraceState(id.traceID)
 			state.mu.Lock()
-			state.TestRunID = cfg.testRunID
+			state.ExperimentID = cfg.experimentID
 			state.mu.Unlock()
 		}
 	}
@@ -848,7 +881,7 @@ type ActiveSpan struct {
 	contexts                      []ContextEntry
 	prompt                        string
 	isRootSpan                    bool
-	testRunID                     string
+	experimentID                  string
 	inputSourceSpanID             string
 	once                          sync.Once
 }
@@ -995,8 +1028,8 @@ func (s *ActiveSpan) End() {
 					"traceFunctionKey": s.traceFunctionKey,
 					"rawSpan":          rawSpan,
 				}
-				if s.testRunID != "" {
-					payload["testRunId"] = s.testRunID
+				if s.experimentID != "" {
+					setExperimentIDKeys(payload, s.experimentID)
 				}
 				s.client.httpClient.sendExternalSpan(payload, dropped...)
 			}
@@ -1075,8 +1108,8 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 	if ts != nil && ts.SessionID != "" {
 		payload["sessionId"] = ts.SessionID
 	}
-	if ts != nil && ts.TestRunID != "" {
-		payload["testRunId"] = ts.TestRunID
+	if ts != nil && ts.ExperimentID != "" {
+		setExperimentIDKeys(payload, ts.ExperimentID)
 	}
 
 	if ts != nil && ts.isDropped() {

@@ -17,12 +17,14 @@ import (
 )
 
 type replayTestServerState struct {
-	mu          sync.Mutex
-	startBody   map[string]any
-	spans       []map[string]any
-	traces      []map[string]any
-	statusCalls int
-	completeErr bool
+	mu           sync.Mutex
+	startBody    map[string]any
+	spans        []map[string]any
+	traces       []map[string]any
+	statusCalls  int
+	completeErr  bool
+	startReply   map[string]any
+	completeBody map[string]any
 }
 
 func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[string]any) http.HandlerFunc {
@@ -37,11 +39,17 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 			state.mu.Lock()
 			state.startBody = body
 			state.mu.Unlock()
-			writeReplayTestJSON(t, w, map[string]any{
-				"testRunId":  "run-1",
-				"testRunUrl": "/experiments/run-1",
-				"items":      items,
-			})
+			reply := map[string]any{
+				"experimentId":  "run-1",
+				"experimentUrl": "/experiments/run-1",
+				"testRunId":     "run-1",
+				"testRunUrl":    "/experiments/run-1",
+			}
+			if state.startReply != nil {
+				reply = state.startReply
+			}
+			reply["items"] = items
+			writeReplayTestJSON(t, w, reply)
 		case strings.HasPrefix(request.URL.Path, "/api/sdk/externalSpans/"):
 			spanID := strings.TrimPrefix(request.URL.Path, "/api/sdk/externalSpans/")
 			input := map[string]any{
@@ -82,6 +90,13 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 			state.mu.Unlock()
 			writeReplayTestJSON(t, w, map[string]any{"traceIds": state.traceIDs()})
 		case request.URL.Path == "/api/sdk/replay/complete":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode complete body: %v", err)
+			}
+			state.mu.Lock()
+			state.completeBody = body
+			state.mu.Unlock()
 			if state.completeErr {
 				http.Error(w, "completion failed", http.StatusInternalServerError)
 				return
@@ -231,8 +246,11 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 	if got, want := []any{result.Items[0].Result, result.Items[1].Result}, []any{"alpha:2", "beta:3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("results = %#v, want %#v", got, want)
 	}
-	if result.TestRunID != "run-1" || result.TestRunURL != server.URL+"/experiments/run-1" {
+	if result.ExperimentID != "run-1" || result.ExperimentURL != server.URL+"/experiments/run-1" {
 		t.Fatalf("result identity = %#v", result)
+	}
+	if result.TestRunID != result.ExperimentID || result.TestRunURL != result.ExperimentURL {
+		t.Fatalf("deprecated result aliases = %#v", result)
 	}
 	for _, item := range result.Items {
 		if item.TraceID == nil || !strings.HasPrefix(*item.TraceID, "server-") {
@@ -283,8 +301,8 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 		t.Fatalf("status endpoint calls=%d, want acknowledgment-only persistence", state.statusCalls)
 	}
 	for _, span := range state.spans {
-		if span["testRunId"] != "run-1" {
-			t.Errorf("span omitted testRunId: %#v", span)
+		if span["experimentId"] != "run-1" || span["testRunId"] != "run-1" {
+			t.Errorf("span omitted experiment ID keys: %#v", span)
 		}
 		rawSpan := span["rawSpan"].(map[string]any)
 		if rawSpan["input_source_span_id"] == nil {
@@ -292,9 +310,126 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 		}
 	}
 	for _, trace := range state.traces {
-		if trace["testRunId"] != "run-1" {
-			t.Errorf("trace omitted testRunId: %#v", trace)
+		if trace["experimentId"] != "run-1" || trace["testRunId"] != "run-1" {
+			t.Errorf("trace omitted experiment ID keys: %#v", trace)
 		}
+	}
+}
+
+func TestReplayReadsExperimentIDAndFallsBackToLegacyKeys(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	cases := map[string]struct {
+		reply  map[string]any
+		wantID string
+	}{
+		"experiment keys only": {map[string]any{"experimentId": "exp-1", "experimentUrl": "/experiments/exp-1"}, "exp-1"},
+		"legacy keys only":     {map[string]any{"testRunId": "exp-1", "testRunUrl": "/experiments/exp-1"}, "exp-1"},
+		"experiment keys win": {map[string]any{
+			"experimentId": "exp-1", "experimentUrl": "/experiments/exp-1",
+			"testRunId": "old-1", "testRunUrl": "/experiments/old-1",
+		}, "exp-1"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := &replayTestServerState{startReply: tc.reply}
+			server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))
+			defer server.Close()
+			client := newTestClient(server.URL)
+			defer client.Close(5 * time.Second)
+			result, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{Limit: 1})
+			if err != nil {
+				t.Fatalf("Replay returned error: %v", err)
+			}
+			wantURL := server.URL + "/experiments/" + tc.wantID
+			if result.ExperimentID != tc.wantID || result.ExperimentURL != wantURL || result.TestRunID != tc.wantID || result.TestRunURL != wantURL {
+				t.Fatalf("result identity = %#v", result)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.completeBody["experimentId"] != tc.wantID || state.completeBody["testRunId"] != tc.wantID {
+				t.Fatalf("complete body = %#v", state.completeBody)
+			}
+		})
+	}
+}
+
+func TestReplayStartResponseWithoutExperimentIDFails(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{startReply: map[string]any{}}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+	_, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{Limit: 1})
+	if err == nil || !strings.Contains(err.Error(), "omitted the experiment ID") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestReplayOnExperimentStartFiresOnceBeforeFirstItem(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+	var events []string
+	var experiments []ReplayExperimentStart
+	var mu sync.Mutex
+	_, err := client.Replay(
+		context.Background(),
+		"typed-workflow",
+		func(name string, count int) string { return name },
+		&ReplayOptions{
+			Limit:          2,
+			MaxConcurrency: 2,
+			OnExperimentStart: func(event ReplayExperimentStart) {
+				mu.Lock()
+				defer mu.Unlock()
+				events = append(events, "experiment")
+				experiments = append(experiments, event)
+			},
+			OnItemStart: func(ReplayItemStartProgress) {
+				mu.Lock()
+				defer mu.Unlock()
+				events = append(events, "item")
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	if want := []string{"experiment", "item", "item"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	if want := (ReplayExperimentStart{ExperimentID: "run-1", ExperimentURL: server.URL + "/experiments/run-1"}); experiments[0] != want {
+		t.Fatalf("experiment = %#v, want %#v", experiments[0], want)
+	}
+}
+
+func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	calls := 0
+	result, err := client.Replay(context.Background(), "dry", func(string, int) {}, &ReplayOptions{
+		DryRun: true,
+		OnExperimentStart: func(event ReplayExperimentStart) {
+			calls++
+			if event.ExperimentID != "run-1" {
+				t.Errorf("experiment ID = %q, want run-1", event.ExperimentID)
+			}
+			panic("callback failure")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(result.Items) != 2 {
+		t.Fatalf("calls = %d, items = %d", calls, len(result.Items))
 	}
 }
 
@@ -364,8 +499,11 @@ func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
 	if !errors.As(err, &replayErr) {
 		t.Fatalf("error = %T %v, want *ReplayError", err, err)
 	}
-	if replayErr.TestRunID != "run-1" || len(replayErr.Items) != 1 || replayErr.Items[0].Result != "alpha:2" {
+	if replayErr.ExperimentID != "run-1" || len(replayErr.Items) != 1 || replayErr.Items[0].Result != "alpha:2" {
 		t.Fatalf("ReplayError = %#v", replayErr)
+	}
+	if replayErr.TestRunID != replayErr.ExperimentID || replayErr.TestRunURL != replayErr.ExperimentURL || !strings.HasSuffix(replayErr.ExperimentURL, "/experiments/run-1") {
+		t.Fatalf("ReplayError experiment identity = %#v", replayErr)
 	}
 }
 

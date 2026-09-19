@@ -15,7 +15,7 @@ import (
 )
 
 type replayAssignment struct {
-	TestRunID         string           `json:"testRunId"`
+	ExperimentID      string           `json:"experimentId"`
 	ServerItem        replayServerItem `json:"serverItem"`
 	Attempt           int              `json:"attempt"`
 	LocalTraceID      string           `json:"localTraceId"`
@@ -38,7 +38,7 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 	if err = json.Unmarshal(raw, &assignment); err != nil {
 		return ReplayItem{}, err
 	}
-	if assignment.TestRunID == "" || assignment.LocalTraceID == "" || assignment.ResultPath == "" {
+	if assignment.ExperimentID == "" || assignment.LocalTraceID == "" || assignment.ResultPath == "" {
 		return ReplayItem{}, fmt.Errorf("bitfab: invalid replay assignment")
 	}
 	assignment.ServerItem.attempt = assignment.Attempt
@@ -62,9 +62,9 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 	defer problems.stop()
 	client := entry.Client
 	client.httpClient.trackTraceDeliveries([]string{assignment.LocalTraceID})
-	item := client.runReplayItem(ctx, entry.TraceFunctionKey, callable, normalized, assignment.TestRunID, assignment.ServerItem, assignment.LocalTraceID)
+	item := client.runReplayItem(ctx, entry.TraceFunctionKey, callable, normalized, assignment.ExperimentID, assignment.ServerItem, assignment.LocalTraceID)
 	if item.localTraceID != "" {
-		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.TestRunID, []string{item.localTraceID}, deliveryTimeout)
+		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.ExperimentID, []string{item.localTraceID}, deliveryTimeout)
 		if persistErr != nil {
 			setReplaySetupError(&item, persistErr)
 			problems.add(persistErr.Error())
@@ -95,7 +95,7 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 					}
 				}
 			}()
-			normalized.Concurrency.OnItemFinishInChildProcess(ReplayItemFinishEvent{TestRunID: assignment.TestRunID, Item: item})
+			normalized.Concurrency.OnItemFinishInChildProcess(ReplayItemFinishEvent{ExperimentID: assignment.ExperimentID, TestRunID: assignment.ExperimentID, Item: item})
 		}()
 	}
 	if !normalized.DryRun && !client.FlushTraces(deliveryTimeout) {
@@ -199,17 +199,17 @@ func (c *Client) runReplayProcesses(ctx context.Context, options ReplayOptions, 
 						item = baseReplayItem(source)
 						setReplaySetupError(&item, admissionErr)
 						result.Items[index] = item
-						progress.reportFinish(options.OnItemFinish, start.TestRunID, item)
+						progress.reportFinish(options.OnItemFinish, start.ExperimentID, item)
 						continue
 					}
 				}
-				progress.reportStart(options.OnItemStart, start.TestRunID, source)
-				item = runReplayChild(ctx, options, dir, index, throttle, replayAssignment{TestRunID: start.TestRunID, ServerItem: source, Attempt: source.attempt, LocalTraceID: traceIDs[index]})
+				progress.reportStart(options.OnItemStart, start.ExperimentID, source)
+				item = runReplayChild(ctx, options, dir, index, throttle, replayAssignment{ExperimentID: start.ExperimentID, ServerItem: source, Attempt: source.attempt, LocalTraceID: traceIDs[index]})
 				if throttle != nil {
 					throttle.release(index)
 				}
 				result.Items[index] = item
-				progress.reportFinish(options.OnItemFinish, start.TestRunID, item)
+				progress.reportFinish(options.OnItemFinish, start.ExperimentID, item)
 			}
 		}()
 	}

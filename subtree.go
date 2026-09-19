@@ -18,7 +18,9 @@ type SpanFinalizer func(any) (any, error)
 
 // TraceOptions configures a subtree owned by one trace invocation.
 type TraceOptions struct {
-	Name, Type, TestRunID   string
+	Name, Type, ExperimentID string
+	// Deprecated: Use ExperimentID instead.
+	TestRunID               string
 	Input                   []any
 	MaxDepth                *int
 	MaxCapturedSubtreeSpans *int
@@ -32,7 +34,9 @@ type TraceOptions struct {
 // NodeOptions customizes an automatically discovered function. Nil booleans inherit
 // the trace's defaults. Capture=false omits this node and reparents its descendants.
 type NodeOptions struct {
-	Name, Type, TestRunID string
+	Name, Type, ExperimentID string
+	// Deprecated: Use ExperimentID instead.
+	TestRunID             string
 	Capture, MockOnReplay *bool
 	Finalize              SpanFinalizer
 }
@@ -99,6 +103,11 @@ func (c *Client) Node(fn any, opts NodeOptions) error {
 	if opts.Capture != nil && !*opts.Capture && opts.MockOnReplay != nil && *opts.MockOnReplay {
 		return fmt.Errorf("bitfab: a node with Capture=false cannot enable MockOnReplay")
 	}
+	experimentID, err := resolveExperimentID(opts.ExperimentID, opts.TestRunID)
+	if err != nil {
+		return err
+	}
+	opts.ExperimentID, opts.TestRunID = experimentID, experimentID
 	if opts.Type == "" {
 		opts.Type = "custom"
 	}
@@ -169,7 +178,7 @@ type autoRecord struct {
 	bodyDone                                          bool
 	mocked                                            bool
 	mockSource                                        MockSource
-	testRunID                                         string
+	experimentID                                      string
 	enrichment                                        *spanEnrichment
 	planPolicy                                        simulationPlanPolicy
 }
@@ -297,15 +306,15 @@ func (r *autoRecord) finish(output any, err error) {
 			if replay := currentReplayContext(root.ctx); replay != nil && replay.inputSourceSpanID != "" {
 				raw["input_source_span_id"] = replay.inputSourceSpanID
 			}
-			if state := getTraceState(root.traceID); state != nil && state.TestRunID != "" {
-				payload["testRunId"] = state.TestRunID
+			if state := getTraceState(root.traceID); state != nil && state.ExperimentID != "" {
+				setExperimentIDKeys(payload, state.ExperimentID)
 			}
 			replay := currentReplayContext(root.ctx)
-			if replay != nil && replay.testRunID != "" {
-				payload["testRunId"] = replay.testRunID
+			if replay != nil && replay.experimentID != "" {
+				setExperimentIDKeys(payload, replay.experimentID)
 			}
-			if r.testRunID != "" && (replay == nil || replay.testRunID == "") {
-				payload["testRunId"] = r.testRunID
+			if r.experimentID != "" && (replay == nil || replay.experimentID == "") {
+				setExperimentIDKeys(payload, r.experimentID)
 			}
 			if r.mocked {
 				payload["mocked"] = true
@@ -443,6 +452,11 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 {
 		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
 	}
+	experimentID, err := resolveExperimentID(opts.ExperimentID, opts.TestRunID)
+	if err != nil {
+		return nil, err
+	}
+	opts.ExperimentID, opts.TestRunID = experimentID, experimentID
 	if !c.shouldRecord(ctx) {
 		return fn(ctx)
 	}
@@ -506,12 +520,12 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		}
 		replay := currentReplayContext(ctx)
 		if replay != nil {
-			state.TestRunID = replay.testRunID
+			state.ExperimentID = replay.experimentID
 			state.replay = replay
 			state.InputSourceTraceID = replay.inputSourceTraceID
 		}
-		if opts.TestRunID != "" && (replay == nil || replay.testRunID == "") {
-			state.TestRunID = opts.TestRunID
+		if opts.ExperimentID != "" && (replay == nil || replay.experimentID == "") {
+			state.ExperimentID = opts.ExperimentID
 		}
 		r := &autoRecord{root: root, id: randomUUID(), name: opts.Name, kind: opts.Type, functionName: symbol, startedAt: nowISOTimestamp(), input: opts.Input, links: map[string]any{}}
 		if root.managed != nil {

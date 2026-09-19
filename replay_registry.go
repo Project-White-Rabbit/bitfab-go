@@ -3,6 +3,7 @@ package bitfab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -452,9 +453,16 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		}()
 		registryCallback(event)
 	}
+	options.OnExperimentStart = func(event ReplayExperimentStart) {
+		fmt.Fprintf(stderr, "[replay] Experiment %s: %s\n", event.ExperimentID, event.ExperimentURL)
+	}
 	fmt.Fprintf(stderr, "[replay] Replaying %q...\n", entry.TraceFunctionKey)
 	result, err := entry.Client.Replay(ctx, entry.TraceFunctionKey, entry.Function, &options)
 	if err != nil {
+		var replayErr *ReplayError
+		if errors.As(err, &replayErr) && replayErr.ExperimentID != "" {
+			fmt.Fprintf(stderr, "Experiment %s: %s\n", replayErr.ExperimentID, replayErr.ExperimentURL)
+		}
 		return result, err
 	}
 	if len(result.Items) == 0 {

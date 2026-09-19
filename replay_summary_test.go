@@ -9,7 +9,7 @@ import (
 func TestReplaySummaryDistinguishesSeededExpectedFromCapturedOutputs(t *testing.T) {
 	seeded := "seeded"
 	failure := "failed"
-	result := ReplayResult{Attempts: 2, TestRunURL: "/run", Items: []ReplayItem{
+	result := ReplayResult{Attempts: 2, ExperimentURL: "/run", Items: []ReplayItem{
 		{IngestionType: &seeded, Result: 6, OriginalOutput: float64(6)},
 		{IngestionType: &seeded, Result: 7, OriginalOutput: 6},
 		{Result: map[string]any{"a": 1}, OriginalOutput: map[string]any{"a": float64(1)}},

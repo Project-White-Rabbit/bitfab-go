@@ -155,6 +155,9 @@ func TestReplayUsesHistoricalDBBranchReportsAccessAndReleases(t *testing.T) {
 	if startBody["includeDbBranchLease"] != true || startBody["lazyDbBranchLease"] != true {
 		t.Fatalf("start body = %#v", startBody)
 	}
+	if resolveBody["experimentId"] != "run-1" || resolveBody["testRunId"] != "run-1" {
+		t.Fatalf("resolve body experiment ID keys = %#v", resolveBody)
+	}
 	settings := resolveBody["dbBranchSettings"].(map[string]any)
 	if settings["minCu"] != float64(1) || settings["maxCu"] != float64(1) || settings["warmupSql"] == nil {
 		t.Fatalf("resolve body = %#v", resolveBody)

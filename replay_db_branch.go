@@ -258,15 +258,15 @@ func validateComputeRange(minCU, maxCU float64) error {
 
 func (c *Client) resolveReplayDBBranch(
 	ctx context.Context,
-	testRunID string,
+	experimentID string,
 	originalTraceID string,
 	settings map[string]any,
 	attempts ...int,
 ) (resolveDBBranchResponse, error) {
 	payload := map[string]any{
-		"testRunId": testRunID,
-		"traceId":   originalTraceID,
+		"traceId": originalTraceID,
 	}
+	setExperimentIDKeys(payload, experimentID)
 	if len(attempts) > 0 && attempts[0] > 0 {
 		payload["attempt"] = attempts[0]
 	}

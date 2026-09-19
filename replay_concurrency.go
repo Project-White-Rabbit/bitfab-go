@@ -20,6 +20,8 @@ type ReplayConcurrency struct {
 
 // ReplayItemFinishEvent is emitted in an isolated child after the item is persisted.
 type ReplayItemFinishEvent struct {
+	ExperimentID string `json:"experimentId"`
+	// Deprecated: Use ExperimentID instead.
 	TestRunID string     `json:"testRunId"`
 	Item      ReplayItem `json:"item"`
 }

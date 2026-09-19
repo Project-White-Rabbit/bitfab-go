@@ -94,7 +94,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 			continue
 		}
 		records = append(records, r)
-		r.testRunID = opts.TestRunID
+		r.experimentID = opts.ExperimentID
 		finalize = opts.Finalize
 		if !copied {
 			frames = append([]autoFrame(nil), scope.frames...)
