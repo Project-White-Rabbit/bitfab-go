@@ -240,6 +240,52 @@ func TestTraceTarget_RoundTripsOccurrences(t *testing.T) {
 	}
 }
 
+func TestAssertions_HumanNoteRejectsSetAndClear(t *testing.T) {
+	client := NewClient("test-key")
+	note := "Authored by Jean-Claude"
+	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace",
+		Assertions: []SaveAssertion{{
+			Assertion: "works", HumanNote: &note, ClearHumanNote: true,
+		}},
+	})
+	if err == nil {
+		t.Fatal("setting and clearing a human note was accepted")
+	}
+}
+
+func TestAssertions_HumanNoteOmissionSettingAndClearing(t *testing.T) {
+	note := "Authored by Jean-Claude"
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"assertions": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	for _, assertion := range []SaveAssertion{
+		{Assertion: "Preserve the note"},
+		{Assertion: "Record who wrote it", HumanNote: &note},
+		{Assertion: "Drop the note", ClearHumanNote: true},
+	} {
+		if _, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+			TraceID: "trace", Assertions: []SaveAssertion{assertion},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requests := server.recorded()
+	sent := func(index int) map[string]any {
+		return requests[index].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	}
+	if _, ok := sent(0)["humanNote"]; ok {
+		t.Fatalf("omitted human note sent: %+v", sent(0))
+	}
+	if sent(1)["humanNote"] != note {
+		t.Fatalf("human note = %+v", sent(1))
+	}
+	if cleared, ok := sent(2)["humanNote"]; !ok || cleared != nil {
+		t.Fatalf("cleared human note = %+v", sent(2))
+	}
+}
+
 func TestAssertions_AssigneeRejectsSetAndClear(t *testing.T) {
 	client := NewClient("test-key")
 	email := "dana@bitfab.dev"

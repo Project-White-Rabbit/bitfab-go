@@ -9,7 +9,8 @@ import (
 )
 
 // DetachedTrace updates a persisted trace without an active tracing context.
-// Each operation waits for the server response and returns any rejection.
+// Each operation waits for the server response, returns any rejection, and
+// writes whether or not capture is on.
 type DetachedTrace struct {
 	client  *Client
 	traceID string
@@ -62,9 +63,6 @@ func (t *DetachedTrace) SetName(ctx context.Context, value string) error {
 }
 
 func (t *DetachedTrace) patch(ctx context.Context, payload map[string]any) error {
-	if !t.client.CaptureEnabled() {
-		return nil
-	}
 	body, dropped := marshalPayloadSafe(payload)
 	warnForStubbedBody(dropped)
 	_, err := t.client.httpClient.sendPreparedMethod(ctx, http.MethodPatch,

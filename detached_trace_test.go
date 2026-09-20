@@ -71,13 +71,48 @@ func TestDetachedTraceNoOpsAndValidation(t *testing.T) {
 	for _, err := range []error{
 		trace.AddContext(ctx, nil), trace.SetMetadata(ctx, nil),
 		trace.SetName(ctx, ""), trace.SetSessionID(ctx, ""),
-		trace.AddContext(ctx, map[string]any{"x": true}),
-		trace.SetMetadata(ctx, map[string]any{"x": true}),
-		trace.SetName(ctx, "name"), trace.SetSessionID(ctx, "session"),
 	} {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestDetachedTraceWritesWithCaptureOff(t *testing.T) {
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		payloads = append(payloads, payload)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer server.Close()
+	client := NewClient("test-key", WithServiceURL(server.URL), WithEnabled(false))
+	trace, err := client.GetTrace(detachedTraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, err := range []error{
+		trace.SetMetadata(ctx, map[string]any{"linearTicket": "HVT-1"}),
+		trace.SetSessionID(ctx, "session-2"),
+		trace.SetName(ctx, "Reviewed case"),
+		trace.AddContext(ctx, map[string]any{"review": "complete"}),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []map[string]any{
+		{"mergeMetadata": map[string]any{"linearTicket": "HVT-1"}},
+		{"setSessionId": "session-2"},
+		{"setName": "Reviewed case"},
+		{"appendContexts": []any{map[string]any{"review": "complete"}}},
+	}
+	if !reflect.DeepEqual(payloads, want) {
+		t.Fatalf("payloads = %#v", payloads)
 	}
 }
 

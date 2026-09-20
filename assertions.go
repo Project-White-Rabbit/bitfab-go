@@ -137,10 +137,11 @@ type AssertionLabelEvidence struct {
 
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
-// criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
+// the human note, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
+	HumanNote                   *string
 	PassCriteria                *string
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
@@ -148,6 +149,7 @@ type SaveAssertion struct {
 	Justification               *Justification
 	CategoryJustification       *Justification
 	AssigneeEmail               *string
+	ClearHumanNote              bool
 	ClearPassCriteria           bool
 	ClearFailCriteria           bool
 	ClearTargetOnEvaluatedTrace bool
@@ -159,6 +161,14 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 	payload := map[string]any{"assertion": assertion.Assertion}
 	if assertion.ID != "" {
 		payload["id"] = assertion.ID
+	}
+	if assertion.ClearHumanNote {
+		if assertion.HumanNote != nil {
+			return nil, fmt.Errorf("bitfab: cannot set and clear an assertion human note together")
+		}
+		payload["humanNote"] = nil
+	} else if assertion.HumanNote != nil {
+		payload["humanNote"] = *assertion.HumanNote
 	}
 	if assertion.ClearPassCriteria {
 		if assertion.PassCriteria != nil {
