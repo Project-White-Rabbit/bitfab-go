@@ -82,7 +82,8 @@ func (target LabelTarget) payload() (map[string]any, error) {
 
 // LabelUpdate sets a pass/fail verdict, skips a check, or archives its previous
 // verdict. With neither Skip nor Archive set, Label and Annotation are sent.
-// A false Label is a failing verdict and is never omitted.
+// A false Label is a failing verdict and is never omitted. With Skip set,
+// Annotation records why the verdict was withheld.
 type LabelUpdate struct {
 	LabelTarget
 	Label      bool
@@ -104,6 +105,9 @@ func (update LabelUpdate) payload() (map[string]any, error) {
 	switch {
 	case update.Skip:
 		payload["skip"] = true
+		if update.Annotation != "" {
+			payload["annotation"] = update.Annotation
+		}
 	case update.Archive:
 		payload["archive"] = true
 	default:

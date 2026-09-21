@@ -94,6 +94,28 @@ func TestLabels_SaveAndReadEvidence(t *testing.T) {
 	}
 }
 
+func TestLabels_SkipCarriesItsReason(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"labels": []any{map[string]any{
+			"key": "one", "traceId": "one", "action": "skipped",
+		}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Labels.Save(context.Background(), LabelUpdate{
+		LabelTarget: LabelTarget{TraceID: "one"},
+		Skip:        true,
+		Annotation:  "the turn never terminated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"labels": []any{map[string]any{
+		"traceId": "one", "skip": true, "annotation": "the turn never terminated",
+	}}}
+	if !reflect.DeepEqual(server.recorded()[0].body, want) {
+		t.Fatalf("request = %#v, want %#v", server.recorded()[0].body, want)
+	}
+}
+
 func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		labels := r.body["labels"].([]any)
