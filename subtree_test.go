@@ -891,7 +891,7 @@ func TestSubtree_DroppedCallsPastLimitSkipTraceStateLockAndAllocations(t *testin
 		done := make(chan float64)
 		go func() {
 			done <- testing.AllocsPerRun(1000, func() {
-				if r, limited := root.add(parent, 1, "dropped", "function", "dropped", nil, simulationPlanApplies); r != nil || !limited {
+				if r, limited := root.add(parent, 1, "dropped", "function", "dropped", nil, simulationPlanApplies, false); r != nil || !limited {
 					t.Error("call past MaxDepth was recorded")
 				}
 			})

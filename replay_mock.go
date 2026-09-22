@@ -183,6 +183,10 @@ func (c *Client) resolveReplayMock(
 	isRootSpan bool,
 ) (any, bool, MockSource, error) {
 	replay := currentReplayContext(ctx)
+	if replay != nil && replay.selective != nil {
+		value, mocked, err := replay.selective.enter(ReplayNodeIdentity{TraceFunctionKey: traceFunctionKey, SpanName: cfg.name}, cfg.selectiveSpanID, cfg.selectiveParentID, cfg)
+		return value, mocked, MockSourceRecorded, err
+	}
 	if replay == nil || replay.mockTree == nil || isRootSpan {
 		return nil, false, "", nil
 	}
@@ -256,6 +260,9 @@ func replayMockInputs(input any) []any {
 		return []any{}
 	}
 	if values, ok := input.([]any); ok {
+		if values == nil {
+			return []any{}
+		}
 		return values
 	}
 	return []any{input}

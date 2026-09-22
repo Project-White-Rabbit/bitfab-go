@@ -34,6 +34,8 @@ type TraceOptions struct {
 // NodeOptions customizes an automatically discovered function. Nil booleans inherit
 // the trace's defaults. Capture=false omits this node and reparents its descendants.
 type NodeOptions struct {
+	// ReplayReusable declares this node's whole subtree output-only.
+	ReplayReusable           bool
 	Name, Type, ExperimentID string
 	// Deprecated: Use ExperimentID instead.
 	TestRunID             string
@@ -170,6 +172,10 @@ var truncationLimitNames = []struct {
 }
 
 type autoRecord struct {
+	interceptionOnly                                  bool
+	exportParentID                                    string
+	selectiveInput                                    string
+	selectiveConfig                                   spanConfig
 	root                                              *autoRoot
 	id, parentID, name, kind, functionName, startedAt string
 	input                                             []any
@@ -200,13 +206,25 @@ func (root *autoRoot) drop(limit uint32) {
 	root.droppedSpans.Add(1)
 }
 
-func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, planPolicy simulationPlanPolicy) (*autoRecord, bool) {
-	if root.closed.Load() || root.excluded(symbol, name) {
+func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, planPolicy simulationPlanPolicy, interceptionOnly bool) (*autoRecord, bool) {
+	replay := currentReplayContext(root.ctx)
+	selective := replay != nil && replay.selective != nil
+	// Capture filters must not bypass safety interception or erase live scopes.
+	if root.closed.Load() {
 		return nil, false
+	}
+	if root.excluded(symbol, name) {
+		if !selective {
+			return nil, false
+		}
+		interceptionOnly = true
 	}
 	if depth > root.maxDepth {
 		root.drop(truncatedByMaxDepth)
-		return nil, true
+		if !selective {
+			return nil, true
+		}
+		interceptionOnly = true
 	}
 	declared := planPolicy != simulationPlanApplies
 	contentOff := !declared && root.client.httpClient.simulationPlan.isContentOff(root.key, name)
@@ -216,15 +234,22 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 		return nil, false
 	}
 	captured := !contentOff && !declared
-	if captured && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans {
+	if !interceptionOnly && captured && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans {
 		root.drop(truncatedByMaxCapturedSubtreeSpans)
-		return nil, true
+		if !selective {
+			return nil, true
+		}
+		interceptionOnly = true
 	}
-	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input, planPolicy: planPolicy}
+	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input, planPolicy: planPolicy, interceptionOnly: interceptionOnly}
 	if parent != nil {
 		r.parentID = parent.id
+		r.exportParentID = parent.id
+		if parent.interceptionOnly {
+			r.exportParentID = parent.exportParentID
+		}
 	}
-	if captured {
+	if captured && !interceptionOnly {
 		root.capturedSubtreeCount++
 	}
 	root.records[r] = true
@@ -263,6 +288,9 @@ func (r *autoRecord) finish(output any, err error) {
 			r.root.mu.Unlock()
 			r.root.tryComplete()
 		}()
+		if r.interceptionOnly {
+			return
+		}
 		defer func() {
 			if recover() != nil {
 				warnOnce("auto-span-send", "automatic span serialization failed; application results are unchanged")
@@ -288,6 +316,9 @@ func (r *autoRecord) finish(output any, err error) {
 			data["error"] = err.Error()
 			data["error_source"] = "code"
 		}
+		if !contentOff && err == nil && r.selectiveInput != "" {
+			recordSelectiveJSON(data, r.selectiveInput, output, r.selectiveConfig)
+		}
 		for k, v := range r.links {
 			data[k] = v
 		}
@@ -299,8 +330,8 @@ func (r *autoRecord) finish(output any, err error) {
 			root.managed.mu.Unlock()
 		} else if state := getTraceState(root.traceID); state == nil || !state.isDropped() {
 			raw := map[string]any{"id": r.id, "trace_id": root.traceID, "started_at": r.startedAt, "ended_at": nowISOTimestamp(), "span_data": data, "span_origin": MakeSpanOrigin("trace")}
-			if r.parentID != "" {
-				raw["parent_id"] = r.parentID
+			if r.exportParentID != "" {
+				raw["parent_id"] = r.exportParentID
 			}
 			payload := map[string]any{"id": r.id, "traceId": root.traceID, "type": "sdk-function", "source": "go-sdk-function", "sourceTraceId": root.traceID, "traceFunctionKey": root.key, "rootTraceFunctionKey": root.key, "rawSpan": raw}
 			if replay := currentReplayContext(root.ctx); replay != nil && replay.inputSourceSpanID != "" {
@@ -364,17 +395,22 @@ func (root *autoRoot) close() {
 
 func finishAutoRecords(records []*autoRecord, output any, err error, finalize SpanFinalizer) {
 	live := make([]*autoRecord, 0, len(records))
+	canExport := false
 	for _, r := range records {
 		r.root.mu.Lock()
 		if !r.bodyDone {
 			r.bodyDone = true
 			live = append(live, r)
+			canExport = canExport || !r.interceptionOnly
 		}
 		r.root.mu.Unlock()
 	}
 	records = live
 	if len(records) == 0 {
 		return
+	}
+	if !canExport {
+		finalize = nil
 	}
 	finish := func() {
 		value, finalErr := output, err
@@ -501,10 +537,13 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		frames = append(frames, previous.frames...)
 	}
 	for i, frame := range frames {
-		r, _ := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, simulationPlanIgnored)
+		r, _ := frame.root.add(frame.parent, frame.depth+1, opts.Name, "function", symbol, opts.Input, simulationPlanIgnored, false)
 		if r != nil {
 			records = append(records, r)
 			frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
+			if r.interceptionOnly {
+				frames[i].depth = frame.depth
+			}
 		}
 	}
 	var root *autoRoot
@@ -583,7 +622,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	}()
 	if root == nil && len(records) > 0 && currentReplayContext(ctx) != nil {
 		record := records[len(records)-1]
-		value, mocked, source, mockErr := record.root.client.resolveReplayMock(ctx, record.root.key, spanConfig{name: record.name, spanType: "function", input: opts.Input}, false)
+		value, mocked, source, mockErr := record.root.client.resolveReplayMock(ctx, record.root.key, spanConfig{name: record.name, spanType: "function", input: opts.Input, finalize: opts.Finalize, selectiveSpanID: record.id, selectiveParentID: record.parentID, selectiveInterceptionOnly: record.interceptionOnly}, false)
 		if mocked {
 			finalize = nil
 			for _, record := range records {

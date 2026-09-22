@@ -451,7 +451,7 @@ func stripPlanContent(payload map[string]any) map[string]any {
 	kept := make(map[string]any, len(data))
 	for field, value := range data {
 		switch field {
-		case "input", "input_meta", "output", "output_meta", "input_serialized", "output_serialized", "prompt":
+		case "input", "input_meta", "output", "output_meta", "input_serialized", "output_serialized", "replay_recording", "prompt":
 			continue
 		}
 		kept[field] = value

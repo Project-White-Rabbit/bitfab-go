@@ -13,7 +13,7 @@ import (
 )
 
 func planTestSpan() map[string]any {
-	return map[string]any{"traceId": "t", "traceFunctionKey": "child", "rootTraceFunctionKey": "root", "rawSpan": map[string]any{"span_origin": MakeSpanOrigin("trace"), "span_data": map[string]any{"name": "secret", "input": "private", "input_meta": "private", "output": "private", "output_meta": "private", "input_serialized": "private", "output_serialized": "private", "prompt": "private", "error": "failure"}}}
+	return map[string]any{"traceId": "t", "traceFunctionKey": "child", "rootTraceFunctionKey": "root", "rawSpan": map[string]any{"span_origin": MakeSpanOrigin("trace"), "span_data": map[string]any{"name": "secret", "input": "private", "input_meta": "private", "output": "private", "output_meta": "private", "input_serialized": "private", "output_serialized": "private", "prompt": "private", "replay_recording": "private", "error": "failure"}}}
 }
 
 func planTestChildSpan(name string) map[string]any {
@@ -34,7 +34,7 @@ func planSpanData(record map[string]any) map[string]any {
 
 func assertWithoutContent(t *testing.T, label string, data map[string]any) {
 	t.Helper()
-	for _, key := range []string{"input", "output", "input_meta", "output_meta", "input_serialized", "output_serialized", "prompt"} {
+	for _, key := range []string{"input", "output", "input_meta", "output_meta", "input_serialized", "output_serialized", "replay_recording", "prompt"} {
 		if _, ok := data[key]; ok {
 			t.Errorf("%s leaked %s", label, key)
 		}

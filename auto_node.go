@@ -36,6 +36,9 @@ type AutoNode struct {
 // EnterAutoNode is called by generated first-party function prologues. Application
 // code configures these functions with Client.Node and enters with Client.Trace.
 func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []any, wrapper ...bool) *AutoNode {
+	if inputs == nil {
+		inputs = []any{}
+	}
 	name = normalizeAutoSymbol(name)
 	if !AutoCaptureActive() {
 		return nil
@@ -68,11 +71,15 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 	droppedByLimit, droppedForGood := true, true
 	for i, frame := range scope.frames {
 		opts, configured := frame.root.client.nodeOptions(symbol)
-		if len(wrapper) > 0 && wrapper[0] && !configured && !frame.root.opts.IncludeWrappers {
+		replay := currentReplayContext(frame.root.ctx)
+		selective := replay != nil && replay.selective != nil
+		hiddenWrapper := len(wrapper) > 0 && wrapper[0] && !configured && !frame.root.opts.IncludeWrappers
+		hiddenNode := opts.Capture != nil && !*opts.Capture
+		if !selective && hiddenWrapper {
 			droppedByLimit = false
 			continue
 		}
-		if opts.Capture != nil && !*opts.Capture {
+		if !selective && hiddenNode {
 			droppedByLimit = false
 			continue
 		}
@@ -87,7 +94,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		if configured {
 			planPolicy = simulationPlanIgnored
 		}
-		r, limited := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, planPolicy)
+		r, limited := frame.root.add(frame.parent, frame.depth+1, nodeName, kind, symbol, inputs, planPolicy, hiddenWrapper || hiddenNode)
 		if r == nil {
 			droppedByLimit = droppedByLimit && limited
 			droppedForGood = droppedForGood && (frame.depth+1 > frame.root.maxDepth)
@@ -101,6 +108,9 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 			copied = true
 		}
 		frames[i] = autoFrame{root: frame.root, parent: r, depth: frame.depth + 1}
+		if r.interceptionOnly {
+			frames[i].depth = frame.depth
+		}
 	}
 	if len(records) == 0 && droppedByLimit && onGoroutine && (scope.skipName == "" || droppedForGood) {
 		return nil
@@ -117,8 +127,31 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 			marked = *opts.MockOnReplay
 		}
 		mockCtx := withSpanContext(context.WithValue(ctx, spanStackKey{}, []spanEntry(nil)), r.root.traceID, r.parentID)
+		if replay := currentReplayContext(r.root.ctx); replay != nil && replay.selective != nil {
+			mockCtx = withReplayContext(mockCtx, replay)
+		}
 		var source MockSource
-		node.value, node.mocked, source, node.err = r.root.client.resolveReplayMock(mockCtx, r.root.key, spanConfig{name: r.name, spanType: r.kind, input: inputs, mockOnReplay: marked}, false)
+		cfg := spanConfig{name: r.name, spanType: r.kind, input: inputs, mockOnReplay: marked, replayReusable: opts.ReplayReusable, finalize: opts.Finalize, selectiveSpanID: r.id, selectiveParentID: r.parentID, selectiveInterceptionOnly: r.interceptionOnly}
+		valueOutputs := len(outputs)
+		if valueOutputs > 0 && reflect.TypeOf(outputs[valueOutputs-1]).Elem().Implements(autoErrorType) {
+			valueOutputs--
+		}
+		if valueOutputs == 1 {
+			cfg.mockOutputType = reflect.TypeOf(outputs[0]).Elem()
+		}
+		if valueOutputs != 1 {
+			cfg.selectiveUnsupportedOutput = true
+		}
+		for _, record := range node.records {
+			if cfg.replayReusable || cfg.mockOnReplay {
+				record.selectiveInput = selectiveFingerprint(inputs)
+			}
+			record.selectiveConfig = cfg
+		}
+		node.value, node.mocked, source, node.err = r.root.client.resolveReplayMock(mockCtx, r.root.key, cfg, false)
+		if node.err != nil {
+			node.mocked = true
+		}
 		for _, record := range node.records {
 			record.mocked = node.mocked && node.err == nil
 			record.mockSource = source

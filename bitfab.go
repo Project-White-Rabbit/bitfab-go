@@ -310,16 +310,21 @@ type SpanFunc func(ctx context.Context) (any, error)
 type SpanOption func(*spanConfig)
 
 type spanConfig struct {
-	finalize       SpanFinalizer
-	experimentID   string
-	testRunID      string
-	name           string
-	spanType       string
-	functionName   string
-	input          any
-	captureWhen    CaptureWhen
-	mockOnReplay   bool
-	mockOutputType reflect.Type
+	finalize                   SpanFinalizer
+	experimentID               string
+	testRunID                  string
+	name                       string
+	spanType                   string
+	functionName               string
+	input                      any
+	captureWhen                CaptureWhen
+	mockOnReplay               bool
+	replayReusable             bool
+	selectiveSpanID            string
+	selectiveParentID          string
+	selectiveInterceptionOnly  bool
+	selectiveUnsupportedOutput bool
+	mockOutputType             reflect.Type
 }
 
 // WithName sets an explicit span name. Defaults to the traceFunctionKey if not set.
@@ -397,6 +402,12 @@ func WithCaptureWhen(captureWhen CaptureWhen) SpanOption {
 // substitution under the default MockMarked replay strategy.
 func WithMockOnReplay(mock bool) SpanOption {
 	return func(c *spanConfig) { c.mockOnReplay = mock }
+}
+
+// WithReplayReusable declares the whole subtree output-only and dependent only
+// on JSON inputs. Both capture-time and replay-time declarations must permit reuse.
+func WithReplayReusable(reusable bool) SpanOption {
+	return func(c *spanConfig) { c.replayReusable = reusable }
 }
 
 // WithMockOutputType decodes a recorded or overridden JSON output into T before
@@ -495,6 +506,11 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 		return !managedAutoSpanDropped(ctx, c.httpClient.simulationPlan, id.spanID, traceFunctionKey, cfg.name, id.parentSpanID == "")
 	})
 	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
+	cfg.selectiveSpanID, cfg.selectiveParentID = id.spanID, id.parentSpanID
+	selectiveInput := ""
+	if cfg.replayReusable || cfg.mockOnReplay {
+		selectiveInput = selectiveFingerprint(replayMockInputs(cfg.input))
+	}
 	result, intercepted, mockSource, mockErr := c.resolveReplayMock(
 		ctx,
 		traceFunctionKey,
@@ -548,6 +564,9 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 			if recordedErr != nil {
 				spanData["error"] = recordedErr.Error()
 				spanData["error_source"] = "code"
+			}
+			if !contentOff && recordedErr == nil {
+				recordSelectiveJSON(spanData, selectiveInput, recordedResult, cfg)
 			}
 
 			enrichment.apply(spanData, contentOff)

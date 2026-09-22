@@ -84,29 +84,30 @@ type ReplayInputAdapter func(inputs []any, ctx AdaptContext) ([]any, error)
 
 // ReplayItem is one historical trace executed against the current function.
 type ReplayItem struct {
-	Attempt              int              `json:"attempt"`
-	IngestionType        *string          `json:"ingestionType"`
-	TraceID              *string          `json:"traceId"`
-	OriginalTraceID      string           `json:"originalTraceId"`
-	OriginalSpanID       string           `json:"originalSpanId"`
-	SourceTraceID        string           `json:"sourceTraceId"`
-	SourceSpanID         string           `json:"sourceSpanId"`
-	Input                []any            `json:"input"`
-	Result               any              `json:"result"`
-	OriginalOutput       any              `json:"originalOutput"`
-	Error                *string          `json:"error"`
-	TraceError           error            `json:"-"`
-	ReplayError          error            `json:"-"`
-	DurationMS           *int64           `json:"durationMs"`
-	OriginalDurationMS   *int64           `json:"originalDurationMs"`
-	OriginalTokens       *TokenUsage      `json:"originalTokens"`
-	OriginalModel        *string          `json:"originalModel"`
-	Tokens               *TokenUsage      `json:"tokens"`
-	Model                *string          `json:"model"`
-	DBSnapshotRef        *DBSnapshotRef   `json:"dbSnapshotRef"`
-	DBBranchTimings      *DBBranchTimings `json:"dbBranchTimings"`
-	TraceOutline         *TraceOutline    `json:"traceOutline"`
-	OriginalTraceOutline *TraceOutline    `json:"originalTraceOutline"`
+	SelectiveReplay      *SelectiveReplayReport `json:"selectiveReplay,omitempty"`
+	Attempt              int                    `json:"attempt"`
+	IngestionType        *string                `json:"ingestionType"`
+	TraceID              *string                `json:"traceId"`
+	OriginalTraceID      string                 `json:"originalTraceId"`
+	OriginalSpanID       string                 `json:"originalSpanId"`
+	SourceTraceID        string                 `json:"sourceTraceId"`
+	SourceSpanID         string                 `json:"sourceSpanId"`
+	Input                []any                  `json:"input"`
+	Result               any                    `json:"result"`
+	OriginalOutput       any                    `json:"originalOutput"`
+	Error                *string                `json:"error"`
+	TraceError           error                  `json:"-"`
+	ReplayError          error                  `json:"-"`
+	DurationMS           *int64                 `json:"durationMs"`
+	OriginalDurationMS   *int64                 `json:"originalDurationMs"`
+	OriginalTokens       *TokenUsage            `json:"originalTokens"`
+	OriginalModel        *string                `json:"originalModel"`
+	Tokens               *TokenUsage            `json:"tokens"`
+	Model                *string                `json:"model"`
+	DBSnapshotRef        *DBSnapshotRef         `json:"dbSnapshotRef"`
+	DBBranchTimings      *DBBranchTimings       `json:"dbBranchTimings"`
+	TraceOutline         *TraceOutline          `json:"traceOutline"`
+	OriginalTraceOutline *TraceOutline          `json:"originalTraceOutline"`
 	localTraceID         string
 }
 
@@ -211,8 +212,10 @@ type ReplayExperimentStart struct {
 
 // ReplayOptions configures Client.Replay.
 type ReplayOptions struct {
-	Concurrency    *ReplayConcurrency
-	processCommand *replayProcessCommand
+	// ExperimentalSelectiveReplay protects MustRun subtrees and assertion evidence.
+	ExperimentalSelectiveReplay *SelectiveReplayOptions
+	Concurrency                 *ReplayConcurrency
+	processCommand              *replayProcessCommand
 	// Attempts repeats each selected trace 1–100 times. Zero defaults to one.
 	Attempts           int
 	OnlyWithAssertions bool
@@ -262,23 +265,24 @@ func SerializeReplayResult(result ReplayResult) (string, error) {
 }
 
 type replayServerItem struct {
-	attempt            int
-	OriginalMetadata   map[string]any          `json:"originalMetadata"`
-	IngestionType      *string                 `json:"ingestionType"`
-	OriginalTraceID    string                  `json:"originalTraceId"`
-	OriginalSpanID     string                  `json:"originalSpanId"`
-	SourceTraceID      string                  `json:"sourceTraceId"`
-	SourceSpanID       string                  `json:"sourceSpanId"`
-	OriginalDurationMS *int64                  `json:"originalDurationMs"`
-	DurationMS         *int64                  `json:"durationMs"`
-	OriginalTokens     *TokenUsage             `json:"originalTokens"`
-	Tokens             *TokenUsage             `json:"tokens"`
-	OriginalModel      *string                 `json:"originalModel"`
-	Model              *string                 `json:"model"`
-	DBSnapshotRef      *DBSnapshotRef          `json:"dbSnapshotRef"`
-	DBBranchLease      *dbBranchLeaseWire      `json:"dbBranchLease"`
-	DBBranchLeaseError *dbBranchLeaseErrorWire `json:"dbBranchLeaseError"`
-	DBBranchTimings    *DBBranchTimings        `json:"dbBranchTimings"`
+	SelectiveReplayPlan *selectivePlan `json:"selectiveReplayPlan"`
+	attempt             int
+	OriginalMetadata    map[string]any          `json:"originalMetadata"`
+	IngestionType       *string                 `json:"ingestionType"`
+	OriginalTraceID     string                  `json:"originalTraceId"`
+	OriginalSpanID      string                  `json:"originalSpanId"`
+	SourceTraceID       string                  `json:"sourceTraceId"`
+	SourceSpanID        string                  `json:"sourceSpanId"`
+	OriginalDurationMS  *int64                  `json:"originalDurationMs"`
+	DurationMS          *int64                  `json:"durationMs"`
+	OriginalTokens      *TokenUsage             `json:"originalTokens"`
+	Tokens              *TokenUsage             `json:"tokens"`
+	OriginalModel       *string                 `json:"originalModel"`
+	Model               *string                 `json:"model"`
+	DBSnapshotRef       *DBSnapshotRef          `json:"dbSnapshotRef"`
+	DBBranchLease       *dbBranchLeaseWire      `json:"dbBranchLease"`
+	DBBranchLeaseError  *dbBranchLeaseErrorWire `json:"dbBranchLeaseError"`
+	DBBranchTimings     *DBBranchTimings        `json:"dbBranchTimings"`
 }
 
 func (item replayServerItem) originalTraceID() string {
@@ -585,6 +589,14 @@ func (c *Client) Replay(
 		}
 	}
 	resolved.MockOverrides = append(resolved.MockOverrides, c.registeredMockOverrides()...)
+	if resolved.ExperimentalSelectiveReplay != nil {
+		if err := validateSelectiveOptions(resolved.ExperimentalSelectiveReplay); err != nil {
+			return ReplayResult{}, err
+		}
+		if resolved.Mock != MockMarked || len(resolved.MockOverrides) > 0 || resolved.processCommand != nil || (resolved.Concurrency != nil && resolved.Concurrency.Primitive == "process") {
+			return ReplayResult{}, fmt.Errorf("bitfab: selective replay requires marked mocks, no overrides, and in-process execution")
+		}
+	}
 	start, err := c.startReplay(ctx, traceFunctionKey, resolved)
 	if err != nil {
 		return ReplayResult{}, err
@@ -788,6 +800,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.AdaptInputs != nil {
 		payload["includeOriginalMetadata"] = true
+	}
+	if options.ExperimentalSelectiveReplay != nil {
+		payload["experimentalSelectiveReplay"] = options.ExperimentalSelectiveReplay
 	}
 	if options.TraceIDs == nil {
 		payload["limit"] = options.Limit
@@ -1049,6 +1064,20 @@ func (c *Client) runReplayItem(
 		leaseError = nil
 		item.DBBranchTimings = nil
 	}
+	defer func() {
+		if lease != nil {
+			c.releaseReplayDBBranch(context.WithoutCancel(ctx), lease.NeonBranchID)
+		}
+	}()
+	var selective *selectiveRuntime
+	if options.ExperimentalSelectiveReplay != nil {
+		var err error
+		selective, err = newSelectiveRuntime(serverItem.SelectiveReplayPlan, options.ExperimentalSelectiveReplay)
+		if err != nil {
+			setReplaySetupError(&item, err)
+			return item
+		}
+	}
 	if options.DBBranch != nil && !options.DryRun && lease == nil && leaseError == nil {
 		resolved, err := c.resolveReplayDBBranch(ctx, experimentID, item.OriginalTraceID, options.dbBranchSettings, serverItem.attempt)
 		if err != nil {
@@ -1063,9 +1092,6 @@ func (c *Client) runReplayItem(
 		if resolved.Timings != nil {
 			item.DBBranchTimings = resolved.Timings
 		}
-	}
-	if lease != nil {
-		defer c.releaseReplayDBBranch(context.WithoutCancel(ctx), lease.NeonBranchID)
 	}
 	if err := replayDBBranchError(leaseError, item.OriginalTraceID); err != nil {
 		setReplaySetupError(&item, err)
@@ -1116,17 +1142,16 @@ func (c *Client) runReplayItem(
 	if options.DryRun {
 		return item
 	}
-	mockTree, err := c.prepareReplayMockTree(
-		ctx,
-		serverItem.originalSpanID(),
-		options.Mock,
-		options.MockOverrides,
-	)
+	var mockTree *mockTree
+	if selective == nil {
+		mockTree, err = c.prepareReplayMockTree(ctx, serverItem.originalSpanID(), options.Mock, options.MockOverrides)
+	}
 	if err != nil {
 		setReplaySetupError(&item, err)
 		return item
 	}
 	replayCtx := withReplayContext(ctx, &replayContext{
+		selective:          selective,
 		attempt:            serverItem.attempt,
 		experimentID:       experimentID,
 		traceID:            localTraceID,
@@ -1143,19 +1168,31 @@ func (c *Client) runReplayItem(
 	})
 
 	started := time.Now()
+	rootName := traceFunctionKey
+	if selective != nil {
+		rootName = selective.nodes[selective.plan.RootID].SpanName
+	}
 	result, traceErr := c.Span(
 		withManagedTraceRoot(replayCtx),
 		traceFunctionKey,
 		func(spanCtx context.Context) (any, error) {
 			return callable.invoke(spanCtx, inputs)
 		},
-		WithName(traceFunctionKey),
+		WithName(rootName),
 		WithType("function"),
 		WithInput(inputs...),
 	)
 	duration := time.Since(started).Milliseconds()
 	item.DurationMS = &duration
 	item.Result = result
+	if selective != nil {
+		item.SelectiveReplay = selective.report()
+		selective.mu.Lock()
+		if selective.failure != nil {
+			traceErr = selective.failure
+		}
+		selective.mu.Unlock()
+	}
 	item.localTraceID = localTraceID
 	if traceErr != nil {
 		message := traceErr.Error()

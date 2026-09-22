@@ -9,6 +9,7 @@ import (
 type replayContextKey struct{}
 
 type replayContext struct {
+	selective          *selectiveRuntime
 	attempt            int
 	experimentID       string
 	traceID            string
