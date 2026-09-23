@@ -40,35 +40,6 @@ type TokenUsage struct {
 	Total  *int64 `json:"total"`
 }
 
-type TraceOutlineSpanError struct {
-	Source string  `json:"source"`
-	Error  string  `json:"error"`
-	Step   *string `json:"step,omitempty"`
-}
-
-type TraceOutlineSpan struct {
-	SpanID           string                  `json:"spanId"`
-	Name             *string                 `json:"name"`
-	Type             string                  `json:"type"`
-	TraceFunctionKey *string                 `json:"traceFunctionKey"`
-	DurationMS       *int64                  `json:"durationMs"`
-	Tokens           *TokenUsage             `json:"tokens"`
-	Model            *string                 `json:"model"`
-	Errors           []TraceOutlineSpanError `json:"errors"`
-	Mocked           bool                    `json:"mocked"`
-	Children         []TraceOutlineSpan      `json:"children"`
-}
-
-type TraceOutline struct {
-	TraceID          string             `json:"traceId"`
-	Name             *string            `json:"name"`
-	Status           string             `json:"status"`
-	TraceFunctionKey *string            `json:"traceFunctionKey"`
-	DurationMS       *int64             `json:"durationMs"`
-	SpanCount        int                `json:"spanCount"`
-	Spans            []TraceOutlineSpan `json:"spans"`
-}
-
 // AdaptContext identifies the historical trace whose inputs are being adapted.
 type AdaptContext struct {
 	Attempt         int            `json:"attempt"`
@@ -84,31 +55,29 @@ type ReplayInputAdapter func(inputs []any, ctx AdaptContext) ([]any, error)
 
 // ReplayItem is one historical trace executed against the current function.
 type ReplayItem struct {
-	SelectiveReplay      *SelectiveReplayReport `json:"selectiveReplay,omitempty"`
-	Attempt              int                    `json:"attempt"`
-	IngestionType        *string                `json:"ingestionType"`
-	TraceID              *string                `json:"traceId"`
-	OriginalTraceID      string                 `json:"originalTraceId"`
-	OriginalSpanID       string                 `json:"originalSpanId"`
-	SourceTraceID        string                 `json:"sourceTraceId"`
-	SourceSpanID         string                 `json:"sourceSpanId"`
-	Input                []any                  `json:"input"`
-	Result               any                    `json:"result"`
-	OriginalOutput       any                    `json:"originalOutput"`
-	Error                *string                `json:"error"`
-	TraceError           error                  `json:"-"`
-	ReplayError          error                  `json:"-"`
-	DurationMS           *int64                 `json:"durationMs"`
-	OriginalDurationMS   *int64                 `json:"originalDurationMs"`
-	OriginalTokens       *TokenUsage            `json:"originalTokens"`
-	OriginalModel        *string                `json:"originalModel"`
-	Tokens               *TokenUsage            `json:"tokens"`
-	Model                *string                `json:"model"`
-	DBSnapshotRef        *DBSnapshotRef         `json:"dbSnapshotRef"`
-	DBBranchTimings      *DBBranchTimings       `json:"dbBranchTimings"`
-	TraceOutline         *TraceOutline          `json:"traceOutline"`
-	OriginalTraceOutline *TraceOutline          `json:"originalTraceOutline"`
-	localTraceID         string
+	SelectiveReplay    *SelectiveReplayReport `json:"selectiveReplay,omitempty"`
+	Attempt            int                    `json:"attempt"`
+	IngestionType      *string                `json:"ingestionType"`
+	TraceID            *string                `json:"traceId"`
+	OriginalTraceID    string                 `json:"originalTraceId"`
+	OriginalSpanID     string                 `json:"originalSpanId"`
+	SourceTraceID      string                 `json:"sourceTraceId"`
+	SourceSpanID       string                 `json:"sourceSpanId"`
+	Input              []any                  `json:"input"`
+	Result             any                    `json:"result"`
+	OriginalOutput     any                    `json:"originalOutput"`
+	Error              *string                `json:"error"`
+	TraceError         error                  `json:"-"`
+	ReplayError        error                  `json:"-"`
+	DurationMS         *int64                 `json:"durationMs"`
+	OriginalDurationMS *int64                 `json:"originalDurationMs"`
+	OriginalTokens     *TokenUsage            `json:"originalTokens"`
+	OriginalModel      *string                `json:"originalModel"`
+	Tokens             *TokenUsage            `json:"tokens"`
+	Model              *string                `json:"model"`
+	DBSnapshotRef      *DBSnapshotRef         `json:"dbSnapshotRef"`
+	DBBranchTimings    *DBBranchTimings       `json:"dbBranchTimings"`
+	localTraceID       string
 }
 
 // MarshalJSON preserves structured Go errors without losing the compatible Error message.
@@ -331,11 +300,9 @@ type replayStatusResponse struct {
 }
 
 type completeReplayResponse struct {
-	TraceIDs              map[string]string        `json:"traceIds"`
-	Tokens                map[string]*TokenUsage   `json:"tokens"`
-	TraceOutlines         map[string]*TraceOutline `json:"traceOutlines"`
-	OriginalTraceOutlines map[string]*TraceOutline `json:"originalTraceOutlines"`
-	TraceCount            *int                     `json:"traceCount"`
+	TraceIDs   map[string]string      `json:"traceIds"`
+	Tokens     map[string]*TokenUsage `json:"tokens"`
+	TraceCount *int                   `json:"traceCount"`
 }
 
 // ReplayFunction binds a callable to the trace function key it was designed to record.
@@ -1349,9 +1316,6 @@ func (c *Client) enrichReplayItems(result *ReplayResult, complete completeReplay
 	executed := 0
 	for index := range result.Items {
 		item := &result.Items[index]
-		if item.OriginalTraceID != "" {
-			item.OriginalTraceOutline = complete.OriginalTraceOutlines[item.OriginalTraceID]
-		}
 		if item.localTraceID == "" {
 			continue
 		}
@@ -1361,7 +1325,6 @@ func (c *Client) enrichReplayItems(result *ReplayResult, complete completeReplay
 				item.TraceID = &mapped
 			}
 			item.Tokens = complete.Tokens[mapped]
-			item.TraceOutline = complete.TraceOutlines[mapped]
 		} else if item.TraceID == nil {
 			missing++
 		}
