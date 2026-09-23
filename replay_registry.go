@@ -88,11 +88,11 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, name, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                               int
-	assertions, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                bool
-	parameters                                                                                                                 []string
-	visited                                                                                                                    map[string]bool
+	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                      int
+	assertions, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                       bool
+	parameters                                                                                                                        []string
+	visited                                                                                                                           map[string]bool
 }
 
 type registryParameters []string
@@ -116,7 +116,8 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.datasetIDs, "dataset-ids", "", "comma-separated dataset IDs")
 	fs.StringVar(&out.datasetIDs, "dataset-id", "", "dataset IDs")
 	fs.StringVar(&out.graderIDs, "grader-ids", "", "comma-separated grader IDs")
-	fs.StringVar(&out.name, "name", "", "experiment name")
+	fs.StringVar(&out.name, "name", "", "What this run is testing, in a few words, such as 'baseline' or 'shorter system prompt'. Bitfab records the commit, branch, tree state, datasets, and who ran it with every experiment, so do not repeat them here.")
+	fs.StringVar(&out.notes, "notes", "", "Run conditions Bitfab cannot see on its own, such as an environment override or a forced feature flag. Kept on the experiment next to its name.")
 	fs.StringVar(&out.mock, "mock", "", "marked, all, or none")
 	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "experiment group ID")
 	fs.StringVar(&out.codeChange, "code-change", "", "code change JSON file")
@@ -368,6 +369,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	registryAttempts, registryConcurrency := options.Attempts, options.MaxConcurrency
 	if parsed.visited["name"] {
 		options.Name = parsed.name
+	}
+	if parsed.visited["notes"] {
+		options.Notes = parsed.notes
 	}
 	if parsed.visited["attempts"] {
 		options.Attempts = parsed.attempts

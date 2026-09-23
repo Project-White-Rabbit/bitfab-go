@@ -681,6 +681,7 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 		&ReplayOptions{
 			TraceIDs:              []string{"trace-1", "trace-2"},
 			Name:                  "candidate",
+			Notes:                 "forced the new-checkout flag on",
 			CodeChangeDescription: &description,
 			CodeChangeFiles: []CodeChangeFile{{
 				Path:   "prompt.go",
@@ -702,6 +703,7 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 	}
 	for key, want := range map[string]any{
 		"name":                  "candidate",
+		"notes":                 "forced the new-checkout flag on",
 		"codeChangeDescription": "try the new prompt",
 		"experimentGroupId":     "group-1",
 		"datasetId":             "dataset-1",

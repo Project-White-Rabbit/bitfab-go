@@ -39,7 +39,7 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 	defer client.Close(time.Second)
 	registry := NewReplayRegistry()
 	calls := 0
-	err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string, int) { calls++ }), Options: ReplayOptions{DatasetIDs: []string{"dataset"}, OnlyWithAssertions: true}, OptionsFactory: func(ctx context.Context, params ReplayRegistryContext, options *ReplayOptions) error {
+	err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string, int) { calls++ }), Options: ReplayOptions{DatasetIDs: []string{"dataset"}, OnlyWithAssertions: true, Name: "registered name", Notes: "registered notes"}, OptionsFactory: func(ctx context.Context, params ReplayRegistryContext, options *ReplayOptions) error {
 		if params.Params["count"] != float64(2) {
 			t.Fatalf("params: %+v", params.Params)
 		}
@@ -50,7 +50,7 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--limit", "1", "--dry-run", "--param", "count=2", "--no-code-change"}, &stdout, &stderr)
+	_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--limit", "1", "--dry-run", "--param", "count=2", "--no-code-change", "--notes", "staging env override"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +65,9 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 	state.mu.Unlock()
 	if body["attempts"] != float64(2) || body["onlyWithAssertions"] != true {
 		t.Fatalf("options lost: %+v", body)
+	}
+	if body["name"] != "registered name" || body["notes"] != "staging env override" {
+		t.Fatalf("name or notes: %+v", body)
 	}
 	ids := body["traceIds"].([]any)
 	if len(ids) != 1 || ids[0] != "b" {

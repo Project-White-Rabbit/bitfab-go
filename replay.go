@@ -222,11 +222,19 @@ type ReplayOptions struct {
 	// JudgeAssertions judges every approved assertion on each replay as it
 	// finishes and saves the verdict as that assertion's agent label. Off
 	// unless asked: each judgement costs model calls.
-	JudgeAssertions          bool
-	DryRun                   bool
-	Limit                    int
-	TraceIDs                 []string
-	Name                     string
+	JudgeAssertions bool
+	DryRun          bool
+	Limit           int
+	TraceIDs        []string
+	// What this run is testing, in a few words, such as 'baseline' or
+	// 'shorter system prompt'. Bitfab records the commit, branch, tree state,
+	// datasets, and who ran it with every experiment, so do not repeat them
+	// here.
+	Name string
+	// Run conditions Bitfab cannot see on its own, such as an environment
+	// override or a forced feature flag. Kept on the experiment next to its
+	// name.
+	Notes                    string
 	MaxConcurrency           int
 	CodeChangeDescription    *string
 	CodeChangeFiles          []CodeChangeFile
@@ -811,6 +819,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.Name != "" {
 		payload["name"] = options.Name
+	}
+	if options.Notes != "" {
+		payload["notes"] = options.Notes
 	}
 	if options.CodeChangeDescription != nil {
 		payload["codeChangeDescription"] = *options.CodeChangeDescription
