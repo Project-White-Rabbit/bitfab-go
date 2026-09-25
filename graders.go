@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const graderLabelsPath = "/api/sdk/graderLabels"
+
 // GraderLabelSource distinguishes a grader-run verdict from a human-authored one.
 type GraderLabelSource string
 
@@ -22,6 +24,7 @@ type GraderLabel struct {
 	GraderID          string            `json:"graderId"`
 	GraderName        *string           `json:"graderName"`
 	GraderStatus      string            `json:"graderStatus"`
+	GraderType        string            `json:"graderType"`
 	Label             *bool             `json:"label"`
 	LabelReason       *string           `json:"labelReason"`
 	FailureDiagnostic *string           `json:"failureDiagnostic"`
@@ -61,7 +64,48 @@ func (g *GradersClient) GetLabels(ctx context.Context, params GetGraderLabelsPar
 	var response struct {
 		Labels []GraderLabel `json:"labels"`
 	}
-	if err := g.httpClient.get(ctx, "/api/sdk/graderLabels?"+query.Encode(), &response); err != nil {
+	if err := g.httpClient.get(ctx, graderLabelsPath+"?"+query.Encode(), &response); err != nil {
+		return nil, err
+	}
+	return response.Labels, nil
+}
+
+type GraderLabelUpdate struct {
+	GraderID          string          `json:"graderId"`
+	TraceID           string          `json:"traceId"`
+	Label             bool            `json:"label"`
+	Reason            string          `json:"reason,omitempty"`
+	FailureDiagnostic string          `json:"failureDiagnostic,omitempty"`
+	Confidence        LabelConfidence `json:"confidence,omitempty"`
+}
+
+type GraderLabelOutcome struct {
+	GraderID string      `json:"graderId"`
+	TraceID  string      `json:"traceId"`
+	Label    bool        `json:"label"`
+	Action   LabelAction `json:"action"`
+}
+
+func (g *GradersClient) SaveLabel(ctx context.Context, update GraderLabelUpdate) (*GraderLabelOutcome, error) {
+	outcomes, err := g.SaveLabelAll(ctx, []GraderLabelUpdate{update})
+	if err != nil {
+		return nil, err
+	}
+	if len(outcomes) != 1 {
+		return nil, fmt.Errorf("bitfab: saving one grader label returned %d outcomes", len(outcomes))
+	}
+	return &outcomes[0], nil
+}
+
+func (g *GradersClient) SaveLabelAll(ctx context.Context, updates []GraderLabelUpdate) ([]GraderLabelOutcome, error) {
+	if updates == nil {
+		updates = []GraderLabelUpdate{}
+	}
+	var response struct {
+		Labels []GraderLabelOutcome `json:"labels"`
+	}
+	if err := g.httpClient.requestInto(ctx, graderLabelsPath,
+		map[string]any{"labels": updates}, &response); err != nil {
 		return nil, err
 	}
 	return response.Labels, nil

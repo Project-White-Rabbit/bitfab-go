@@ -55,3 +55,34 @@ func TestGraders_RequiresASelector(t *testing.T) {
 		t.Fatal("empty selector made a request")
 	}
 }
+
+func TestGraders_SaveLabelPostsTheBatchRoute(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"labels": []any{
+			map[string]any{"graderId": "grader", "traceId": "one", "label": false, "action": "set"},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	outcome, err := client.Graders.SaveLabel(context.Background(), GraderLabelUpdate{
+		GraderID: "grader", TraceID: "one", Label: false, Reason: "refunded twice", Confidence: "High",
+	})
+	if err != nil || outcome.GraderID != "grader" || outcome.Label || outcome.Action != "set" {
+		t.Fatalf("SaveLabel = %+v, %v", outcome, err)
+	}
+	requests := server.recorded()
+	if len(requests) != 1 || requests[0].method != "POST" || requests[0].path != "/api/sdk/graderLabels" {
+		t.Fatalf("requests = %+v", requests)
+	}
+	labels, ok := requests[0].body["labels"].([]any)
+	if !ok || len(labels) != 1 {
+		t.Fatalf("body = %+v", requests[0].body)
+	}
+	sent := labels[0].(map[string]any)
+	if sent["graderId"] != "grader" || sent["reason"] != "refunded twice" || sent["confidence"] != "High" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	if _, present := sent["failureDiagnostic"]; present {
+		t.Fatalf("empty failureDiagnostic was sent: %+v", sent)
+	}
+}
