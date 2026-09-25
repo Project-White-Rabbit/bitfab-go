@@ -90,7 +90,7 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 type registryCLIArgs struct {
 	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
 	limit, attempts, concurrency                                                                                                      int
-	assertions, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                       bool
+	assertions, judge, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                bool
 	parameters                                                                                                                        []string
 	visited                                                                                                                           map[string]bool
 }
@@ -127,6 +127,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.executeItem, "execute-item", "", "internal replay assignment")
 	fs.StringVar(&out.fromTrace, "from-trace", "", "trace IDs to reseed")
 	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
+	fs.BoolVar(&out.judge, "judge-assertions", false, "judge each replay's approved assertions as it finishes (costs model calls)")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
 	fs.BoolVar(&out.dbBranch, "db-branch", false, "use historical database branches")
 	fs.BoolVar(&out.noDBBranch, "no-db-branch", false, "disable historical database branches")
@@ -324,6 +325,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		}
 		if parsed.visited["only-with-assertions"] {
 			options.OnlyWithAssertions = parsed.assertions
+		}
+		if parsed.visited["judge-assertions"] {
+			options.JudgeAssertions = parsed.judge
 		}
 		bound := options.Limit
 		if parsed.visited["limit"] {

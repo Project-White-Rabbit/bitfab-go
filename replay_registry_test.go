@@ -239,6 +239,41 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 	}
 }
 
+func TestReplayRegistryCLIJudgeAssertions(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	for _, tc := range []struct {
+		name       string
+		registered bool
+		args       []string
+		want       any
+	}{
+		{"flag sends it", false, []string{"pipeline", "--judge-assertions"}, true},
+		{"absent flag omits it", false, []string{"pipeline"}, nil},
+		{"absent flag keeps a registered value", true, []string{"pipeline"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &replayTestServerState{}
+			server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+			defer server.Close()
+			client := newTestClient(server.URL)
+			defer client.Close(time.Second)
+			registry := NewReplayRegistry()
+			if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone, JudgeAssertions: tc.registered}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RunReplayCLI(context.Background(), registry, tc.args, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			state.mu.Lock()
+			got := state.startBody["judgeAssertions"]
+			state.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("judgeAssertions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
 	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
