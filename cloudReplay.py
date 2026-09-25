@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +21,20 @@ CONFIG = ".bitfab/cloud.json"
 PREFIX = "bitfab-replay/"
 DEFAULT_SECRET_PREFIX = "BITFAB_CLOUD_"
 API_VERSION = "2026-03-10"
+# The SDK finds runs by this title and feeds them through these inputs. Never change them.
+RUN_NAME = "Bitfab replay ${{ inputs.execution_id }}"
+RUNNER_ENV = {
+    "BITFAB_CLOUD_REQUEST": "${{ inputs.request }}",
+    "BITFAB_EXECUTION_ID": "${{ inputs.execution_id }}",
+    "BITFAB_COMMIT_SHA": "${{ github.sha }}",
+}
+# The runner reports its result as a job annotation with this title, so the workflow
+# needs no upload step. Older workflows still upload RESULT_FILE as an artifact.
+RESULT_TITLE = "Bitfab replay result"
+RESULT_FILE = "bitfab-cloud-result.json"
+# Steps older setups generated that the SDK now owns.
+OLD_UPLOAD_STEP = "Save replay identity"
+OLD_JOB_TIMEOUT = 35
 ITEM_ERROR_FIELDS = (
     "error",
     "traceError",
@@ -30,13 +45,17 @@ ITEM_ERROR_FIELDS = (
 UUID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 PIPELINE = re.compile(r"^[\w.][\w.-]*$")
+# Every SDK's replay prints this to stderr as soon as the server creates the experiment.
+EXPERIMENT_LINE = re.compile(rb"^\[replay\] Experiment ([0-9a-f-]{36}):")
 HELP = """GitHub cloud replay (requires git, gh login, and Python 3.10+).
   --cloud PIPELINE --trace-ids UUID[,UUID] [--registry PATH]
     [--max-concurrency 1..32] [--cloud-request-id UUID]
     [--cloud-include PATH ...] [--cloud-dry-run] [--cloud-detach]
+    [--cloud-timeout MINUTES]
   --cloud-status UUID | --cloud-watch UUID | --cloud-cancel UUID
   --cloud-cleanup UUID
-  --cloud-init --config SPEC | --cloud-secrets --env-file FILE [NAME ...]
+  --cloud-init [--config SPEC]   (creates a setup, or brings an existing one up to date)
+  --cloud-secrets --env-file FILE [NAME ...]
 PIPELINE may be any pipeline in the registry, unless .bitfab/cloud.json names one.
 Snapshot tracked working files without changing HEAD, the index, or local files.
 New files require explicit --cloud-include. Credentials and ignored files are refused.
@@ -266,6 +285,8 @@ def validate_config(config):
         raise ValueError(
             "The runner command must execute locally, not recursively dispatch"
         )
+    if "cliCommand" in config:
+        validate_cli_command(config["cliCommand"])
     if config.get("pushTriggersReviewed") is not True:
         raise ValueError(
             "Setup must review push-triggered CI/deployments and set pushTriggersReviewed=true"
@@ -283,6 +304,18 @@ def validate_config(config):
         for name in names
     ):
         raise ValueError("secrets must be uppercase environment variable names")
+
+
+def validate_cli_command(cli_command):
+    if (
+        not isinstance(cli_command, list)
+        or not cli_command
+        or not all(isinstance(v, str) and v and "\x00" not in v for v in cli_command)
+        or any(v.startswith("--cloud") for v in cli_command)
+    ):
+        raise ValueError(
+            "cliCommand must be the argument array that starts the SDK's bitfab-replay command from workingDirectory"
+        )
 
 
 def check_pipeline(config, pipeline):
@@ -342,6 +375,7 @@ def parse(argv):
     parser.add_argument("--cloud-include", action="append", default=[])
     parser.add_argument("--cloud-dry-run", action="store_true")
     parser.add_argument("--cloud-detach", action="store_true")
+    parser.add_argument("--cloud-timeout", type=int)
     args = parser.parse_args(argv)
     operations = [
         name
@@ -363,6 +397,9 @@ def parse(argv):
             raise ValueError("Supply 1..100 explicit trace UUIDs")
         if not 1 <= args.max_concurrency <= 32:
             raise ValueError("--max-concurrency must be 1..32")
+        # Self-hosted runners allow jobs of up to 5 days; GitHub-hosted ones stop at 6 hours.
+        if args.cloud_timeout is not None and not 1 <= args.cloud_timeout <= 7200:
+            raise ValueError("--cloud-timeout must be 1..7200 minutes")
     if not UUID.fullmatch(execution_id):
         raise ValueError("Execution ID must be a UUID")
     return args, operation, execution_id
@@ -547,39 +584,82 @@ def status(record, *, fetch_result=True):
     if (
         fetch_result
         and record["state"] == "completed"
-        and record["conclusion"] == "success"
         and not record.get("testRunId")
+        and not record.get("resultChecked")
     ):
-        with tempfile.TemporaryDirectory(prefix="bitfab-cloud-result-") as directory:
-            command(
-                [
-                    "gh",
-                    "run",
-                    "download",
-                    str(record["runId"]),
-                    "--repo",
-                    record["repository"],
-                    "--name",
-                    "bitfab-replay-" + record["id"],
-                    "--dir",
-                    directory,
-                ]
-            )
-            artifact = Path(directory) / "bitfab-cloud-result.json"
-            if artifact.is_symlink() or artifact.stat().st_size > 4096:
-                raise ValueError("Invalid replay result artifact")
-            result = json.loads(artifact.read_text())
-            if (
-                result.get("executionId") != record["id"]
-                or result.get("commitSha") != record["sha"]
-                or not UUID.fullmatch(result.get("testRunId", ""))
-            ):
-                raise ValueError("Replay result artifact does not match this execution")
-            counts = replay_counts(result)
-            record["testRunId"] = result["testRunId"]
-            if counts is not None:
-                record["replayed"], record["errored"] = counts
+        success = record["conclusion"] == "success"
+        try:
+            result = read_result(record)
+        except RuntimeError:
+            # A run that failed before its replay started reports no result.
+            if success:
+                raise
+            record["resultChecked"] = True
+            return record
+        if (
+            result.get("executionId") != record["id"]
+            or result.get("commitSha") != record["sha"]
+            or not UUID.fullmatch(result.get("testRunId", ""))
+        ):
+            raise ValueError("Replay result does not match this execution")
+        counts = replay_counts(result)
+        record["testRunId"] = result["testRunId"]
+        if isinstance(result.get("stoppedEarly"), str):
+            record["stoppedEarly"] = result["stoppedEarly"]
+        if counts is not None:
+            record["replayed"], record["errored"] = counts
     return record
+
+
+def read_result(record):
+    try:
+        result = read_result_annotation(record)
+    except RuntimeError:
+        # Older workflows still upload the result, so a failed Checks API read
+        # must not hide it.
+        result = None
+    return result or read_result_artifact(record)
+
+
+def read_result_annotation(record):
+    repo = record["repository"]
+    jobs = api(repo, f"actions/runs/{record['runId']}/jobs?per_page=100") or {}
+    for job in jobs.get("jobs", []):
+        check_run = str(job.get("check_run_url", "")).rsplit("/", 1)[-1]
+        if not check_run.isdigit():
+            continue
+        for note in api(repo, f"check-runs/{check_run}/annotations?per_page=100") or []:
+            if (
+                note.get("title") == RESULT_TITLE
+                and len(note.get("message", "")) <= 4096
+            ):
+                try:
+                    return json.loads(base64.b64decode(note["message"], validate=True))
+                except ValueError as error:
+                    raise ValueError("Invalid replay result annotation") from error
+    return None
+
+
+def read_result_artifact(record):
+    with tempfile.TemporaryDirectory(prefix="bitfab-cloud-result-") as directory:
+        command(
+            [
+                "gh",
+                "run",
+                "download",
+                str(record["runId"]),
+                "--repo",
+                record["repository"],
+                "--name",
+                "bitfab-replay-" + record["id"],
+                "--dir",
+                directory,
+            ]
+        )
+        artifact = Path(directory) / RESULT_FILE
+        if artifact.is_symlink() or artifact.stat().st_size > 4096:
+            raise ValueError("Invalid replay result artifact")
+        return json.loads(artifact.read_text())
 
 
 def cleanup(root, record):
@@ -643,6 +723,8 @@ def run_cli(argv):
                 "traceIds": args.trace_ids.split(","),
                 "maxConcurrency": args.max_concurrency,
             }
+            if args.cloud_timeout is not None:
+                request["timeoutMinutes"] = args.cloud_timeout
             if args.cloud_dry_run:
                 return {
                     "dryRun": True,
@@ -729,17 +811,24 @@ def run_cli(argv):
             save(path, record)
             return record
         if operation == "watch" or (operation == "submit" and not args.cloud_detach):
-            deadline = time.monotonic() + 40 * 60
-            while record["state"] != "completed" and time.monotonic() < deadline:
+            # Once GitHub shows the run, its job timeout bounds the wait and Ctrl-C detaches.
+            # A dispatch GitHub never shows as a run would otherwise be waited on forever.
+            started = time.monotonic()
+            while record["state"] != "completed":
                 status(record)
                 save(path, record)
+                if (
+                    record["state"] == "dispatch_unknown"
+                    and time.monotonic() - started >= 10 * 60
+                ):
+                    raise ValueError(
+                        "GitHub has shown no run for this dispatch after 10 minutes. Check Actions, then resume with --cloud-watch "
+                        + execution_id
+                        + " or remove the snapshot branch with --cloud-cleanup "
+                        + execution_id
+                    )
                 if record["state"] != "completed":
                     time.sleep(5)
-            if record["state"] != "completed":
-                raise ValueError(
-                    "Watch timed out; the job may still run. Resume with --cloud-watch "
-                    + execution_id
-                )
         if record["state"] == "completed" or (
             operation == "cleanup" and record["state"] == "prepared"
         ):
@@ -763,6 +852,7 @@ def execute():
     check_pipeline(config, request["pipeline"])
     if request["id"] != os.environ["BITFAB_EXECUTION_ID"]:
         raise ValueError("Replay request does not match the configured execution")
+    timeout = request.get("timeoutMinutes")
     parse(
         [
             "--cloud",
@@ -773,6 +863,7 @@ def execute():
             str(request["maxConcurrency"]),
             "--cloud-request-id",
             request["id"],
+            *([] if timeout is None else ["--cloud-timeout", str(timeout)]),
         ]
     )
     if not os.environ.get("BITFAB_API_KEY"):
@@ -786,32 +877,100 @@ def execute():
         str(request["maxConcurrency"]),
         "--no-code-change",
     ]
+    experiment = {}
+    # GitHub cancels and times out a job with SIGINT then SIGTERM; turn SIGTERM into the
+    # same interrupt so the replay is stopped cleanly and its experiment is still reported.
+    previous = signal.signal(signal.SIGTERM, raise_interrupt)
+    try:
+        summary = run_replay(root, config, request, args, timeout, experiment)
+    except BaseException as error:
+        if UUID.fullmatch(experiment.get("id", "")):
+            write_result(
+                {
+                    "executionId": request["id"],
+                    "commitSha": os.environ["GITHUB_SHA"],
+                    "testRunId": experiment["id"],
+                    "stoppedEarly": (str(error) or type(error).__name__)[:300],
+                }
+            )
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    write_result(summary)
+    return summary
+
+
+def raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def forward_stderr(stream, experiment):
+    for line in iter(stream.readline, b""):
+        sys.stderr.buffer.write(line)
+        sys.stderr.flush()
+        if "id" not in experiment:
+            match = EXPERIMENT_LINE.match(line)
+            if match:
+                experiment["id"] = match[1].decode()
+
+
+def write_result(summary):
+    # Base64, because GitHub masks every line of a multi-line secret in logs and
+    # annotations, so a JSON credential alone turns each { and } into ***.
+    message = base64.b64encode(json.dumps(summary).encode()).decode()
+    print(f"::notice title={RESULT_TITLE}::{message}", flush=True)
+    lines = [
+        f"Test run: `{summary['testRunId']}`",
+        f"Commit: `{summary['commitSha']}`",
+    ]
+    if "stoppedEarly" in summary:
+        lines.append(
+            f"Stopped early: {summary['stoppedEarly']}. Traces that finished are saved in this test run."
+        )
+    else:
+        lines.append(f"Replayed: {summary['replayed']}, errored: {summary['errored']}")
+    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
+        file.write("### Bitfab replay\n\n" + "\n\n".join(lines) + "\n")
+
+
+def run_replay(root, config, request, args, timeout, experiment):
     with tempfile.TemporaryFile() as output:
         with subprocess.Popen(
             args,
             cwd=within(root, config["workingDirectory"]),
             stdout=output,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         ) as child:
+            reader = threading.Thread(
+                target=forward_stderr, args=(child.stderr, experiment), daemon=True
+            )
+            reader.start()
             try:
-                deadline = time.monotonic() + 25 * 60
+                # Without --cloud-timeout the job's own timeout is the only limit.
+                deadline = None if timeout is None else time.monotonic() + timeout * 60
                 while child.poll() is None:
                     if os.fstat(output.fileno()).st_size > 16 * 1024 * 1024:
                         raise ValueError("Replay output exceeded 16 MiB")
-                    if time.monotonic() >= deadline:
-                        raise subprocess.TimeoutExpired(args, 25 * 60)
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise ValueError(
+                            f"Replay stopped at the {timeout}-minute --cloud-timeout; traces that finished are saved in Bitfab as an interrupted experiment"
+                        )
                     time.sleep(0.1)
                 code = child.returncode
             except BaseException:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGTERM)
+                # Time for the SDK to mark the experiment interrupted before the hard kill.
                 with contextlib.suppress(subprocess.TimeoutExpired):
-                    child.wait(timeout=10)
+                    child.wait(timeout=30)
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
                 raise
+            finally:
+                reader.join(timeout=5)
         if output.tell() > 16 * 1024 * 1024:
             raise ValueError("Replay output exceeded 16 MiB")
         output.seek(0)
@@ -843,14 +1002,6 @@ def execute():
         "replayed": len(items),
         "errored": sum(1 for item in items if item_errored(item)),
     }
-    (Path(os.environ["RUNNER_TEMP"]) / "bitfab-cloud-result.json").write_text(
-        json.dumps(summary) + "\n"
-    )
-    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
-        file.write(
-            f"### Bitfab replay\n\nTest run: `{test_run}`\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\n"
-            f"Replayed: {summary['replayed']}, errored: {summary['errored']}\n"
-        )
     return summary
 
 
@@ -892,18 +1043,77 @@ def report_errored_items(record):
     return 0
 
 
+def replay_step(config, cli_command, env):
+    return {
+        "name": "Replay",
+        "working-directory": config["workingDirectory"],
+        "run": shlex.join([*cli_command, "--cloud-execute"]),
+        "env": {**env, **RUNNER_ENV},
+    }
+
+
+def workflow_document(job_options, setup_steps, replay):
+    """Only settings belong here; everything Bitfab may need to change runs inside the SDK."""
+    job = {
+        "runs-on": job_options.get("runsOn", "ubuntu-24.04"),
+        "steps": [
+            {
+                "name": "Check out replay snapshot",
+                "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+                "with": {"ref": "${{ github.sha }}", "persist-credentials": False},
+            },
+            *setup_steps,
+            replay,
+        ],
+    }
+    for key in ("environment", "services"):
+        if key in job_options:
+            job[key] = job_options[key]
+    return {
+        "name": "Bitfab cloud replay",
+        "run-name": RUN_NAME,
+        "on": {
+            "workflow_dispatch": {
+                "inputs": {
+                    "execution_id": {"required": True, "type": "string"},
+                    "request": {"required": True, "type": "string"},
+                }
+            }
+        },
+        "permissions": {"contents": "read"},
+        "jobs": {"replay": job},
+    }
+
+
+def write_new_files(root, outputs):
+    for name in outputs:
+        if within(root, name).exists():
+            raise ValueError(
+                f"Refusing to overwrite {name}; review and edit the existing setup"
+            )
+    for name, content in outputs.items():
+        target = within(root, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("x") as file:
+            file.write(content)
+
+
 def initialize(argv):
     parser = argparse.ArgumentParser(
         prog="bitfab-replay --cloud-init",
-        description="Install direct GitHub cloud replay from a reviewed JSON setup specification. Existing files are never overwritten.",
+        description="Install direct GitHub cloud replay from a reviewed JSON setup specification, or bring an existing setup up to date in place. Safe to run again.",
     )
     parser.add_argument(
         "--config",
-        required=True,
-        help="JSON file with cloud config, cliCommand, setupSteps, optional pipeline (omit or null to allow every registry pipeline), secrets, variables, environment, services, runsOn",
+        help="JSON file with cloud config, cliCommand, setupSteps, optional pipeline (omit or null to allow every registry pipeline), secrets, variables, environment, services, runsOn. Required for a new setup; for an existing one only cliCommand is read, and only when the workflow does not already show it",
     )
     args = parser.parse_args(argv)
-    spec = json.loads(Path(args.config).read_text())
+    spec = json.loads(Path(args.config).read_text()) if args.config else None
+    root = root_directory()
+    if within(root, CONFIG).exists():
+        return update_existing(root, spec)
+    if spec is None:
+        raise ValueError(f"No {CONFIG} yet; pass --config with a setup specification")
     config = {
         key: spec[key]
         for key in (
@@ -925,6 +1135,7 @@ def initialize(argv):
     config["secrets"] = secrets
     config["secretPrefix"] = secret_prefix
     validate_config(config)
+    validate_cli_command(spec.get("cliCommand"))
     if set(secrets) & set(variables):
         raise ValueError("Secret names and variable names must not overlap")
     if "BITFAB_API_KEY" not in secrets or not all(
@@ -932,16 +1143,6 @@ def initialize(argv):
     ):
         raise ValueError(
             "Supply uppercase secret/variable names, including BITFAB_API_KEY; never values"
-        )
-    cli_command = spec.get("cliCommand")
-    if (
-        not isinstance(cli_command, list)
-        or not cli_command
-        or not all(isinstance(v, str) and v and "\x00" not in v for v in cli_command)
-        or any(v.startswith("--cloud") for v in cli_command)
-    ):
-        raise ValueError(
-            "cliCommand must be the argument array that starts the SDK's bitfab-replay command from workingDirectory"
         )
     steps = spec.get("setupSteps")
     if (
@@ -952,79 +1153,122 @@ def initialize(argv):
         raise ValueError("setupSteps must contain reviewed GitHub Actions setup steps")
     env = {key: "${{ secrets." + secret_prefix + key + " }}" for key in secrets}
     env.update({key: "${{ vars." + key + " }}" for key in variables})
-    env.update(
-        BITFAB_CLOUD_REQUEST="${{ inputs.request }}",
-        BITFAB_EXECUTION_ID="${{ inputs.execution_id }}",
-        BITFAB_COMMIT_SHA="${{ github.sha }}",
+    workflow = workflow_document(
+        spec, steps, replay_step(config, spec["cliCommand"], env)
     )
-    job = {
-        "runs-on": spec.get("runsOn", "ubuntu-24.04"),
-        "timeout-minutes": 35,
-        "steps": [
-            {
-                "name": "Check out replay snapshot",
-                "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-                "with": {"ref": "${{ github.sha }}", "persist-credentials": False},
-            },
-            *steps,
-            {
-                "name": "Replay",
-                "working-directory": config["workingDirectory"],
-                "run": shlex.join([*cli_command, "--cloud-execute"]),
-                "env": env,
-            },
-            {
-                "name": "Save replay identity",
-                "if": "always()",
-                "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-                "with": {
-                    "name": "bitfab-replay-${{ inputs.execution_id }}",
-                    "path": "${{ runner.temp }}/bitfab-cloud-result.json",
-                    "if-no-files-found": "ignore",
-                    "retention-days": 7,
-                },
-            },
-        ],
-    }
-    for key in ("environment", "services"):
-        if key in spec:
-            job[key] = spec[key]
-    workflow = {
-        "name": "Bitfab cloud replay",
-        "run-name": "Bitfab replay ${{ inputs.execution_id }}",
-        "on": {
-            "workflow_dispatch": {
-                "inputs": {
-                    "execution_id": {"required": True, "type": "string"},
-                    "request": {"required": True, "type": "string"},
-                }
-            }
-        },
-        "permissions": {"contents": "read"},
-        "jobs": {"replay": job},
-    }
-    root = root_directory()
     outputs = {
         CONFIG: json.dumps(config, indent=2) + "\n",
         f".github/workflows/{config['workflow']}": json.dumps(workflow, indent=2)
         + "\n",
     }
-    for name in outputs:
-        target = within(root, name)
-        if target.exists():
-            raise ValueError(
-                f"Refusing to overwrite {name}; review and edit the existing setup"
-            )
-    for name, content in outputs.items():
-        target = within(root, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("x") as file:
-            file.write(content)
+    write_new_files(root, outputs)
     return {
         "files": list(outputs),
         "requiredSecrets": [secret_prefix + name for name in secrets],
         "requiredVariables": variables,
         "next": "Configure secrets securely, review push triggers, merge the workflow to the default branch, then run --cloud-dry-run",
+    }
+
+
+def replace_file(target, content):
+    with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, delete=False) as file:
+        file.write(content)
+        temporary = file.name
+    os.replace(temporary, target)
+
+
+def update_existing(root, spec):
+    """Existing files win: only the Replay step and steps older setups generated change."""
+    config = json.loads(within(root, CONFIG).read_text())
+    validate_config(config)
+    name = f".github/workflows/{config['workflow']}"
+    workflow_path = within(root, name)
+    text = workflow_path.read_text() if workflow_path.is_file() else ""
+    try:
+        workflow = json.loads(text)
+        job = workflow["jobs"]["replay"]
+        steps = job["steps"]
+    except (ValueError, KeyError, TypeError) as error:
+        # A workflow the customer rewrote as YAML is current when nothing older remains.
+        if (
+            "--cloud-execute" in text
+            and OLD_UPLOAD_STEP not in text
+            and ".bitfab/cloudReplay.py" not in text
+            and not re.search(rf"timeout-minutes:\s*{OLD_JOB_TIMEOUT}\b", text)
+        ):
+            return {"files": [], "updated": False, "next": "Already up to date"}
+        raise ValueError(
+            f"{name} is missing or was not generated by --cloud-init; edit its Replay step by hand to run the SDK's bitfab-replay command with --cloud-execute"
+        ) from error
+    replay = [
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == "Replay"
+    ]
+    if len(replay) != 1:
+        raise ValueError(f"{name} must contain exactly one step named Replay")
+    step = steps[replay[0]]
+    words = shlex.split(step.get("run", ""))
+    if spec is not None and spec.get("cliCommand") is not None:
+        cli_command = spec["cliCommand"]
+    elif words[-1:] == ["--cloud-execute"]:
+        cli_command = words[:-1]
+    elif config.get("cliCommand") is not None:
+        cli_command = config["cliCommand"]
+    else:
+        raise ValueError(
+            "The Replay step does not run the SDK command; pass --config with a file whose cliCommand starts bitfab-replay from workingDirectory"
+        )
+    validate_cli_command(cli_command)
+    env = {
+        key: value
+        for key, value in (step.get("env") or {}).items()
+        if key not in RUNNER_ENV
+    }
+    extra = {
+        key: value
+        for key, value in step.items()
+        if key not in ("name", "uses", "with", "run", "working-directory", "env")
+    }
+    before = json.dumps([config, workflow], sort_keys=True)
+    # Edit in place so the customer's checkout options, extra steps, and job
+    # settings survive; only the Replay step and our old result upload change.
+    job["steps"] = [
+        {**replay_step(config, cli_command, env), **extra}
+        if index == replay[0]
+        else entry
+        for index, entry in enumerate(steps)
+        if not (
+            isinstance(entry, dict)
+            and entry.get("name") == OLD_UPLOAD_STEP
+            and str(entry.get("uses", "")).startswith("actions/upload-artifact@")
+        )
+    ]
+    # The limit older setups generated; a value the customer chose stays.
+    if job.get("timeout-minutes") == OLD_JOB_TIMEOUT:
+        del job["timeout-minutes"]
+    config.pop("cliCommand", None)
+    # Setups before the SDK carried the script left a copy that nothing reads now.
+    old_script = ".bitfab/cloudReplay.py"
+    removable = [old_script] if within(root, old_script).exists() else []
+    if json.dumps([config, workflow], sort_keys=True) == before:
+        return {
+            "files": [],
+            "updated": False,
+            "removable": removable,
+            "next": "Already up to date",
+        }
+    outputs = {
+        CONFIG: json.dumps(config, indent=2) + "\n",
+        name: json.dumps(workflow, indent=2) + "\n",
+    }
+    for output, content in outputs.items():
+        replace_file(within(root, output), content)
+    return {
+        "files": list(outputs),
+        "updated": True,
+        "removable": removable,
+        "next": "Review the diff, merge the workflow to the default branch, then run --cloud-dry-run",
     }
 
 
@@ -1040,6 +1284,11 @@ def main():
             result = run_cli(sys.argv[1:])
         print(json.dumps(result, indent=2))
         if result.get("state") == "completed" and result.get("conclusion") != "success":
+            if result.get("testRunId"):
+                print(
+                    f"Cloud replay stopped early ({result.get('stoppedEarly', result.get('conclusion'))}). Traces that finished are saved in test run {result['testRunId']}.",
+                    file=sys.stderr,
+                )
             return 1
         if result.get("state") == "completed":
             return report_errored_items(result)
