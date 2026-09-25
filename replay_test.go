@@ -624,6 +624,7 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 			TraceIDs:              []string{"trace-1", "trace-2"},
 			Name:                  "candidate",
 			Notes:                 "forced the new-checkout flag on",
+			Metadata:              map[string]string{"schedule": "eod"},
 			CodeChangeDescription: &description,
 			CodeChangeFiles: []CodeChangeFile{{
 				Path:   "prompt.go",
@@ -662,5 +663,32 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 	}
 	if got := state.startBody["codeChangeFiles"].([]any); len(got) != 1 {
 		t.Errorf("code change files = %#v", got)
+	}
+	if got, _ := state.startBody["metadata"].(map[string]any); len(got) != 1 || got["schedule"] != "eod" {
+		t.Errorf("metadata = %#v", state.startBody["metadata"])
+	}
+}
+
+func TestReplayOmitsMetadataWhenUnset(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	for _, metadata := range []map[string]string{nil, {}} {
+		state := &replayTestServerState{}
+		server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+		client := newTestClient(server.URL)
+		_, err := client.Replay(context.Background(), "options-workflow", func() {}, &ReplayOptions{
+			TraceIDs: []string{"trace-1"},
+			Metadata: metadata,
+		})
+		client.Close(5 * time.Second)
+		server.Close()
+		if err != nil {
+			t.Fatalf("Replay returned error: %v", err)
+		}
+		state.mu.Lock()
+		_, present := state.startBody["metadata"]
+		state.mu.Unlock()
+		if present {
+			t.Errorf("start body should omit metadata %#v", metadata)
+		}
 	}
 }

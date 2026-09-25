@@ -82,6 +82,58 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 	}
 }
 
+func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	err := registry.Register("pipeline", ReplayRegistration{
+		Client:   client,
+		Function: BindReplayFunction("registry", func(string, int) {}),
+		Options:  ReplayOptions{TraceIDs: []string{"a"}, Metadata: map[string]string{"schedule": "registered"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startMetadata := func() map[string]any {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		metadata, _ := state.startBody["metadata"].(map[string]any)
+		return metadata
+	}
+	var stdout, stderr bytes.Buffer
+	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--metadata", "schedule=eod", "--metadata", "owner=ada=team"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if metadata := startMetadata(); len(metadata) != 2 || metadata["schedule"] != "eod" || metadata["owner"] != "ada=team" {
+		t.Fatalf("metadata from flags = %+v", metadata)
+	}
+	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if metadata := startMetadata(); len(metadata) != 1 || metadata["schedule"] != "registered" {
+		t.Fatalf("registered metadata lost without the flag: %+v", metadata)
+	}
+	state.mu.Lock()
+	state.startBody = nil
+	state.mu.Unlock()
+	for _, bad := range []string{"schedule", "=eod"} {
+		_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--metadata", bad}, &stdout, &stderr)
+		if err == nil || !strings.Contains(err.Error(), "--metadata expects key=value") {
+			t.Fatalf("--metadata %q error = %v", bad, err)
+		}
+	}
+	state.mu.Lock()
+	body := state.startBody
+	state.mu.Unlock()
+	if body != nil {
+		t.Fatalf("usage error still started a replay: %+v", body)
+	}
+}
+
 func TestReplayRegistryBoundExplicitOrderingInheritedAndErrors(t *testing.T) {
 	reads := []string{}
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {

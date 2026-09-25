@@ -149,6 +149,8 @@ type Client struct {
 	Labels *LabelsClient
 	// Graders reads the individual verdicts recorded by automated graders.
 	Graders *GradersClient
+	// Experiments lists and reads replay runs and their rollups.
+	Experiments *ExperimentsClient
 }
 
 const captureEnabledEnv = "BITFAB_CAPTURE_ENABLED"
@@ -258,6 +260,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.Traces = &TracesClient{httpClient: c.httpClient}
 	c.Labels = &LabelsClient{httpClient: c.httpClient}
 	c.Graders = &GradersClient{httpClient: c.httpClient}
+	c.Experiments = &ExperimentsClient{httpClient: c.httpClient}
 	startCommitRefResolution()
 	return c
 }

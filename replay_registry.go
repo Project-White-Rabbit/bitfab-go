@@ -92,6 +92,7 @@ type registryCLIArgs struct {
 	limit, attempts, concurrency                                                                                                      int
 	assertions, judge, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                bool
 	parameters                                                                                                                        []string
+	metadata                                                                                                                          map[string]string
 	visited                                                                                                                           map[string]bool
 }
 
@@ -135,9 +136,16 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.BoolVar(&out.run, "run", false, "execute seed cases")
 	var params registryParameters
 	fs.Var(&params, "param", "name=value project parameter (repeatable)")
+	var metadata registryParameters
+	fs.Var(&metadata, "metadata", "key=value label stored on the experiment, filterable when listing experiments (repeatable)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return out, err
 	}
+	parsedMetadata, err := registryMetadata(metadata)
+	if err != nil {
+		return out, err
+	}
+	out.metadata = parsedMetadata
 	if fs.NArg() != 0 {
 		return out, fmt.Errorf("bitfab: unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
@@ -164,6 +172,21 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 		return out, fmt.Errorf("bitfab: conflicting replay options")
 	}
 	return out, nil
+}
+
+func registryMetadata(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	metadata := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		key, value, found := strings.Cut(pair, "=")
+		if !found || key == "" {
+			return nil, fmt.Errorf("bitfab: --metadata expects key=value, got %q", pair)
+		}
+		metadata[key] = value
+	}
+	return metadata, nil
 }
 
 func registryIDs(raw string) ([]string, error) {
@@ -376,6 +399,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	}
 	if parsed.visited["notes"] {
 		options.Notes = parsed.notes
+	}
+	if parsed.visited["metadata"] {
+		options.Metadata = parsed.metadata
 	}
 	if parsed.visited["attempts"] {
 		options.Attempts = parsed.attempts

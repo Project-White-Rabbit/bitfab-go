@@ -203,7 +203,12 @@ type ReplayOptions struct {
 	// Run conditions Bitfab cannot see on its own, such as an environment
 	// override or a forced feature flag. Kept on the experiment next to its
 	// name.
-	Notes                    string
+	Notes string
+	// Metadata is a set of string labels stored on the experiment, such as
+	// {"schedule": "eod"}, that Experiments.List can filter on. Keys match
+	// ^[A-Za-z0-9_.:-]{1,40}$, values are at most 500 characters, and a run
+	// carries at most 50 keys.
+	Metadata                 map[string]string
 	MaxConcurrency           int
 	CodeChangeDescription    *string
 	CodeChangeFiles          []CodeChangeFile
@@ -789,6 +794,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.Notes != "" {
 		payload["notes"] = options.Notes
+	}
+	if len(options.Metadata) > 0 {
+		payload["metadata"] = options.Metadata
 	}
 	if options.CodeChangeDescription != nil {
 		payload["codeChangeDescription"] = *options.CodeChangeDescription
