@@ -3,18 +3,20 @@ package bitfab
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 )
 
-const cloudReplayHelp = "Direct GitHub replay: --cloud PIPELINE --trace-ids UUID[,UUID] [--max-concurrency 1..32] [--cloud-include FILE] [--cloud-dry-run] [--cloud-detach] [--cloud-request-id UUID]. Lifecycle: --cloud-status|--cloud-watch|--cloud-cancel|--cloud-cleanup UUID. Requires git, gh auth login, Python 3.10+, and bitfab:setup cloud."
+//go:embed cloudReplay.py
+var cloudReplayHelper []byte
+
+const cloudReplayHelp = "Direct GitHub replay: --cloud PIPELINE --trace-ids UUID[,UUID] [--max-concurrency 1..32] [--cloud-include FILE] [--cloud-dry-run] [--cloud-detach] [--cloud-request-id UUID]. Lifecycle: --cloud-status|--cloud-watch|--cloud-cancel|--cloud-cleanup UUID. Setup: --cloud-init --config FILE, --cloud-secrets --env-file FILE [NAME ...]. Requires git, gh auth login, Python 3.10+, and bitfab:setup cloud."
 
 func isCloudReplayCommand(args []string) bool {
 	for _, arg := range args {
@@ -25,31 +27,27 @@ func isCloudReplayCommand(args []string) bool {
 	return false
 }
 
-// RunCloudReplayCLI runs the repository's direct GitHub helper without loading a replay registry.
-// It leaves HEAD, the index, and files untouched and streams the recovery UUID to stderr.
 func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Writer) (map[string]any, error) {
+	return runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr)
+}
+
+func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer) (map[string]any, error) {
 	if slices.Contains(args, "--help") || slices.Contains(args, "-h") {
 		fmt.Fprintln(stdout, cloudReplayHelp)
 		return map[string]any{}, nil
 	}
-	gitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(gitCtx, "git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return nil, fmt.Errorf("bitfab: cloud replay must run inside a Git repository: %w", err)
-	}
-	root, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	file, err := os.CreateTemp("", "bitfab-cloud-replay-*.py")
 	if err != nil {
 		return nil, err
 	}
-	helper := filepath.Join(root, ".bitfab", "cloudReplay.py")
-	resolved, err := filepath.EvalSymlinks(helper)
-	if err != nil || resolved != helper {
-		return nil, fmt.Errorf("bitfab: run bitfab:setup cloud first; expected .bitfab/cloudReplay.py inside this repository")
+	helper := file.Name()
+	defer os.Remove(helper)
+	if _, err := file.Write(script); err != nil {
+		file.Close()
+		return nil, err
 	}
-	info, err := os.Stat(helper)
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("bitfab: cloud replay helper must be a regular file")
+	if err := file.Close(); err != nil {
+		return nil, err
 	}
 	command := exec.CommandContext(ctx, "python3", append([]string{helper}, args...)...)
 	var output bytes.Buffer
