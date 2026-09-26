@@ -16,8 +16,6 @@ import (
 //go:embed cloudReplay.py
 var cloudReplayHelper []byte
 
-const cloudReplayHelp = "Direct GitHub replay: --cloud PIPELINE --trace-ids UUID[,UUID] [--max-concurrency 1..32] [--cloud-include FILE] [--cloud-dry-run] [--cloud-detach] [--cloud-request-id UUID] [--cloud-timeout MINUTES] [--cloud-check] [--fail-on-error] [replay options such as --name, --dataset-ids, --attempts, or --resume, passed to the replay on the runner]. Lifecycle: --cloud-status|--cloud-watch|--cloud-cancel|--cloud-cleanup UUID. Setup: --cloud-init [--config FILE] (creates a setup or updates it in place), --cloud-secrets --env-file FILE [NAME ...]. Requires git, gh auth login, Python 3.10+, and bitfab:setup cloud."
-
 func isCloudReplayCommand(args []string) bool {
 	for _, arg := range args {
 		if arg == "--cloud" || strings.HasPrefix(arg, "--cloud-") {
@@ -32,9 +30,13 @@ func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Wri
 }
 
 func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer) (map[string]any, error) {
-	if slices.Contains(args, "--help") || slices.Contains(args, "-h") {
-		fmt.Fprintln(stdout, cloudReplayHelp)
-		return map[string]any{}, nil
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	replayCommand, err := json.Marshal([]string{executable})
+	if err != nil {
+		return nil, err
 	}
 	file, err := os.CreateTemp("", "bitfab-cloud-replay-*.py")
 	if err != nil {
@@ -50,6 +52,7 @@ func runCloudReplayHelper(ctx context.Context, script []byte, args []string, std
 		return nil, err
 	}
 	command := exec.CommandContext(ctx, "python3", append([]string{helper}, args...)...)
+	command.Env = append(os.Environ(), "BITFAB_REPLAY_COMMAND="+string(replayCommand), "BITFAB_SDK_LANGUAGE=go")
 	var output bytes.Buffer
 	command.Stdout, command.Stderr = &output, stderr
 	if err := command.Run(); err != nil {
@@ -57,6 +60,10 @@ func runCloudReplayHelper(ctx context.Context, script []byte, args []string, std
 			fmt.Fprint(stdout, output.String())
 		}
 		return nil, fmt.Errorf("bitfab: cloud replay failed; see diagnostics and recover using the execution UUID: %w", err)
+	}
+	if slices.Contains(args, "--help") || slices.Contains(args, "-h") {
+		_, err := stdout.Write(output.Bytes())
+		return map[string]any{}, err
 	}
 	var result map[string]any
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil {

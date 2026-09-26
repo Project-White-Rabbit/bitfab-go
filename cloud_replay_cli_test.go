@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
 
-var fakeCloudHelper = []byte("import json, sys\nprint(json.dumps({'args': sys.argv[1:]}))\n")
+var fakeCloudHelper = []byte("import json, os, sys\nprint(json.dumps({'args': sys.argv[1:], 'command': json.loads(os.environ['BITFAB_REPLAY_COMMAND']), 'language': os.environ['BITFAB_SDK_LANGUAGE']}))\n")
 
 func cloudTestRepo(t *testing.T) {
 	t.Helper()
@@ -27,7 +28,7 @@ func TestCloudShipsHelperInsteadOfReadingRepository(t *testing.T) {
 	if _, err := RunReplayCLI(context.Background(), nil, args, io.Discard, &errors); err == nil {
 		t.Fatal("accepted a repository without setup")
 	}
-	if !strings.Contains(errors.String(), "Run bitfab:setup cloud first") {
+	if !strings.Contains(errors.String(), "Run bitfab-replay --cloud-init") {
 		t.Fatalf("missing setup message: %s", errors.String())
 	}
 }
@@ -47,13 +48,17 @@ func TestCloudDelegationWithoutRegistry(t *testing.T) {
 		if got[0] != args[0] || got[1] != args[1] {
 			t.Fatalf("wrong args: %v", got)
 		}
+		executable, _ := os.Executable()
+		if command := result["command"].([]any); len(command) != 1 || command[0] != executable || result["language"] != "go" {
+			t.Fatalf("wrong replay command: %v", result)
+		}
 	}
 }
 
-func TestCloudHelpWithoutRunningHelper(t *testing.T) {
+func TestCloudHelpComesFromThePackagedHelper(t *testing.T) {
 	cloudTestRepo(t)
 	var output bytes.Buffer
-	if _, err := runCloudReplayHelper(context.Background(), nil, []string{"--cloud", "--help"}, &output, io.Discard); err != nil {
+	if _, err := RunCloudReplayCLI(context.Background(), []string{"--cloud", "--help"}, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "--cloud-init") {
