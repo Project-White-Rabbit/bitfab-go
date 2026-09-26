@@ -67,7 +67,7 @@ func TestCaptureCodeChangeFromGitPreservesRename(t *testing.T) {
 	if file.Path != "new.go" || file.Before != original || file.After != updated {
 		t.Fatalf("file = %#v", file)
 	}
-	if change.Description == nil || !strings.Contains(*change.Description, "1 file changed vs trunk") {
+	if change.Description == nil || !strings.Contains(*change.Description, "1 file changed uncommitted (vs HEAD)") {
 		t.Fatalf("description = %v", change.Description)
 	}
 }
@@ -260,22 +260,27 @@ func TestCaptureCodeChangeFromGitCapturesAddsDeletesAndSkipsUnsafeFiles(t *testi
 	}
 }
 
-func TestResolveCodeChangeBaseHonorsForcedRefAndFallsBackToHead(t *testing.T) {
+func TestResolveCodeChangeBaseDefaultsToHeadAndHonorsForcedRef(t *testing.T) {
 	root := initReplayGitRepo(t, "main")
 	if output, ok := runReplayGit(context.Background(), root, "checkout", "-b", "feature"); !ok {
 		t.Fatalf("git checkout failed: %s", output)
 	}
-	t.Setenv("BITFAB_CODE_CHANGE_BASE", "main")
-	base, fromTrunk, ok := resolveCodeChangeBase(context.Background(), root)
-	if !ok || !fromTrunk || strings.TrimSpace(base) == "" || base == "main" {
-		t.Fatalf("forced base=%q fromTrunk=%t ok=%t", base, fromTrunk, ok)
+	t.Setenv("BITFAB_CODE_CHANGE_BASE", "")
+	base, against, ok := resolveCodeChangeBase(context.Background(), root)
+	if !ok || base != "HEAD" || against != "uncommitted (vs HEAD)" {
+		t.Fatalf("default base=%q against=%q ok=%t", base, against, ok)
 	}
 
-	headOnly := initReplayGitRepo(t, "feature-only")
+	t.Setenv("BITFAB_CODE_CHANGE_BASE", "main")
+	base, against, ok = resolveCodeChangeBase(context.Background(), root)
+	if !ok || against != "vs main" || strings.TrimSpace(base) == "" || base == "main" || base == "HEAD" {
+		t.Fatalf("forced base=%q against=%q ok=%t", base, against, ok)
+	}
+
 	t.Setenv("BITFAB_CODE_CHANGE_BASE", "missing")
-	base, fromTrunk, ok = resolveCodeChangeBase(context.Background(), headOnly)
-	if !ok || fromTrunk || base != "HEAD" {
-		t.Fatalf("fallback base=%q fromTrunk=%t ok=%t", base, fromTrunk, ok)
+	base, against, ok = resolveCodeChangeBase(context.Background(), root)
+	if !ok || base != "HEAD" || against != "uncommitted (vs HEAD)" {
+		t.Fatalf("missing ref base=%q against=%q ok=%t", base, against, ok)
 	}
 }
 

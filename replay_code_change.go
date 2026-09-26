@@ -17,14 +17,6 @@ const (
 	maxCodeChangeTotal     = 2_000_000
 )
 
-var codeChangeTrunkCandidates = []string{
-	"origin/HEAD",
-	"origin/main",
-	"origin/master",
-	"main",
-	"master",
-}
-
 type resolvedCodeChange struct {
 	Description *string          `json:"description"`
 	Files       []CodeChangeFile `json:"files"`
@@ -88,7 +80,7 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, label string) *re
 	if !ok || root == "" {
 		return nil
 	}
-	base, fromTrunk, ok := resolveCodeChangeBase(ctx, root)
+	base, against, ok := resolveCodeChangeBase(ctx, root)
 	if !ok {
 		return nil
 	}
@@ -177,36 +169,27 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, label string) *re
 	if len(files) == 1 {
 		word = "file"
 	}
-	against := "uncommitted (vs HEAD)"
-	if fromTrunk {
-		against = "vs trunk"
-	}
 	description := head + " (" + strconv.Itoa(len(files)) + " " + word + " changed " + against + ")"
 	return &resolvedCodeChange{Description: &description, Files: files}
 }
 
-func resolveCodeChangeBase(ctx context.Context, root string) (string, bool, bool) {
+// resolveCodeChangeBase returns the base to diff the working tree against and
+// the label for it. HEAD by default, so only uncommitted edits show;
+// BITFAB_CODE_CHANGE_BASE moves the base to the merge-base with that ref.
+func resolveCodeChangeBase(ctx context.Context, root string) (string, string, bool) {
 	if forced := os.Getenv("BITFAB_CODE_CHANGE_BASE"); forced != "" && replayGitRefExists(ctx, root, forced) {
 		if base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", forced); ok && strings.TrimSpace(base) != "" {
-			return strings.TrimSpace(base), true, true
+			return strings.TrimSpace(base), "vs " + forced, true
 		}
 		if base, ok := runReplayGit(ctx, root, "rev-parse", "--verify", forced); ok && strings.TrimSpace(base) != "" {
-			return strings.TrimSpace(base), true, true
+			return strings.TrimSpace(base), "vs " + forced, true
 		}
-		return "", false, false
-	}
-	for _, candidate := range codeChangeTrunkCandidates {
-		if !replayGitRefExists(ctx, root, candidate) {
-			continue
-		}
-		if base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", candidate); ok && strings.TrimSpace(base) != "" {
-			return strings.TrimSpace(base), true, true
-		}
+		return "", "", false
 	}
 	if replayGitRefExists(ctx, root, "HEAD") {
-		return "HEAD", false, true
+		return "HEAD", "uncommitted (vs HEAD)", true
 	}
-	return "", false, false
+	return "", "", false
 }
 
 func replayGitRefExists(ctx context.Context, root string, ref string) bool {
