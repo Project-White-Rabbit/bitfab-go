@@ -114,10 +114,12 @@ func replayErrorJSON(err error) any {
 
 // ReplayResult contains every replayed item and the experiment it created.
 type ReplayResult struct {
-	Attempts      int          `json:"attempts"`
-	Items         []ReplayItem `json:"items"`
-	ExperimentID  string       `json:"experimentId"`
-	ExperimentURL string       `json:"experimentUrl"`
+	Attempts int          `json:"attempts"`
+	Items    []ReplayItem `json:"items"`
+	// ExperimentID and ExperimentURL are empty for a dry run, which executes
+	// nothing and so creates no experiment.
+	ExperimentID  string `json:"experimentId"`
+	ExperimentURL string `json:"experimentUrl"`
 	// Deprecated: Use ExperimentID instead.
 	TestRunID string `json:"testRunId"`
 	// Deprecated: Use ExperimentURL instead.
@@ -594,7 +596,10 @@ func (c *Client) Replay(
 			start.Items = append(start.Items, source)
 		}
 	}
-	experimentURL := c.replayURL(start.ExperimentURL)
+	experimentURL := ""
+	if start.ExperimentID != "" {
+		experimentURL = c.replayURL(start.ExperimentURL)
+	}
 	result := ReplayResult{
 		Attempts:      resolved.Attempts,
 		Items:         make([]ReplayItem, len(start.Items)),
@@ -603,7 +608,7 @@ func (c *Client) Replay(
 		TestRunID:     start.ExperimentID,
 		TestRunURL:    experimentURL,
 	}
-	if resolved.OnExperimentStart != nil {
+	if resolved.OnExperimentStart != nil && result.ExperimentID != "" {
 		safelyCall(func() {
 			resolved.OnExperimentStart(ReplayExperimentStart{ExperimentID: result.ExperimentID, ExperimentURL: result.ExperimentURL})
 		})
@@ -623,7 +628,11 @@ func (c *Client) Replay(
 		c.runReplayItems(ctx, traceFunctionKey, callable, resolved, start, localTraceIDs, &result)
 	}
 	if resolved.DryRun {
-		_, _ = c.completeReplay(ctx, start.ExperimentID)
+		// Current servers create no experiment for a dry run. An older one still
+		// does, and that experiment is finalized so it does not sit unfinished.
+		if start.ExperimentID != "" {
+			_, _ = c.completeReplay(ctx, start.ExperimentID)
+		}
 		if err := writeReplayResultFile(result); err != nil {
 			log.Printf("Bitfab: %v", err)
 		}
@@ -831,6 +840,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if gitState := resolvedGitState(ctx); gitState != nil {
 		payload["git"] = gitState
 	}
+	if options.DryRun {
+		payload["dryRun"] = true
+	}
 
 	timeout := 30 * time.Second
 	if options.DBBranch != nil && !options.DryRun {
@@ -854,7 +866,8 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if start.ExperimentURL == "" {
 		start.ExperimentURL = start.LegacyExperimentURL
 	}
-	if start.ExperimentID == "" {
+	// A dry run is the one start the server answers without an experiment.
+	if start.ExperimentID == "" && !options.DryRun {
 		return startReplayResponse{}, fmt.Errorf("bitfab: start replay response omitted the experiment ID")
 	}
 	return start, nil

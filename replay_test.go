@@ -377,6 +377,37 @@ func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
 	}
 }
 
+func TestReplayDryRunAsksForNoExperimentAndNeverTouchesOne(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{startReply: map[string]any{
+		"experimentId":  nil,
+		"experimentUrl": nil,
+		"testRunId":     nil,
+		"testRunUrl":    nil,
+	}}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	started := false
+	result, err := client.Replay(context.Background(), "dry", func(string, int) { t.Error("dry run executed") }, &ReplayOptions{
+		DryRun:            true,
+		OnExperimentStart: func(ReplayExperimentStart) { started = true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.startBody["dryRun"] != true {
+		t.Fatalf("start body did not ask for a dry run: %v", state.startBody)
+	}
+	if result.ExperimentID != "" || result.ExperimentURL != "" || len(result.Items) != 2 {
+		t.Fatalf("unexpected dry run result: %+v", result)
+	}
+	if started || state.completeBody != nil || state.statusCalls != 0 {
+		t.Fatalf("dry run touched an experiment: started=%v complete=%v status=%d", started, state.completeBody, state.statusCalls)
+	}
+}
+
 func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
 	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
