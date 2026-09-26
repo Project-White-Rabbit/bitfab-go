@@ -1,10 +1,12 @@
 package bitfab
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -690,5 +692,69 @@ func TestReplayOmitsMetadataWhenUnset(t *testing.T) {
 		if present {
 			t.Errorf("start body should omit metadata %#v", metadata)
 		}
+	}
+}
+
+func TestReplayJudgesAssertionsByDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		skip    bool
+		judge   bool
+		present bool
+	}{
+		{"default sends judgeAssertions", false, false, true},
+		{"skip omits judgeAssertions", true, false, false},
+		{"skip wins over the deprecated judge option", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &replayTestServerState{}
+			server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+			defer server.Close()
+			client := newTestClient(server.URL)
+			defer client.Close(5 * time.Second)
+
+			options := &ReplayOptions{DisableCodeChangeCapture: true, SkipAssertionJudging: tc.skip, JudgeAssertions: tc.judge}
+			if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
+				t.Fatalf("Replay returned error: %v", err)
+			}
+
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			value, present := state.startBody["judgeAssertions"]
+			if present != tc.present || (present && value != true) {
+				t.Fatalf("judgeAssertions = %#v (present %v), want present %v", value, present, tc.present)
+			}
+		})
+	}
+}
+
+func TestReplayDeprecatedJudgeAssertionsSendsJudgingAndWarnsOnce(t *testing.T) {
+	resetWarnOnce()
+	defer resetWarnOnce()
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previous)
+
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	for range 2 {
+		options := &ReplayOptions{DisableCodeChangeCapture: true, JudgeAssertions: true}
+		if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
+			t.Fatalf("Replay returned error: %v", err)
+		}
+		state.mu.Lock()
+		got := state.startBody["judgeAssertions"]
+		state.mu.Unlock()
+		if got != true {
+			t.Fatalf("judgeAssertions = %#v, want true", got)
+		}
+	}
+	if count := strings.Count(logs.String(), judgeAssertionsDeprecation); count != 1 {
+		t.Fatalf("deprecation warnings = %d, want 1; logs: %s", count, logs.String())
 	}
 }

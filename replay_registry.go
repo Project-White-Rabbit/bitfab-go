@@ -90,7 +90,7 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 type registryCLIArgs struct {
 	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
 	limit, attempts, concurrency                                                                                                      int
-	assertions, judge, dryRun, failOnError, dbBranch, noDBBranch, noCodeChange, run                                                   bool
+	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, noCodeChange, run                                      bool
 	parameters                                                                                                                        []string
 	metadata                                                                                                                          map[string]string
 	visited                                                                                                                           map[string]bool
@@ -128,7 +128,8 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.executeItem, "execute-item", "", "internal replay assignment")
 	fs.StringVar(&out.fromTrace, "from-trace", "", "trace IDs to reseed")
 	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
-	fs.BoolVar(&out.judge, "judge-assertions", false, "judge each replay's approved assertions as it finishes (costs model calls)")
+	fs.BoolVar(&out.judge, "judge-assertions", false, "deprecated: judging is on by default")
+	fs.BoolVar(&out.skipJudging, "skip-assertion-judging", false, "don't judge approved assertions on each replay; judging is on by default and costs model calls")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
 	fs.BoolVar(&out.failOnError, "fail-on-error", false, "return an error after printing the result when any replayed item errored; under --dry-run, items whose inputs failed to resolve count")
 	fs.BoolVar(&out.dbBranch, "db-branch", false, "use historical database branches")
@@ -351,7 +352,10 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 			options.OnlyWithAssertions = parsed.assertions
 		}
 		if parsed.visited["judge-assertions"] {
-			options.JudgeAssertions = parsed.judge
+			fmt.Fprintln(stderr, "bitfab: --judge-assertions is deprecated. Assertion judging is on by default; pass --skip-assertion-judging to turn it off.")
+		}
+		if parsed.visited["skip-assertion-judging"] && parsed.skipJudging {
+			options.SkipAssertionJudging = true
 		}
 		bound := options.Limit
 		if parsed.visited["limit"] {

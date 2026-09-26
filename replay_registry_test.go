@@ -291,7 +291,7 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 	}
 }
 
-func TestReplayRegistryCLIJudgeAssertions(t *testing.T) {
+func TestReplayRegistryCLISkipAssertionJudging(t *testing.T) {
 	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	for _, tc := range []struct {
 		name       string
@@ -299,9 +299,9 @@ func TestReplayRegistryCLIJudgeAssertions(t *testing.T) {
 		args       []string
 		want       any
 	}{
-		{"flag sends it", false, []string{"pipeline", "--judge-assertions"}, true},
-		{"absent flag omits it", false, []string{"pipeline"}, nil},
-		{"absent flag keeps a registered value", true, []string{"pipeline"}, true},
+		{"flag omits judging", false, []string{"pipeline", "--skip-assertion-judging"}, nil},
+		{"absent flag keeps judging on", false, []string{"pipeline"}, true},
+		{"absent flag keeps a registered skip", true, []string{"pipeline"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := &replayTestServerState{}
@@ -310,11 +310,48 @@ func TestReplayRegistryCLIJudgeAssertions(t *testing.T) {
 			client := newTestClient(server.URL)
 			defer client.Close(time.Second)
 			registry := NewReplayRegistry()
-			if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone, JudgeAssertions: tc.registered}}); err != nil {
+			if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone, SkipAssertionJudging: tc.registered}}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := RunReplayCLI(context.Background(), registry, tc.args, io.Discard, io.Discard); err != nil {
 				t.Fatal(err)
+			}
+			state.mu.Lock()
+			got := state.startBody["judgeAssertions"]
+			state.mu.Unlock()
+			if got != tc.want {
+				t.Fatalf("judgeAssertions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReplayRegistryCLIDeprecatedJudgeAssertionsWarnsAndChangesNothing(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	for _, tc := range []struct {
+		name string
+		skip bool
+		want any
+	}{
+		{"judging stays on", false, true},
+		{"registered skip still wins", true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &replayTestServerState{}
+			server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+			defer server.Close()
+			client := newTestClient(server.URL)
+			defer client.Close(time.Second)
+			registry := NewReplayRegistry()
+			if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone, SkipAssertionJudging: tc.skip}}); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--judge-assertions"}, io.Discard, &stderr); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stderr.String(), "--judge-assertions is deprecated") || !strings.Contains(stderr.String(), "--skip-assertion-judging") {
+				t.Fatalf("stderr = %q, want a deprecation warning naming --skip-assertion-judging", stderr.String())
 			}
 			state.mu.Lock()
 			got := state.startBody["judgeAssertions"]

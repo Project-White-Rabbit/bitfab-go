@@ -186,15 +186,13 @@ type ReplayOptions struct {
 	Concurrency                 *ReplayConcurrency
 	processCommand              *replayProcessCommand
 	// Attempts repeats each selected trace 1–100 times. Zero defaults to one.
-	Attempts           int
-	OnlyWithAssertions bool
-	// JudgeAssertions judges every approved assertion on each replay as it
-	// finishes and saves the verdict as that assertion's agent label. Off
-	// unless asked: each judgement costs model calls.
-	JudgeAssertions bool
-	DryRun          bool
-	Limit           int
-	TraceIDs        []string
+	Attempts             int
+	OnlyWithAssertions   bool
+	SkipAssertionJudging bool
+	JudgeAssertions      bool
+	DryRun               bool
+	Limit                int
+	TraceIDs             []string
 	// What this run is testing, in a few words, such as 'baseline' or
 	// 'shorter system prompt'. Bitfab records the commit, branch, tree state,
 	// datasets, and who ran it with every experiment, so do not repeat them
@@ -560,6 +558,9 @@ func (c *Client) Replay(
 	if err != nil {
 		return ReplayResult{}, err
 	}
+	if resolved.JudgeAssertions {
+		warnOnce("judge-assertions-deprecated", judgeAssertionsDeprecation)
+	}
 	if resolved.CodeChangeFiles == nil && !resolved.DisableCodeChangeCapture {
 		if captured := resolveAutoCodeChange(ctx, resolved.Name); captured != nil {
 			resolved.CodeChangeFiles = captured.Files
@@ -655,6 +656,8 @@ func (c *Client) Replay(
 	}
 	return result, nil
 }
+
+const judgeAssertionsDeprecation = "JudgeAssertions is deprecated. Assertion judging is on by default; set SkipAssertionJudging to turn it off."
 
 func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 	resolved := ReplayOptions{
@@ -775,7 +778,7 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if options.OnlyWithAssertions {
 		payload["onlyWithAssertions"] = true
 	}
-	if options.JudgeAssertions {
+	if !options.SkipAssertionJudging {
 		payload["judgeAssertions"] = true
 	}
 	if options.AdaptInputs != nil {
