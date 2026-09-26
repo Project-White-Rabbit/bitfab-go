@@ -90,7 +90,7 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 type registryCLIArgs struct {
 	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
 	limit, attempts, concurrency                                                                                                      int
-	assertions, judge, dryRun, dbBranch, noDBBranch, noCodeChange, run                                                                bool
+	assertions, judge, dryRun, failOnError, dbBranch, noDBBranch, noCodeChange, run                                                   bool
 	parameters                                                                                                                        []string
 	metadata                                                                                                                          map[string]string
 	visited                                                                                                                           map[string]bool
@@ -130,6 +130,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
 	fs.BoolVar(&out.judge, "judge-assertions", false, "judge each replay's approved assertions as it finishes (costs model calls)")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
+	fs.BoolVar(&out.failOnError, "fail-on-error", false, "return an error after printing the result when any replayed item errored; under --dry-run, items whose inputs failed to resolve count")
 	fs.BoolVar(&out.dbBranch, "db-branch", false, "use historical database branches")
 	fs.BoolVar(&out.noDBBranch, "no-db-branch", false, "disable historical database branches")
 	fs.BoolVar(&out.noCodeChange, "no-code-change", false, "disable code change capture")
@@ -517,6 +518,28 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	if err != nil {
 		return result, err
 	}
-	_, err = fmt.Fprintln(stdout, encoded)
-	return result, err
+	if _, err = fmt.Fprintln(stdout, encoded); err != nil {
+		return result, err
+	}
+	if parsed.failOnError {
+		return result, erroredItemsError(result, options.DryRun)
+	}
+	return result, nil
+}
+
+func erroredItemsError(result ReplayResult, dryRun bool) error {
+	errored := 0
+	for _, item := range result.Items {
+		if item.Error != nil {
+			errored++
+		}
+	}
+	if errored == 0 {
+		return nil
+	}
+	noun := "replayed"
+	if dryRun {
+		noun = "resolved"
+	}
+	return fmt.Errorf("[replay] %d of %d %s items errored; exiting 1 because of --fail-on-error", errored, len(result.Items), noun)
 }

@@ -47,11 +47,55 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 PIPELINE = re.compile(r"^[\w.][\w.-]*$")
 # Every SDK's replay prints this to stderr as soon as the server creates the experiment.
 EXPERIMENT_LINE = re.compile(rb"^\[replay\] Experiment ([0-9a-f-]{36}):")
+ITEM_ID_FIELDS = ("originalTraceId", "original_trace_id", "traceId", "trace_id")
+ITEM_ERROR_LINES = 20
+ITEM_ERROR_LENGTH = 500
+OUTPUT_TAIL_LENGTH = 4000
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CLOUD_VALUE_FLAGS = (
+    "--registry",
+    "--trace-ids",
+    "--max-concurrency",
+    "--cloud-status",
+    "--cloud-watch",
+    "--cloud-cancel",
+    "--cloud-cleanup",
+    "--cloud-request-id",
+    "--cloud-include",
+    "--cloud-timeout",
+)
+CLOUD_SWITCHES = (
+    "--cloud",
+    "--cloud-dry-run",
+    "--cloud-detach",
+    "--cloud-check",
+    "--fail-on-error",
+    "-h",
+    "--help",
+)
+RUNNER_OWNED_FLAGS = {
+    "--dry-run": "use --cloud-dry-run to review the snapshot or --cloud-check to resolve traces on the runner",
+    "--seed": "seed locally",
+    "--cases": "seed locally",
+    "--from-trace": "seed locally",
+    "--run": "seed locally",
+}
+PATH_FLAGS = ("--params", "--code-change")
+SELECTION_FLAGS = ("--dataset-ids", "--dataset-id", "--resume")
 HELP = """GitHub cloud replay (requires git, gh login, and Python 3.10+).
   --cloud PIPELINE --trace-ids UUID[,UUID] [--registry PATH]
     [--max-concurrency 1..32] [--cloud-request-id UUID]
     [--cloud-include PATH ...] [--cloud-dry-run] [--cloud-detach]
-    [--cloud-timeout MINUTES]
+    [--cloud-timeout MINUTES] [--cloud-check] [--fail-on-error] [REPLAY OPTIONS]
+  Every other replay option after the pipeline, such as --name, --dataset-ids,
+    --attempts, --mock, or --resume, is passed to the replay on the runner as
+    given. --params and --code-change files must be in the snapshot.
+    --registry comes from .bitfab/cloud.json; --dry-run and seeding stay local.
+    Select traces with --trace-ids (1..100 UUIDs), --dataset-ids, or --resume.
+  --fail-on-error exits 1 locally when any replayed item errored.
+  --cloud-check runs on GitHub without replaying anything: it checks that every
+    configured secret has a value, runs cloud.json's checkCommand when set, and
+    resolves the traces with the replay's --dry-run to load the registry.
   --cloud-status UUID | --cloud-watch UUID | --cloud-cancel UUID
   --cloud-cleanup UUID
   --cloud-init [--config SPEC]   (creates a setup, or brings an existing one up to date)
@@ -62,6 +106,12 @@ New files require explicit --cloud-include. Credentials and ignored files are re
 By default wait for completion and remove the remote snapshot branch. Detached runs
 continue on GitHub; watch/status/cleanup can recover them using the printed UUID.
 """
+
+
+class CommandError(RuntimeError):
+    def __init__(self, message, http_status=None):
+        super().__init__(message)
+        self.http_status = http_status
 
 
 def command(args, *, cwd=None, env=None, timeout=60, input=None):
@@ -77,8 +127,13 @@ def command(args, *, cwd=None, env=None, timeout=60, input=None):
     )
     if result.returncode:
         # Child errors can contain credential-bearing URLs or application output.
-        raise RuntimeError(
-            f"{args[0]} {args[1]} failed (exit {result.returncode}); check authentication and permissions"
+        status = re.search(r"\bHTTP (\d{3})\b", result.stderr or "")
+        http_status = int(status[1]) if status else None
+        raise CommandError(
+            f"{args[0]} {args[1]} failed (exit {result.returncode}"
+            + (f", HTTP {http_status}" if http_status else "")
+            + "); check authentication and permissions",
+            http_status,
         )
     return result.stdout.strip()
 
@@ -213,10 +268,10 @@ def configure_secrets(argv):
     args = parser.parse_args(argv)
     root = root_directory()
     config = configuration(root)
-    prefix = config.get("secretPrefix", "")
-    names = args.names or config.get("secrets") or ["BITFAB_API_KEY"]
-    if not all(re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) for name in names):
-        raise ValueError("Secret names must be uppercase environment variable names")
+    targets = secret_targets(config)
+    names = args.names or list(targets) or ["BITFAB_API_KEY"]
+    if not all(ENV_NAME.fullmatch(name) for name in names):
+        raise ValueError("Secret names must be environment variable names")
     values = {}
     for path in args.env_file:
         for key, value in parse_environment_file(
@@ -228,14 +283,15 @@ def configure_secrets(argv):
     missing = []
     empty = []
     for name in names:
-        value = values.get(name)
+        target = targets.get(name, config.get("secretPrefix", "") + name)
+        renamed = "secret" in config.get("env", {}).get(name, {})
+        value = values.get(target, values.get(name)) if renamed else values.get(name)
         if value is None:
             missing.append(name)
             continue
         if not value:
             empty.append(name)
             continue
-        target = prefix + name
         if not args.dry_run:
             command(
                 [
@@ -259,6 +315,48 @@ def configure_secrets(argv):
         "empty": empty,
         "next": "Create the missing secrets by hand; empty local values were skipped because an empty secret overrides a working default with nothing; a wrong value only surfaces when the first real replay runs",
     }
+
+
+def secret_targets(config):
+    prefix = config.get("secretPrefix", "")
+    targets = {name: prefix + name for name in config.get("secrets", [])}
+    for name, source in config.get("env", {}).items():
+        if "secret" in source:
+            targets[name] = source["secret"]
+    return targets
+
+
+def runner_env(config):
+    env = {
+        name: "${{ secrets." + target + " }}"
+        for name, target in secret_targets(config).items()
+    }
+    for name, source in config.get("env", {}).items():
+        if "variable" in source:
+            env[name] = "${{ vars." + source["variable"] + " }}"
+    return env
+
+
+def validate_env(mapping, secrets):
+    if not isinstance(mapping, dict):
+        raise ValueError(
+            'env must map environment variable names to {"secret": NAME} or {"variable": NAME}'
+        )
+    for name, source in mapping.items():
+        if not ENV_NAME.fullmatch(name) or name in RUNNER_ENV:
+            raise ValueError(f"env cannot set {name}")
+        if name in secrets:
+            raise ValueError(f"{name} is in both secrets and env; list it once")
+        if (
+            not isinstance(source, dict)
+            or len(source) != 1
+            or next(iter(source)) not in ("secret", "variable")
+            or not isinstance(next(iter(source.values())), str)
+            or not ENV_NAME.fullmatch(next(iter(source.values())))
+        ):
+            raise ValueError(
+                f'env.{name} must be {{"secret": "GITHUB_SECRET_NAME"}} or {{"variable": "GITHUB_VARIABLE_NAME"}}'
+            )
 
 
 def validate_config(config):
@@ -304,6 +402,18 @@ def validate_config(config):
         for name in names
     ):
         raise ValueError("secrets must be uppercase environment variable names")
+    validate_env(config.get("env", {}), names)
+    if "checkCommand" in config:
+        check = config["checkCommand"]
+        if (
+            not isinstance(check, list)
+            or not check
+            or not all(isinstance(v, str) and v and "\x00" not in v for v in check)
+            or any(v.startswith("--cloud") for v in check)
+        ):
+            raise ValueError(
+                "checkCommand must be a nonempty JSON argument array that runs locally"
+            )
 
 
 def validate_cli_command(cli_command):
@@ -355,7 +465,53 @@ def api(repo, suffix, *, method="GET", payload=None):
     return json.loads(result) if result else None
 
 
+def split_replay_options(argv):
+    cloud, options = [], []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        name = token.split("=", 1)[0]
+        if name in CLOUD_VALUE_FLAGS:
+            step = 1 if "=" in token else 2
+            cloud += argv[index : index + step]
+            index += step
+        elif name in CLOUD_SWITCHES:
+            cloud.append(token)
+            index += 1
+        elif token.startswith("-"):
+            if name in RUNNER_OWNED_FLAGS:
+                raise ValueError(
+                    f"{name} is not sent to the runner; {RUNNER_OWNED_FLAGS[name]}"
+                )
+            options += token.split("=", 1) if token.startswith("--") else [token]
+            index += 1
+            following = argv[index] if index < len(argv) else None
+            if (
+                "=" not in token
+                and following is not None
+                and not following.startswith("-")
+            ):
+                options.append(following)
+                index += 1
+        elif options:
+            raise ValueError(
+                "Put the pipeline right after --cloud, before replay options"
+            )
+        else:
+            cloud.append(token)
+            index += 1
+    for value in options:
+        if not value or "\x00" in value or "\n" in value or len(value) > 1000:
+            raise ValueError(
+                "Replay options must be single-line values of at most 1000 characters"
+            )
+    if sum(len(value) for value in options) > 16000:
+        raise ValueError("Replay options exceed 16000 characters")
+    return cloud, options
+
+
 def parse(argv):
+    argv, options = split_replay_options(argv)
     flags = [value.split("=", 1)[0] for value in argv if value.startswith("--")]
     if any(flags.count(flag) > 1 for flag in flags if flag != "--cloud-include"):
         raise ValueError("Duplicate cloud option")
@@ -376,25 +532,35 @@ def parse(argv):
     parser.add_argument("--cloud-dry-run", action="store_true")
     parser.add_argument("--cloud-detach", action="store_true")
     parser.add_argument("--cloud-timeout", type=int)
+    parser.add_argument("--cloud-check", action="store_true")
+    parser.add_argument("--fail-on-error", action="store_true")
     args = parser.parse_args(argv)
+    args.options = options
     operations = [
         name
         for name in ("status", "watch", "cancel", "cleanup")
         if getattr(args, "cloud_" + name)
     ]
     if operations:
-        if len(operations) != 1 or len(argv) != 2:
+        if len(operations) != 1 or len(argv) != 2 or options:
             raise ValueError("Cloud lifecycle commands take only their execution UUID")
         operation = operations[0]
         execution_id = getattr(args, "cloud_" + operation)
     else:
-        if not args.cloud or not args.pipeline or not args.trace_ids:
+        if not args.cloud or not args.pipeline:
             raise ValueError(HELP)
+        if not args.trace_ids and not any(flag in options for flag in SELECTION_FLAGS):
+            raise ValueError(
+                "Select traces with --trace-ids, --dataset-ids, or --resume"
+            )
         operation = "submit"
         execution_id = args.cloud_request_id or str(uuid.uuid4())
-        traces = args.trace_ids.split(",")
-        if not 1 <= len(traces) <= 100 or not all(UUID.fullmatch(t) for t in traces):
-            raise ValueError("Supply 1..100 explicit trace UUIDs")
+        if args.trace_ids is not None:
+            traces = args.trace_ids.split(",")
+            if not 1 <= len(traces) <= 100 or not all(
+                UUID.fullmatch(t) for t in traces
+            ):
+                raise ValueError("Supply 1..100 explicit trace UUIDs")
         if not 1 <= args.max_concurrency <= 32:
             raise ValueError("--max-concurrency must be 1..32")
         # Self-hosted runners allow jobs of up to 5 days; GitHub-hosted ones stop at 6 hours.
@@ -403,6 +569,28 @@ def parse(argv):
     if not UUID.fullmatch(execution_id):
         raise ValueError("Execution ID must be a UUID")
     return args, operation, execution_id
+
+
+def option_paths(options):
+    return [value for flag, value in zip(options, options[1:]) if flag in PATH_FLAGS]
+
+
+def map_option_paths(options, convert):
+    mapped = list(options)
+    for index, flag in enumerate(options[:-1]):
+        if flag in PATH_FLAGS:
+            mapped[index + 1] = convert(options[index + 1])
+    return mapped
+
+
+def repository_path(root, value):
+    try:
+        path = Path(value).resolve().relative_to(root).as_posix()
+    except ValueError as error:
+        raise ValueError(f"{value} must be inside the repository") from error
+    if sensitive(path):
+        raise ValueError(f"Refusing credential-like file: {value}")
+    return path
 
 
 def sensitive(path):
@@ -428,7 +616,7 @@ def sensitive(path):
     )
 
 
-def snapshot(root, config, args, execution_id):
+def snapshot(root, config, args, execution_id, files=()):
     if git(root, "ls-files", "-u"):
         raise ValueError("Resolve merge conflicts before snapshotting")
     head = git(root, "rev-parse", "HEAD")
@@ -465,7 +653,7 @@ def snapshot(root, config, args, execution_id):
                 raise ValueError(
                     f"Refusing credential-like tracked file in snapshot: {path}"
                 )
-        required = [CONFIG, f".github/workflows/{config['workflow']}"]
+        required = [CONFIG, f".github/workflows/{config['workflow']}", *files]
         if config.get("registry") is not None:
             required.append(config["registry"])
         tracked = set(
@@ -585,6 +773,7 @@ def status(record, *, fetch_result=True):
         fetch_result
         and record["state"] == "completed"
         and not record.get("testRunId")
+        and not record.get("check")
         and not record.get("resultChecked")
     ):
         success = record["conclusion"] == "success"
@@ -599,8 +788,17 @@ def status(record, *, fetch_result=True):
         if (
             result.get("executionId") != record["id"]
             or result.get("commitSha") != record["sha"]
-            or not UUID.fullmatch(result.get("testRunId", ""))
         ):
+            raise ValueError("Replay result does not match this execution")
+        if record["request"].get("check"):
+            if result.get("check") != "passed" or not isinstance(
+                result.get("resolved"), int
+            ):
+                raise ValueError("Cloud check result does not match this execution")
+            record["check"] = "passed"
+            record["resolved"] = result["resolved"]
+            return record
+        if not UUID.fullmatch(result.get("testRunId", "")):
             raise ValueError("Replay result does not match this execution")
         counts = replay_counts(result)
         record["testRunId"] = result["testRunId"]
@@ -688,16 +886,35 @@ def cleanup(root, record):
     record["cleaned"] = True
 
 
+def http_status(error):
+    status = getattr(error, "http_status", None)
+    return f" (HTTP {status})" if status else ""
+
+
 def preflight(repo, config):
-    info = api(repo, "")
-    workflow = api(repo, f"actions/workflows/{config['workflow']}")
+    try:
+        command(["gh", "auth", "status", "--hostname", "github.com"])
+    except RuntimeError as error:
+        raise ValueError(
+            "gh is not logged in to github.com; run gh auth login"
+        ) from error
+    try:
+        api(repo, "")
+    except RuntimeError as error:
+        raise ValueError(
+            f"The gh account cannot read {repo}{http_status(error)}; log in with an account that has write access to it"
+        ) from error
+    path = f".github/workflows/{config['workflow']}"
+    try:
+        workflow = api(repo, f"actions/workflows/{config['workflow']}")
+    except RuntimeError as error:
+        raise ValueError(
+            f"GitHub Actions has not registered {path}{http_status(error)}; merging it to the default branch once registers it, and after that each replay runs the copy in its own snapshot"
+        ) from error
     if workflow.get("state") != "active":
-        raise ValueError("Replay workflow must be active")
-    api(
-        repo,
-        f"contents/.github/workflows/{config['workflow']}?"
-        + urlencode({"ref": info["default_branch"]}),
-    )
+        raise ValueError(
+            f"{path} is {workflow.get('state')}; enable it in the repository's Actions tab"
+        )
 
 
 def run_cli(argv):
@@ -717,19 +934,27 @@ def run_cli(argv):
                 registry = Path(args.registry).resolve().relative_to(root).as_posix()
                 if registry != config.get("registry"):
                     raise ValueError("Registry does not match .bitfab/cloud.json")
+            options = map_option_paths(
+                args.options, lambda value: repository_path(root, value)
+            )
             request = {
                 "id": execution_id,
                 "pipeline": args.pipeline,
-                "traceIds": args.trace_ids.split(","),
                 "maxConcurrency": args.max_concurrency,
             }
+            if args.trace_ids is not None:
+                request["traceIds"] = args.trace_ids.split(",")
+            if options:
+                request["options"] = options
+            if args.cloud_check:
+                request["check"] = True
             if args.cloud_timeout is not None:
                 request["timeoutMinutes"] = args.cloud_timeout
             if args.cloud_dry_run:
                 return {
                     "dryRun": True,
                     "repository": repo,
-                    **snapshot(root, config, args, execution_id),
+                    **snapshot(root, config, args, execution_id, option_paths(options)),
                 }
             if path.exists():
                 record = json.loads(path.read_text())
@@ -747,9 +972,10 @@ def run_cli(argv):
                         "Submission stopped before dispatch. Use --cloud-cleanup, then submit a new execution UUID"
                     )
             else:
-                command(["gh", "auth", "status", "--hostname", "github.com"])
                 preflight(repo, config)
-                source = snapshot(root, config, args, execution_id)
+                source = snapshot(
+                    root, config, args, execution_id, option_paths(options)
+                )
                 record = {
                     "id": execution_id,
                     "repository": repo,
@@ -759,6 +985,8 @@ def run_cli(argv):
                     "state": "prepared",
                     **source,
                 }
+                if args.fail_on_error:
+                    record["failOnError"] = True
                 save(path, record)
                 print(
                     f"Cloud execution {execution_id}. Recover with --cloud-status {execution_id}",
@@ -766,26 +994,39 @@ def run_cli(argv):
                     flush=True,
                 )
                 ref = "refs/heads/" + record["branch"]
-                # Empty lease asserts that the temporary remote branch does not exist.
-                git(
-                    root,
-                    "push",
-                    f"--force-with-lease={ref}:",
-                    "origin",
-                    f"{record['sha']}:{ref}",
-                )
+                try:
+                    # Empty lease asserts that the temporary remote branch does not exist.
+                    git(
+                        root,
+                        "push",
+                        f"--force-with-lease={ref}:",
+                        "origin",
+                        f"{record['sha']}:{ref}",
+                    )
+                except RuntimeError as error:
+                    raise ValueError(
+                        f"Pushing the snapshot branch {record['branch']} to origin failed; check that git can push to {repo}"
+                    ) from error
                 record["state"] = "dispatch_unknown"
                 save(path, record)
                 encoded = base64.b64encode(json.dumps(request).encode()).decode()
-                response = api(
-                    repo,
-                    f"actions/workflows/{config['workflow']}/dispatches",
-                    method="POST",
-                    payload={
-                        "ref": record["branch"],
-                        "inputs": {"execution_id": execution_id, "request": encoded},
-                    },
-                )
+                try:
+                    response = api(
+                        repo,
+                        f"actions/workflows/{config['workflow']}/dispatches",
+                        method="POST",
+                        payload={
+                            "ref": record["branch"],
+                            "inputs": {
+                                "execution_id": execution_id,
+                                "request": encoded,
+                            },
+                        },
+                    )
+                except RuntimeError as error:
+                    raise ValueError(
+                        f"Dispatching {config['workflow']} on {record['branch']} failed{http_status(error)}; the gh account needs write access to Actions, and the registered workflow must accept workflow_dispatch. Check the Actions tab, then resume with --cloud-status {execution_id}"
+                    ) from error
                 if isinstance(response, dict) and response.get("workflow_run_id"):
                     record["runId"] = response["workflow_run_id"]
                     record["url"] = response.get("html_url")
@@ -853,30 +1094,44 @@ def execute():
     if request["id"] != os.environ["BITFAB_EXECUTION_ID"]:
         raise ValueError("Replay request does not match the configured execution")
     timeout = request.get("timeoutMinutes")
-    parse(
+    traces = (
+        ["--trace-ids", ",".join(request["traceIds"])] if "traceIds" in request else []
+    )
+    options = request.get("options", [])
+    parsed, _, _ = parse(
         [
             "--cloud",
             request["pipeline"],
-            "--trace-ids",
-            ",".join(request["traceIds"]),
+            *traces,
             "--max-concurrency",
             str(request["maxConcurrency"]),
             "--cloud-request-id",
             request["id"],
             *([] if timeout is None else ["--cloud-timeout", str(timeout)]),
+            *(["--cloud-check"] if request.get("check") else []),
+            *options,
         ]
     )
-    if not os.environ.get("BITFAB_API_KEY"):
-        raise ValueError("Configure the BITFAB_API_KEY GitHub secret")
+    if parsed.options != options:
+        raise ValueError("Replay options were not in the form the SDK sends")
+    check_secrets(config)
     args = [
         *config["command"],
         request["pipeline"],
-        "--trace-ids",
-        ",".join(request["traceIds"]),
+        *traces,
         "--max-concurrency",
         str(request["maxConcurrency"]),
-        "--no-code-change",
+        *map_option_paths(options, lambda value: snapshot_file(root, value)),
+        *(
+            []
+            if "--code-change" in options or "--no-code-change" in options
+            else ["--no-code-change"]
+        ),
     ]
+    if request.get("check"):
+        summary = run_check(root, config, request, args)
+        write_result(summary)
+        return summary
     experiment = {}
     # GitHub cancels and times out a job with SIGINT then SIGTERM; turn SIGTERM into the
     # same interrupt so the replay is stopped cleanly and its experiment is still reported.
@@ -900,6 +1155,96 @@ def execute():
     return summary
 
 
+def snapshot_file(root, value):
+    path = within(root, value)
+    if sensitive(value) or not path.is_file():
+        raise ValueError(f"{value} is not a file in the replay snapshot")
+    return str(path)
+
+
+def check_secrets(config):
+    targets = {"BITFAB_API_KEY": "BITFAB_API_KEY", **secret_targets(config)}
+    empty = [name for name in targets if not os.environ.get(name)]
+    if empty:
+        raise ValueError(
+            "These replay environment variables are empty on the runner: "
+            + ", ".join(f"{name} (secret {targets[name]})" for name in empty)
+            + ". GitHub passes a secret that does not exist as an empty string. Create each one under Settings, Secrets and variables, Actions, in the repository or in the job's Environment"
+        )
+
+
+def run_check(root, config, request, args):
+    directory = within(root, config["workingDirectory"])
+    if config.get("checkCommand"):
+        print(f"Running checkCommand: {shlex.join(config['checkCommand'])}", flush=True)
+        code = subprocess.run(
+            config["checkCommand"], cwd=directory, stdin=subprocess.DEVNULL, check=False
+        ).returncode
+        if code:
+            raise ValueError(f"checkCommand exited {code}; its output is above")
+    result = run_command(root, config, [*args, "--dry-run"], None, {})
+    items = result.get("items")
+    if not isinstance(items, list):
+        raise ValueError("The replay dry run did not return its resolved items")
+    errors = item_errors(items)
+    report_item_errors(errors)
+    if errors:
+        raise ValueError(
+            f"{len(errors)} of {len(items)} traces failed to resolve; the errors are above"
+        )
+    return {
+        "executionId": request["id"],
+        "commitSha": os.environ["GITHUB_SHA"],
+        "check": "passed",
+        "resolved": len(items),
+    }
+
+
+def item_errors(items):
+    errors = []
+    for item in items:
+        if not item_errored(item):
+            continue
+        error = next(
+            item[field] for field in ITEM_ERROR_FIELDS if item.get(field) is not None
+        )
+        if isinstance(error, dict):
+            error = error.get("message") or json.dumps(error)
+        trace = next(
+            (
+                item[field]
+                for field in ITEM_ID_FIELDS
+                if isinstance(item.get(field), str)
+            ),
+            "unknown trace",
+        )
+        text = " ".join(str(error).split())
+        if len(text) > ITEM_ERROR_LENGTH:
+            text = text[:ITEM_ERROR_LENGTH] + "..."
+        errors.append((trace, text))
+    return errors
+
+
+def report_item_errors(errors):
+    if not errors:
+        return
+    shown = errors[:ITEM_ERROR_LINES]
+    lines = [f"trace {trace}: {text}" for trace, text in shown]
+    if len(errors) > len(shown):
+        lines.append(f"and {len(errors) - len(shown)} more errored items")
+    print("Errored items:", file=sys.stderr)
+    for line in lines:
+        print("  " + line, file=sys.stderr)
+    sys.stderr.flush()
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a") as file:
+            file.write(
+                "\n#### Errored items\n\n"
+                + "".join(f"- `{line.replace('`', chr(39))}`\n" for line in lines)
+            )
+
+
 def raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
@@ -919,6 +1264,12 @@ def write_result(summary):
     # annotations, so a JSON credential alone turns each { and } into ***.
     message = base64.b64encode(json.dumps(summary).encode()).decode()
     print(f"::notice title={RESULT_TITLE}::{message}", flush=True)
+    if "check" in summary:
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
+            file.write(
+                f"### Bitfab cloud check\n\nPassed: every secret has a value and {summary['resolved']} traces resolved. Commit: `{summary['commitSha']}`\n"
+            )
+        return
     lines = [
         f"Test run: `{summary['testRunId']}`",
         f"Commit: `{summary['commitSha']}`",
@@ -934,6 +1285,43 @@ def write_result(summary):
 
 
 def run_replay(root, config, request, args, timeout, experiment):
+    result = run_command(root, config, args, timeout, experiment)
+    test_run = result.get("testRunId", result.get("test_run_id"))
+    if not isinstance(test_run, str) or not UUID.fullmatch(test_run):
+        raise ValueError("Replay did not return a valid persisted test run UUID")
+    items = result.get("items")
+    if not isinstance(items, list):
+        raise ValueError("Replay did not return its replayed items")
+    replayed = [item for item in items if not carried_over(item)]
+    errors = item_errors(replayed)
+    report_item_errors(errors)
+    return {
+        "executionId": request["id"],
+        "commitSha": os.environ["GITHUB_SHA"],
+        "testRunId": test_run,
+        "replayed": len(replayed),
+        "errored": len(errors),
+    }
+
+
+def carried_over(item):
+    return isinstance(item, dict) and (
+        item.get("carriedOver") is True or item.get("carried_over") is True
+    )
+
+
+def print_output_tail(text):
+    tail = text[-OUTPUT_TAIL_LENGTH:].strip()
+    if tail:
+        print(
+            "Last replay output:\n"
+            + "\n".join("  " + line for line in tail.splitlines()),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def run_command(root, config, args, timeout, experiment):
     with tempfile.TemporaryFile() as output:
         with subprocess.Popen(
             args,
@@ -974,9 +1362,10 @@ def run_replay(root, config, request, args, timeout, experiment):
         if output.tell() > 16 * 1024 * 1024:
             raise ValueError("Replay output exceeded 16 MiB")
         output.seek(0)
-        text = output.read().decode()
+        text = output.read().decode(errors="replace")
     if code:
-        raise ValueError(f"Replay command exited {code}; inspect the job logs")
+        print_output_tail(text)
+        raise ValueError(f"Replay command exited {code}; its output is above")
     decoder = json.JSONDecoder()
     result = None
     for offset in [0, *[i + 1 for i, value in enumerate(text) if value == "\n"]]:
@@ -987,22 +1376,10 @@ def run_replay(root, config, request, args, timeout, experiment):
                     result = value
             except json.JSONDecodeError:
                 pass
-    test_run = (
-        None if result is None else result.get("testRunId", result.get("test_run_id"))
-    )
-    if not isinstance(test_run, str) or not UUID.fullmatch(test_run):
-        raise ValueError("Replay did not return a valid persisted test run UUID")
-    items = result.get("items")
-    if not isinstance(items, list):
-        raise ValueError("Replay did not return its replayed items")
-    summary = {
-        "executionId": request["id"],
-        "commitSha": os.environ["GITHUB_SHA"],
-        "testRunId": test_run,
-        "replayed": len(items),
-        "errored": sum(1 for item in items if item_errored(item)),
-    }
-    return summary
+    if result is None:
+        print_output_tail(text)
+        raise ValueError("Replay did not print a JSON result; its output is above")
+    return result
 
 
 def item_errored(item):
@@ -1105,7 +1482,7 @@ def initialize(argv):
     )
     parser.add_argument(
         "--config",
-        help="JSON file with cloud config, cliCommand, setupSteps, optional pipeline (omit or null to allow every registry pipeline), secrets, variables, environment, services, runsOn. Required for a new setup; for an existing one only cliCommand is read, and only when the workflow does not already show it",
+        help='JSON file with cloud config, cliCommand, setupSteps, optional pipeline (omit or null to allow every registry pipeline), secrets, variables, env (runner variable names mapped to {"secret": NAME} or {"variable": NAME} for renamed secrets and repository variables), checkCommand, environment, services, runsOn. Required for a new setup; for an existing one only cliCommand is read, and only when the workflow does not already show it',
     )
     args = parser.parse_args(argv)
     spec = json.loads(Path(args.config).read_text()) if args.config else None
@@ -1134,6 +1511,15 @@ def initialize(argv):
         secret_prefix = DEFAULT_SECRET_PREFIX
     config["secrets"] = secrets
     config["secretPrefix"] = secret_prefix
+    if not isinstance(variables, list):
+        raise ValueError("variables must be a list of names")
+    env = dict(spec.get("env") or {})
+    for name in variables:
+        env.setdefault(name, {"variable": name})
+    if env:
+        config["env"] = env
+    if spec.get("checkCommand") is not None:
+        config["checkCommand"] = spec["checkCommand"]
     validate_config(config)
     validate_cli_command(spec.get("cliCommand"))
     if set(secrets) & set(variables):
@@ -1151,10 +1537,8 @@ def initialize(argv):
         or not all(isinstance(step, dict) for step in steps)
     ):
         raise ValueError("setupSteps must contain reviewed GitHub Actions setup steps")
-    env = {key: "${{ secrets." + secret_prefix + key + " }}" for key in secrets}
-    env.update({key: "${{ vars." + key + " }}" for key in variables})
     workflow = workflow_document(
-        spec, steps, replay_step(config, spec["cliCommand"], env)
+        spec, steps, replay_step(config, spec["cliCommand"], runner_env(config))
     )
     outputs = {
         CONFIG: json.dumps(config, indent=2) + "\n",
@@ -1164,9 +1548,13 @@ def initialize(argv):
     write_new_files(root, outputs)
     return {
         "files": list(outputs),
-        "requiredSecrets": [secret_prefix + name for name in secrets],
-        "requiredVariables": variables,
-        "next": "Configure secrets securely, review push triggers, merge the workflow to the default branch, then run --cloud-dry-run",
+        "requiredSecrets": sorted(set(secret_targets(config).values())),
+        "requiredVariables": sorted(
+            source["variable"]
+            for source in config.get("env", {}).values()
+            if "variable" in source
+        ),
+        "next": "Configure secrets securely, review push triggers, get the workflow registered with GitHub Actions (merging it to the default branch once does that), run --cloud-dry-run, then --cloud-check",
     }
 
 
@@ -1225,6 +1613,12 @@ def update_existing(root, spec):
         for key, value in (step.get("env") or {}).items()
         if key not in RUNNER_ENV
     }
+    declared = runner_env(config)
+    conflicts = sorted(
+        name for name in declared if name in env and env[name] != declared[name]
+    )
+    undeclared = sorted(name for name in env if name not in declared)
+    env = {**declared, **env}
     extra = {
         key: value
         for key, value in step.items()
@@ -1251,11 +1645,23 @@ def update_existing(root, spec):
     # Setups before the SDK carried the script left a copy that nothing reads now.
     old_script = ".bitfab/cloudReplay.py"
     removable = [old_script] if within(root, old_script).exists() else []
+    mismatches = {}
+    if conflicts:
+        mismatches["conflicts"] = conflicts
+    if undeclared:
+        mismatches["undeclared"] = undeclared
+    if mismatches:
+        mismatches["mismatchNext"] = (
+            "The Replay step sets these differently from, or in addition to, .bitfab/cloud.json. "
+            'Describe each one in cloud.json "env" as {"secret": NAME} or {"variable": NAME} '
+            "so --cloud-secrets and the runner's empty-secret check see it; the step was left as it is"
+        )
     if json.dumps([config, workflow], sort_keys=True) == before:
         return {
             "files": [],
             "updated": False,
             "removable": removable,
+            **mismatches,
             "next": "Already up to date",
         }
     outputs = {
@@ -1268,7 +1674,8 @@ def update_existing(root, spec):
         "files": list(outputs),
         "updated": True,
         "removable": removable,
-        "next": "Review the diff, merge the workflow to the default branch, then run --cloud-dry-run",
+        **mismatches,
+        "next": "Review the diff, then run --cloud-dry-run; replays use the workflow in their own snapshot, so the change applies without merging",
     }
 
 
@@ -1284,14 +1691,26 @@ def main():
             result = run_cli(sys.argv[1:])
         print(json.dumps(result, indent=2))
         if result.get("state") == "completed" and result.get("conclusion") != "success":
-            if result.get("testRunId"):
+            if result.get("request", {}).get("check"):
+                print(
+                    f"Cloud check failed. The Replay step log names what is missing: {result.get('url')}",
+                    file=sys.stderr,
+                )
+            elif result.get("testRunId"):
                 print(
                     f"Cloud replay stopped early ({result.get('stoppedEarly', result.get('conclusion'))}). Traces that finished are saved in test run {result['testRunId']}.",
                     file=sys.stderr,
                 )
             return 1
         if result.get("state") == "completed":
-            return report_errored_items(result)
+            code = report_errored_items(result)
+            if result.get("failOnError") and result.get("errored"):
+                print(
+                    "Cloud replay: exiting 1 because of --fail-on-error",
+                    file=sys.stderr,
+                )
+                return 1
+            return code
         return 0
     except KeyboardInterrupt:
         print(

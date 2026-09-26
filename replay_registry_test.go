@@ -366,3 +366,53 @@ func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
 		t.Fatalf("stderr = %s", output)
 	}
 }
+
+func TestReplayRegistryCLIFailOnErrorReturnsAnErrorOnlyWhenAnItemErrored(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("working", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}, Options: ReplayOptions{Mock: MockNone}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register("broken", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int, bool) {}, Options: ReplayOptions{Mock: MockNone}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"broken"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("without the flag an errored item must not fail the command: %v", err)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"working", "--fail-on-error"}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("no item errored: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	_, err := RunReplayCLI(context.Background(), registry, []string{"broken", "--fail-on-error"}, &stdout, io.Discard)
+	want := "[replay] 2 of 2 replayed items errored; exiting 1 because of --fail-on-error"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), `"run-1"`) {
+		t.Fatalf("result was not printed before the error: %s", stdout.String())
+	}
+
+	_, err = RunReplayCLI(context.Background(), registry, []string{"broken", "--dry-run", "--fail-on-error"}, io.Discard, io.Discard)
+	if err == nil || err.Error() != "[replay] 2 of 2 resolved items errored; exiting 1 because of --fail-on-error" {
+		t.Fatalf("dry run error = %v", err)
+	}
+}
+
+func TestReplayRegistryCLIHelpListsFailOnError(t *testing.T) {
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
+	if !strings.Contains(stderr.String(), "-fail-on-error") {
+		t.Fatalf("help = %s", stderr.String())
+	}
+}

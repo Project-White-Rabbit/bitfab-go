@@ -16,7 +16,7 @@ import (
 //go:embed cloudReplay.py
 var cloudReplayHelper []byte
 
-const cloudReplayHelp = "Direct GitHub replay: --cloud PIPELINE --trace-ids UUID[,UUID] [--max-concurrency 1..32] [--cloud-include FILE] [--cloud-dry-run] [--cloud-detach] [--cloud-request-id UUID] [--cloud-timeout MINUTES]. Lifecycle: --cloud-status|--cloud-watch|--cloud-cancel|--cloud-cleanup UUID. Setup: --cloud-init [--config FILE] (creates a setup or updates it in place), --cloud-secrets --env-file FILE [NAME ...]. Requires git, gh auth login, Python 3.10+, and bitfab:setup cloud."
+const cloudReplayHelp = "Direct GitHub replay: --cloud PIPELINE --trace-ids UUID[,UUID] [--max-concurrency 1..32] [--cloud-include FILE] [--cloud-dry-run] [--cloud-detach] [--cloud-request-id UUID] [--cloud-timeout MINUTES] [--cloud-check] [--fail-on-error] [replay options such as --name, --dataset-ids, --attempts, or --resume, passed to the replay on the runner]. Lifecycle: --cloud-status|--cloud-watch|--cloud-cancel|--cloud-cleanup UUID. Setup: --cloud-init [--config FILE] (creates a setup or updates it in place), --cloud-secrets --env-file FILE [NAME ...]. Requires git, gh auth login, Python 3.10+, and bitfab:setup cloud."
 
 func isCloudReplayCommand(args []string) bool {
 	for _, arg := range args {
