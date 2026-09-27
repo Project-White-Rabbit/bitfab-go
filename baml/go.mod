@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/Project-White-Rabbit/bitfab-go v0.0.0
-	github.com/boundaryml/baml v0.225.0
+	github.com/boundaryml/baml v0.226.2
 )
 
 require (

@@ -1,6 +1,6 @@
 # Native BAML adapter
 
-This optional Go module enables local BAML execution and generated-client collector wrappers without adding native dependencies to ordinary Bitfab imports. It uses upstream BAML 0.225.0 and requires cgo and a platform supported by its native library.
+This optional Go module enables local BAML execution and generated-client collector wrappers without adding native dependencies to ordinary Bitfab imports. It uses upstream BAML 0.226.2 and requires cgo and a platform supported by its native library.
 
 ```go
 client := bitfab.NewClient(apiKey, bitfab.WithBAMLExecutor(bamladapter.Execute))
