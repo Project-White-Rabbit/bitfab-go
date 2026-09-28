@@ -3,9 +3,11 @@ package bitfab
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -75,5 +77,52 @@ func TestCloudHelperFailure(t *testing.T) {
 	}
 	if !strings.Contains(errors.String(), "recover execution") {
 		t.Fatal("lost diagnostics")
+	}
+}
+
+func TestCloudForwardsWorkflowCommandsAndParsesTheResult(t *testing.T) {
+	cloudTestRepo(t)
+	for _, want := range []string{`{"state": "completed", "conclusion": "success", "testRunId": "run"}`, `{"check": "passed", "resolved": 1, "commitSha": "abc"}`} {
+		helper := []byte("import json\nprint('::notice title=x::abc')\nprint(json.dumps(json.loads('" + want + "'), indent=2))\n")
+		var output bytes.Buffer
+		result, err := runCloudReplayHelper(context.Background(), helper, []string{"--cloud-execute"}, &output, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var expected map[string]any
+		if err := json.Unmarshal([]byte(want), &expected); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(result, expected) {
+			t.Fatalf("wrong result: %v", result)
+		}
+		if first, _, _ := strings.Cut(output.String(), "\n"); first != "::notice title=x::abc" {
+			t.Fatalf("notice not forwarded: %q", output.String())
+		}
+	}
+}
+
+func TestCloudParsesJSONOnlyOutput(t *testing.T) {
+	cloudTestRepo(t)
+	helper := []byte("import json\nprint(json.dumps({'state': 'completed'}, indent=2))\n")
+	var output bytes.Buffer
+	result, err := runCloudReplayHelper(context.Background(), helper, []string{"--cloud", "pipeline"}, &output, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["state"] != "completed" || strings.Contains(output.String(), "::") {
+		t.Fatalf("wrong result %v or output %q", result, output.String())
+	}
+}
+
+func TestCloudRejectsOutputWithoutAResult(t *testing.T) {
+	cloudTestRepo(t)
+	var output bytes.Buffer
+	_, err := runCloudReplayHelper(context.Background(), []byte("print('not json')\n"), []string{"--cloud", "pipeline"}, &output, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "did not print a JSON result") {
+		t.Fatalf("wrong error: %v", err)
+	}
+	if !strings.Contains(output.String(), "not json") {
+		t.Fatal("lost output")
 	}
 }

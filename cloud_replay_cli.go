@@ -65,12 +65,36 @@ func runCloudReplayHelper(ctx context.Context, script []byte, args []string, std
 		_, err := stdout.Write(output.Bytes())
 		return map[string]any{}, err
 	}
-	var result map[string]any
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-		return nil, err
+	return parseCloudReplayResult(output.String(), stdout)
+}
+
+func parseCloudReplayResult(output string, stdout io.Writer) (map[string]any, error) {
+	var rest []string
+	for _, line := range strings.SplitAfter(output, "\n") {
+		if strings.HasPrefix(line, "::") {
+			if !strings.HasSuffix(line, "\n") {
+				line += "\n"
+			}
+			if _, err := io.WriteString(stdout, line); err != nil {
+				return nil, err
+			}
+		} else {
+			rest = append(rest, line)
+		}
 	}
-	if _, err := stdout.Write(output.Bytes()); err != nil {
-		return nil, err
+	text := strings.Join(rest, "")
+	for start := len(rest) - 1; start >= 0; start-- {
+		if !strings.HasPrefix(rest[start], "{") {
+			continue
+		}
+		var result map[string]any
+		if json.Unmarshal([]byte(strings.Join(rest[start:], "")), &result) == nil {
+			_, err := io.WriteString(stdout, text)
+			return result, err
+		}
 	}
-	return result, nil
+	if strings.TrimSpace(text) != "" {
+		fmt.Fprint(stdout, text)
+	}
+	return nil, fmt.Errorf("bitfab: cloud replay did not print a JSON result; its output is above")
 }
