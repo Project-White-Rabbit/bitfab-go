@@ -1,15 +1,15 @@
 package bitfab
 
 import (
-	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"slices"
+	"os/signal"
 	"strings"
 )
 
@@ -25,76 +25,45 @@ func isCloudReplayCommand(args []string) bool {
 	return false
 }
 
-func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Writer) (map[string]any, error) {
+func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	return runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr)
 }
 
-func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer) (map[string]any, error) {
+func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer) error {
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	replayCommand, err := json.Marshal([]string{executable})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	file, err := os.CreateTemp("", "bitfab-cloud-replay-*.py")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	helper := file.Name()
 	defer os.Remove(helper)
 	if _, err := file.Write(script); err != nil {
 		file.Close()
-		return nil, err
+		return err
 	}
 	if err := file.Close(); err != nil {
-		return nil, err
+		return err
 	}
 	command := exec.CommandContext(ctx, "python3", append([]string{helper}, args...)...)
 	command.Env = append(os.Environ(), "BITFAB_REPLAY_COMMAND="+string(replayCommand), "BITFAB_SDK_LANGUAGE=go")
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, stderr
-	if err := command.Run(); err != nil {
-		if output.Len() > 0 {
-			fmt.Fprint(stdout, output.String())
-		}
-		return nil, fmt.Errorf("bitfab: cloud replay failed; see diagnostics and recover using the execution UUID: %w", err)
+	command.Stdout, command.Stderr = stdout, stderr
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	err = command.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return fmt.Errorf("bitfab: cloud replay exited %d: %w", exit.ExitCode(), err)
 	}
-	if slices.Contains(args, "--help") || slices.Contains(args, "-h") {
-		_, err := stdout.Write(output.Bytes())
-		return map[string]any{}, err
+	if errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("bitfab: cloud replay needs Python 3.10+ on PATH as python3: %w", err)
 	}
-	return parseCloudReplayResult(output.String(), stdout)
-}
-
-func parseCloudReplayResult(output string, stdout io.Writer) (map[string]any, error) {
-	var rest []string
-	for _, line := range strings.SplitAfter(output, "\n") {
-		if strings.HasPrefix(line, "::") {
-			if !strings.HasSuffix(line, "\n") {
-				line += "\n"
-			}
-			if _, err := io.WriteString(stdout, line); err != nil {
-				return nil, err
-			}
-		} else {
-			rest = append(rest, line)
-		}
-	}
-	text := strings.Join(rest, "")
-	for start := len(rest) - 1; start >= 0; start-- {
-		if !strings.HasPrefix(rest[start], "{") {
-			continue
-		}
-		var result map[string]any
-		if json.Unmarshal([]byte(strings.Join(rest[start:], "")), &result) == nil {
-			_, err := io.WriteString(stdout, text)
-			return result, err
-		}
-	}
-	if strings.TrimSpace(text) != "" {
-		fmt.Fprint(stdout, text)
-	}
-	return nil, fmt.Errorf("bitfab: cloud replay did not print a JSON result; its output is above")
+	return err
 }

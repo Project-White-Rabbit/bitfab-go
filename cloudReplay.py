@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -26,19 +27,21 @@ WORKFLOW = "bitfab-replay.yml"
 WORKFLOW_NAMES = (WORKFLOW, "bitfab-replay.yaml")
 WORKFLOW_DIRECTORY = ".github/workflows"
 OLD_CONFIG = ".bitfab/cloud.json"
-OLD_SCRIPT = ".bitfab/cloudReplay.py"
-OLD_RUNNER_ENV = ("BITFAB_CLOUD_REQUEST", "BITFAB_EXECUTION_ID", "BITFAB_COMMIT_SHA")
-OLD_UPLOAD_STEP = "Save replay identity"
-OLD_JOB_TIMEOUT = 35
 PREFIX = "bitfab-replay/"
 DEFAULT_SECRET_PREFIX = "BITFAB_CLOUD_"
 API_VERSION = "2026-03-10"
-RUN_NAME = "Bitfab replay ${{ inputs.execution_id }}"
-RESULT_TITLE = "Bitfab replay result"
 REPLAY_COMMAND_ENV = "BITFAB_REPLAY_COMMAND"
 SDK_LANGUAGE_ENV = "BITFAB_SDK_LANGUAGE"
 CHECK_COMMAND_ENV = "BITFAB_REPLAY_CHECK"
-REQUEST_VERSION = 2
+REQUEST_VERSION = 3
+RESULT_LINE = "bitfab-replay-result "
+RESULT_CHUNK = 4000
+OUTPUT_BEGIN = "bitfab-replay-output-begin"
+OUTPUT_END = "bitfab-replay-output-end"
+LOG_TAIL_LINES = 40
+OUTPUT_LIMIT = 16 * 1024 * 1024
+NEW_FILES_LIMIT = 20 * 1024 * 1024
+POLL_SECONDS = 5
 ITEM_ERROR_FIELDS = (
     "error",
     "traceError",
@@ -49,10 +52,12 @@ ITEM_ERROR_FIELDS = (
 ITEM_ID_FIELDS = ("originalTraceId", "original_trace_id", "traceId", "trace_id")
 ITEM_ERROR_LINES = 20
 ITEM_ERROR_LENGTH = 500
-OUTPUT_TAIL_LENGTH = 4000
 UUID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+GITHUB_REMOTE = re.compile(
+    r"(?:git@github\.com:|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?"
+)
+LOG_TIMESTAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 EXPERIMENT_LINE = re.compile(rb"^\[replay\] Experiment ([0-9a-f-]{36}):")
 SECRET_REFERENCE = re.compile(
     r"[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?[ \t]*:[ \t]*[\"']?\$\{\{\s*secrets(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\s*\])\s*\}\}"
@@ -64,27 +69,20 @@ ENVIRONMENT_SETTING = re.compile(
 PUSH_TRIGGER = re.compile(
     r"^[ \t]*\"?(?:on\"?[ \t]*:.*\bpush\b|push\"?[ \t]*:)", re.MULTILINE
 )
-LIFECYCLE_FLAGS = (
+DECLARED_INPUTS = re.compile(r"^[ \t]*\"?execution_id\"?[ \t]*:", re.MULTILINE)
+FOLLOW_FLAGS = (
     "--cloud-status",
     "--cloud-watch",
     "--cloud-cancel",
     "--cloud-cleanup",
 )
-CLOUD_VALUE_FLAGS = (
-    *LIFECYCLE_FLAGS,
-    "--cloud-include",
-    "--cloud-request-id",
-    "--cloud-timeout",
-)
-CLOUD_SWITCHES = (
-    "--cloud",
-    "--cloud-dry-run",
-    "--cloud-detach",
-    "--cloud-check",
-    "--fail-on-error",
-    "--dry-run",
-)
-CHECK_SWITCHES = ("--cloud-check", "--dry-run")
+CLOUD_VALUE_FLAGS = (*FOLLOW_FLAGS, "--cloud-request-id", "--cloud-timeout")
+CLOUD_SWITCHES = ("--cloud", "--cloud-preview", "--cloud-detach")
+RENAMED_FLAGS = {
+    "--cloud-dry-run": "--cloud-preview",
+    "--cloud-check": "--dry-run",
+    "--cloud-include": "nothing: new files that git does not ignore are already in the snapshot",
+}
 SEED_FLAGS = ("--seed", "--cases", "--from-trace", "--run")
 PATH_FLAGS = ("--registry", "--params", "--code-change")
 CODE_CHANGE_FLAGS = ("--code-change", "--no-code-change")
@@ -109,36 +107,32 @@ HELP = """Cloud replay: run the replay you run locally on GitHub Actions by addi
 
   bitfab-replay --registry scripts/replay.ts classify --trace-ids UUID --cloud
 
-Every replay option works as it does locally and is passed to the runner as given.
-The runner starts the same bitfab-replay from the same directory, on a snapshot of
-your working tree. New files need --cloud-include PATH. Credentials and ignored files
-are refused. Requires git and Python 3.10+ on macOS or Linux, with a github.com origin.
+Every replay option works as it does locally, including --dry-run and --fail-on-error.
+The runner replays a snapshot of your working tree (changed files, plus new files git
+does not ignore) from the same directory, and this command prints the replay's output
+and exits with its exit code. Credential-like files are refused. Requires git and
+Python 3.10+ on macOS or Linux, with a github.com origin.
 
 Options added by --cloud:
-  --dry-run              Check the runner without replaying: every secret the workflow
-                         maps has a value, BITFAB_REPLAY_CHECK passes when set, and the
-                         traces resolve. --cloud-check is the same.
-  --cloud-dry-run        Show what the snapshot would contain and push nothing.
-  --cloud-include PATH   Add a new file to the snapshot (repeatable).
+  --cloud-preview        List what the snapshot would contain and push nothing.
   --cloud-detach         Return after dispatch instead of waiting.
   --cloud-timeout MIN    Stop the replay after MIN minutes (1..7200).
   --cloud-request-id ID  Recover a submission whose response was lost.
-  --fail-on-error        Exit 1 when any replayed item errored.
 
 Follow a replay by the execution UUID it prints:
-  --cloud-status ID | --cloud-watch ID | --cloud-cancel ID | --cloud-cleanup ID
+  --cloud-watch ID | --cloud-status ID | --cloud-cancel ID | --cloud-cleanup ID
 
 Set up once:
   --cloud-init [--secret NAME ...] [--environment NAME] [--run COMMAND]
                [--runs-on LABEL] [--secret-prefix PREFIX] [--check COMMAND]
       Writes .github/workflows/bitfab-replay.yml, the only file cloud replay keeps
-      in the repository. Run it again to update a setup made by an older SDK.
+      in the repository, and lists what is left to do.
   --cloud-secrets --env-file FILE [NAME ...] [--environment NAME] [--dry-run]
-      Copy local values into the GitHub secrets the workflow reads.
+      Copies local values into the GitHub secrets the workflow reads.
 
 GitHub access comes from the GitHub CLI when it is logged in, otherwise from GH_TOKEN
-or GITHUB_TOKEN, otherwise from the github.com credential git already stores.
-Only --cloud-secrets needs the GitHub CLI itself.
+or GITHUB_TOKEN, otherwise from the github.com credential git already stores. Without
+the GitHub CLI, --cloud-secrets lists the secrets to create by hand and where.
 """
 
 
@@ -146,6 +140,11 @@ class CommandError(RuntimeError):
     def __init__(self, message, http_status=None):
         super().__init__(message)
         self.http_status = http_status
+
+
+class KeepRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 def command(args, *, cwd=None, env=None, timeout=60, input=None):
@@ -175,6 +174,10 @@ def git(root, *args, env=None, input=None):
     return command(["git", "-C", str(root), *args], env=env, input=input)
 
 
+def progress(message):
+    print(f"[cloud] {message}", file=sys.stderr, flush=True)
+
+
 def root_directory():
     return Path(command(["git", "rev-parse", "--show-toplevel"])).resolve()
 
@@ -195,12 +198,9 @@ def within(root, value):
 
 def repository_path(root, path):
     try:
-        relative = Path(path).resolve().relative_to(root).as_posix()
+        return Path(path).resolve().relative_to(root).as_posix()
     except ValueError as error:
         raise ValueError(f"{path} must be inside the repository") from error
-    if sensitive(relative):
-        raise ValueError(f"Refusing credential-like file: {relative}")
-    return relative
 
 
 def working_directory(root):
@@ -212,21 +212,15 @@ def working_directory(root):
 
 
 def repository(root):
-    remote = git(root, "remote", "get-url", "origin")
-    match = re.fullmatch(
-        r"(?:git@github\.com:|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?", remote
-    )
-    if match is None:
+    fetch = GITHUB_REMOTE.fullmatch(git(root, "remote", "get-url", "origin"))
+    if fetch is None:
         raise ValueError(
             "origin must be a github.com repository without embedded credentials"
         )
-    push = git(root, "remote", "get-url", "--push", "origin")
-    other = re.fullmatch(
-        r"(?:git@github\.com:|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?", push
-    )
-    if other is None or other[1].lower() != match[1].lower():
+    push = GITHUB_REMOTE.fullmatch(git(root, "remote", "get-url", "--push", "origin"))
+    if push is None or push[1].lower() != fetch[1].lower():
         raise ValueError("origin fetch and push repositories must match")
-    return match[1]
+    return fetch[1]
 
 
 def find_workflow(root):
@@ -236,11 +230,15 @@ def find_workflow(root):
     return None
 
 
-def setup_workflow(root):
+def refuse_old_setup(root):
     if within(root, OLD_CONFIG).exists():
         raise ValueError(
-            f"This cloud replay setup was made by an older SDK. Run bitfab-replay --cloud-init once to move it into the workflow and remove {OLD_CONFIG}"
+            f"This cloud replay setup was made by an older SDK. Delete {OLD_CONFIG} and {WORKFLOW_DIRECTORY}/{WORKFLOW}, then run bitfab-replay --cloud-init"
         )
+
+
+def setup_workflow(root):
+    refuse_old_setup(root)
     name = find_workflow(root)
     if name is None:
         raise ValueError(
@@ -254,6 +252,12 @@ def workflow_secrets(text):
         name: dotted or bracketed
         for name, dotted, bracketed in SECRET_REFERENCE.findall(text)
     }
+
+
+def secrets_page(repo, environment):
+    if environment:
+        return f"https://github.com/{repo}/settings/environments"
+    return f"https://github.com/{repo}/settings/secrets/actions"
 
 
 ENV_ASSIGNMENT = re.compile(r"[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
@@ -306,10 +310,26 @@ def parse_environment_file(text):
     return values
 
 
+def ensure_environment(repo, environment):
+    try:
+        api(repo, f"environments/{environment}")
+        return "exists"
+    except ValueError:
+        return "unchecked"
+    except RuntimeError as error:
+        if getattr(error, "http_status", None) != 404:
+            return "unchecked"
+    try:
+        api(repo, f"environments/{environment}", method="PUT", payload={})
+        return "created"
+    except RuntimeError:
+        return "missing"
+
+
 def configure_secrets(argv):
     parser = argparse.ArgumentParser(
         prog="bitfab-replay --cloud-secrets",
-        description="Copy named values from local environment files into the GitHub Actions secrets the cloud replay workflow reads. Values are piped to gh on standard input and never printed, logged, or passed as arguments.",
+        description="Copy named values from local environment files into the GitHub Actions secrets the cloud replay workflow reads. Values are piped to the GitHub CLI on standard input and never printed, logged, or passed as arguments. Without the GitHub CLI, it lists the secrets to create by hand and where.",
     )
     parser.add_argument(
         "names",
@@ -324,7 +344,7 @@ def configure_secrets(argv):
     )
     parser.add_argument(
         "--environment",
-        help="GitHub Environment to set the secrets in; defaults to the workflow's environment",
+        help="GitHub Environment to set the secrets in; defaults to the workflow's environment, and is created when it does not exist",
     )
     parser.add_argument(
         "--dry-run",
@@ -333,14 +353,13 @@ def configure_secrets(argv):
     )
     args = parser.parse_args(argv)
     root = root_directory()
-    workflow = setup_workflow(root)
-    text = within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
+    text = within(root, f"{WORKFLOW_DIRECTORY}/{setup_workflow(root)}").read_text()
     targets = workflow_secrets(text)
     names = args.names or list(targets)
     unknown = [name for name in names if name not in targets]
     if unknown:
         raise ValueError(
-            f"The workflow does not read {', '.join(unknown)}. Add each one to the Replay step's env as NAME: ${{{{ secrets.{DEFAULT_SECRET_PREFIX}NAME }}}} first"
+            f"The workflow does not read {', '.join(unknown)}. Add each one to the replay step's env as NAME: ${{{{ secrets.{DEFAULT_SECRET_PREFIX}NAME }}}} first"
         )
     configured = ENVIRONMENT_SETTING.search(text)
     environment = args.environment or (configured[1] if configured else None)
@@ -355,43 +374,51 @@ def configure_secrets(argv):
     for name in names:
         value = values.get(name, values.get(targets[name]))
         if value is None:
-            missing.append(name)
+            missing.append(targets[name])
         elif not value:
-            empty.append(name)
+            empty.append(targets[name])
         else:
             found.append(name)
-    if found and not args.dry_run and shutil.which("gh") is None:
-        where = (
-            f"https://github.com/{repo}/settings/environments"
-            if environment
-            else f"https://github.com/{repo}/settings/secrets/actions"
-        )
-        raise ValueError(
-            f"Copying secrets needs the GitHub CLI, which encrypts each value for GitHub. Install it (https://cli.github.com), or create {', '.join(targets[name] for name in found)} by hand at {where}"
-        )
-    for name in found:
-        if not args.dry_run:
-            command(
-                [
-                    "gh",
-                    "secret",
-                    "set",
-                    targets[name],
-                    "--repo",
-                    repo,
-                    *(["--env", environment] if environment else []),
-                ],
-                input=values.get(name, values.get(targets[name])),
-            )
-    return {
+    result = {
         "repository": repo,
         "environment": environment,
         "dryRun": args.dry_run,
-        "set": [targets[name] for name in found],
+        "set": [],
         "missing": missing,
         "empty": empty,
-        "next": "Create the missing secrets by hand; empty local values were skipped because an empty secret overrides a working default with nothing; a wrong value only surfaces when the first real replay runs",
     }
+    if args.dry_run:
+        return {**result, "wouldSet": [targets[name] for name in found]}
+    if environment:
+        result["environmentStatus"] = ensure_environment(repo, environment)
+    if found and shutil.which("gh") is None:
+        progress(
+            "Setting secrets needs the GitHub CLI (https://cli.github.com), which encrypts each value for GitHub; create the ones listed under createByHand instead"
+        )
+        return {
+            **result,
+            "createByHand": [targets[name] for name in found],
+            "where": secrets_page(repo, environment),
+        }
+    token = github_access()["token"]
+    for name in found:
+        command(
+            [
+                "gh",
+                "secret",
+                "set",
+                targets[name],
+                "--repo",
+                repo,
+                *(["--env", environment] if environment else []),
+            ],
+            input=values.get(name, values.get(targets[name])),
+            env=None if token is None else {**os.environ, "GH_TOKEN": token},
+        )
+    result["set"] = [targets[name] for name in found]
+    if missing or empty:
+        result["where"] = secrets_page(repo, environment)
+    return result
 
 
 @functools.cache
@@ -436,7 +463,7 @@ def stored_git_credential():
     return None
 
 
-def api(repo, suffix, *, method="GET", payload=None):
+def api(repo, suffix, *, method="GET", payload=None, raw=False):
     path = f"repos/{repo}" + (f"/{suffix}" if suffix else "")
     access = github_access()
     data = None if payload is None else json.dumps(payload)
@@ -449,8 +476,7 @@ def api(repo, suffix, *, method="GET", payload=None):
                 "github.com",
                 "-H",
                 f"X-GitHub-Api-Version: {API_VERSION}",
-                "--jq",
-                "tojson",
+                *([] if raw else ["--jq", "tojson"]),
                 path,
                 "--method",
                 method,
@@ -458,6 +484,8 @@ def api(repo, suffix, *, method="GET", payload=None):
             ],
             input=data,
         )
+        if raw:
+            return result
         return json.loads(result) if result else None
     request = urllib.request.Request(
         f"https://api.github.com/{path}",
@@ -472,8 +500,7 @@ def api(repo, suffix, *, method="GET", payload=None):
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read()
+        body = fetch(request, follow_without_credentials=raw)
     except urllib.error.HTTPError as error:
         raise CommandError(
             f"GitHub {method} {path.split('?')[0]} failed (HTTP {error.code}) using {access['source']}",
@@ -488,15 +515,40 @@ def api(repo, suffix, *, method="GET", payload=None):
                 "set SSL_CERT_FILE to a certificate bundle, or log in with the GitHub CLI (gh auth login), which cloud replay uses instead"
             ) from None
         raise CommandError(f"Could not reach api.github.com: {reason}") from None
+    if raw:
+        return body.decode(errors="replace").strip()
     return json.loads(body) if body.strip() else None
 
 
+def fetch(request, *, follow_without_credentials):
+    if not follow_without_credentials:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read()
+    try:
+        with urllib.request.build_opener(KeepRedirect).open(
+            request, timeout=60
+        ) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        location = error.headers.get("Location")
+        if error.code not in (301, 302, 303, 307, 308) or not location:
+            raise
+    with urllib.request.urlopen(location, timeout=120) as response:
+        return response.read()
+
+
+def option_name(token):
+    return token.split("=", 1)[0]
+
+
 def split_arguments(argv):
-    cloud, includes, switches, replay = {}, [], set(), []
+    cloud, switches, replay = {}, set(), []
     index = 0
     while index < len(argv):
         token = argv[index]
-        name = token.split("=", 1)[0]
+        name = option_name(token)
+        if name in RENAMED_FLAGS:
+            raise ValueError(f"{name} is gone; use {RENAMED_FLAGS[name]}")
         if name in CLOUD_VALUE_FLAGS:
             if "=" in token:
                 value = token.split("=", 1)[1]
@@ -506,12 +558,9 @@ def split_arguments(argv):
                 index += 2
             else:
                 raise ValueError(f"{name} needs a value")
-            if name == "--cloud-include":
-                includes.append(value)
-            elif name in cloud:
+            if name in cloud:
                 raise ValueError(f"{name} was given twice")
-            else:
-                cloud[name] = value
+            cloud[name] = value
         elif token in CLOUD_SWITCHES:
             switches.add(token)
             index += 1
@@ -520,23 +569,23 @@ def split_arguments(argv):
         else:
             replay.append(token)
             index += 1
-    return cloud, includes, switches, replay
+    return cloud, switches, replay
 
 
 def parse(argv):
-    cloud, includes, switches, replay = split_arguments(argv)
-    lifecycle = [flag for flag in LIFECYCLE_FLAGS if flag in cloud]
-    if lifecycle:
-        if len(lifecycle) != 1 or len(cloud) != 1 or includes or switches or replay:
-            raise ValueError("Cloud lifecycle commands take only their execution UUID")
-        operation = lifecycle[0].removeprefix("--cloud-")
-        execution_id = cloud[lifecycle[0]]
+    cloud, switches, replay = split_arguments(argv)
+    following = [flag for flag in FOLLOW_FLAGS if flag in cloud]
+    if following:
+        if len(following) != 1 or len(cloud) != 1 or switches - {"--cloud"} or replay:
+            raise ValueError("Cloud follow-up commands take only their execution UUID")
+        operation = following[0].removeprefix("--cloud-")
+        execution_id = cloud[following[0]]
     else:
         if not replay:
             raise ValueError(
                 "Add --cloud to the replay command you run locally, such as bitfab-replay --registry scripts/replay.ts classify --trace-ids UUID --cloud"
             )
-        if not any(token.split("=", 1)[0] in SELECTION_FLAGS for token in replay):
+        if not any(option_name(token) in SELECTION_FLAGS for token in replay):
             raise ValueError(
                 "Select traces with --trace-ids, --dataset-ids, or --resume"
             )
@@ -553,7 +602,6 @@ def parse(argv):
         "operation": operation,
         "id": execution_id,
         "cloud": cloud,
-        "includes": includes,
         "switches": switches,
         "replay": replay,
     }
@@ -571,6 +619,10 @@ def validate_arguments(args):
             raise ValueError("The runner replays locally and never dispatches again")
     if sum(len(value) for value in args) > 16000:
         raise ValueError("Replay options exceed 16000 characters")
+
+
+def dry_run(args):
+    return "--dry-run" in args
 
 
 def replay_request(root, parsed):
@@ -606,8 +658,6 @@ def replay_request(root, parsed):
     }
     if "--cloud-timeout" in parsed["cloud"]:
         request["timeoutMinutes"] = int(parsed["cloud"]["--cloud-timeout"])
-    if parsed["switches"] & set(CHECK_SWITCHES):
-        request["check"] = True
     return request, files
 
 
@@ -634,81 +684,71 @@ def sensitive(path):
     )
 
 
-def snapshot(root, workflow, includes, files, execution_id, *, dry_run=False):
+def snapshot(root, workflow, files, request, *, preview=False):
     if git(root, "ls-files", "-u"):
         raise ValueError("Resolve merge conflicts before snapshotting")
     head = git(root, "rev-parse", "HEAD")
-    included = []
-    for value in includes:
-        path = within(root, value)
-        if not path.is_file() or path.is_symlink() or (root / value).is_symlink():
-            raise ValueError("--cloud-include requires individual regular files")
-        ignored = subprocess.run(
-            ["git", "-C", str(root), "check-ignore", "--quiet", "--", value],
-            check=False,
-            timeout=15,
-        ).returncode
-        if ignored not in (0, 1):
-            raise ValueError("Unable to determine whether the included file is ignored")
-        if ignored == 0 or sensitive(value):
-            raise ValueError(f"Refusing ignored or credential-like file: {value}")
-        included.append(value)
     with tempfile.TemporaryDirectory(prefix="bitfab-cloud-index-") as directory:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index")}
         git(root, "read-tree", head, env=env)
-        git(root, "add", "-u", "--", ".", env=env)
-        if included:
-            git(root, "--literal-pathspecs", "add", "--", *included, env=env)
+        git(root, "add", "-A", "--", ".", env=env)
         entries = git(root, "ls-files", "--stage", "-z", env=env).split("\x00")
+        tracked = set()
         for entry in filter(None, entries):
             metadata, path = entry.split("\t", 1)
+            tracked.add(path)
             if metadata.startswith("160000"):
                 raise ValueError(
-                    "Submodules/gitlinks require explicit setup support before cloud snapshots"
+                    f"{path} is a submodule or nested repository, which cloud snapshots do not support"
                 )
             if sensitive(path):
                 raise ValueError(
-                    f"Refusing credential-like tracked file in snapshot: {path}"
+                    f"Refusing credential-like file {path}; add it to .gitignore, or git rm --cached it when it is tracked"
                 )
-        required = [f"{WORKFLOW_DIRECTORY}/{workflow}", *files]
-        tracked = set(
-            git(
-                root, "--literal-pathspecs", "ls-files", "-z", "--", *required, env=env
-            ).split("\x00")
-        )
-        untracked = [path for path in required if path not in tracked]
-        if untracked:
+        ignored = [
+            path
+            for path in [f"{WORKFLOW_DIRECTORY}/{workflow}", *files]
+            if path not in tracked
+        ]
+        if ignored:
             raise ValueError(
-                "Not in the snapshot: "
-                + ", ".join(untracked)
-                + ". Commit these files, or pass --cloud-include for each one"
+                "Git ignores "
+                + ", ".join(ignored)
+                + ", so the snapshot cannot include it; stop ignoring it or move it"
             )
         tree = git(root, "write-tree", env=env)
-        changed = git(root, "diff", "--name-only", head, tree).splitlines()
-        if dry_run:
-            new_files = set(
-                git(root, "ls-files", "--others", "--exclude-standard").splitlines()
+        changes = [
+            line.split("\t", 1)
+            for line in git(
+                root, "diff", "--name-status", "--no-renames", head, tree
+            ).splitlines()
+        ]
+        new_files = sorted(path for status, path in changes if status == "A")
+        changed_files = sorted(path for status, path in changes if status != "A")
+        sizes = {path: (root / path).lstat().st_size for path in new_files}
+        size = sum(sizes.values())
+        if size > NEW_FILES_LIMIT:
+            largest = sorted(new_files, key=lambda path: -sizes[path])
+            raise ValueError(
+                f"New files add {size // (1024 * 1024)} MiB to the snapshot, more than {NEW_FILES_LIMIT // (1024 * 1024)} MiB; add large outputs to .gitignore, such as "
+                + ", ".join(largest[:5])
             )
-            new_files.update(
-                git(
-                    root, "diff", "--cached", "--name-only", "--diff-filter=A"
-                ).splitlines()
-            )
-            return {
-                "baseSha": head,
-                "files": changed,
-                "includedFiles": included,
-                "omittedNewFiles": sorted(new_files - set(included)),
-            }
+        summary = {
+            "baseSha": head,
+            "changedFiles": changed_files,
+            "newFiles": new_files,
+        }
+        if preview:
+            return summary
         sha = git(
             root,
             "commit-tree",
             tree,
             "-p",
             head,
-            input=f"Bitfab replay {execution_id}\n",
+            input=f"Bitfab replay {request['id']}\n\n{json.dumps(request)}\n",
         )
-        return {"baseSha": head, "sha": sha, "files": changed}
+        return {**summary, "sha": sha}
 
 
 def state_directory(root):
@@ -749,8 +789,7 @@ def find_run(record):
     matches = [
         run
         for run in runs["workflow_runs"]
-        if run["head_sha"] == record["sha"]
-        and run.get("display_title") == f"Bitfab replay {record['id']}"
+        if run["head_sha"] == record["sha"] and run["head_branch"] == record["branch"]
     ]
     if len(matches) > 1:
         raise ValueError(
@@ -772,77 +811,115 @@ def status(record, *, fetch_result=True):
         return record
     if run["head_sha"] != record["sha"] or run["head_branch"] != record["branch"]:
         raise ValueError("GitHub run does not match the recorded execution")
-    if run.get("display_title") != f"Bitfab replay {record['id']}":
-        if run["status"] == "completed":
-            raise ValueError("GitHub run does not match the recorded execution")
-        record.update(runId=run["id"], url=run["html_url"], state=run["status"])
-        return record
     record.update(
         runId=run["id"],
         url=run["html_url"],
         state=run["status"],
         conclusion=run.get("conclusion"),
     )
-    if (
-        fetch_result
-        and record["state"] == "completed"
-        and not record.get("testRunId")
-        and not record.get("check")
-        and not record.get("resultChecked")
-    ):
-        success = record["conclusion"] == "success"
-        try:
-            result = read_result(record)
-        except RuntimeError:
-            if success:
-                raise
-            result = None
-        if result is None:
-            if success:
-                raise ValueError("The GitHub job succeeded but left no replay result")
-            record["resultChecked"] = True
-            return record
-        if (
-            result.get("executionId") != record["id"]
-            or result.get("commitSha") != record["sha"]
-        ):
-            raise ValueError("Replay result does not match this execution")
-        if record["request"].get("check"):
-            if result.get("check") != "passed" or not isinstance(
-                result.get("resolved"), int
-            ):
-                raise ValueError("Cloud check result does not match this execution")
-            record["check"] = "passed"
-            record["resolved"] = result["resolved"]
-            return record
-        if not UUID.fullmatch(result.get("testRunId", "")):
-            raise ValueError("Replay result does not match this execution")
-        counts = replay_counts(result)
-        record["testRunId"] = result["testRunId"]
-        if isinstance(result.get("stoppedEarly"), str):
-            record["stoppedEarly"] = result["stoppedEarly"]
-        if counts is not None:
-            record["replayed"], record["errored"] = counts
+    if fetch_result and record["state"] == "completed" and "exitCode" not in record:
+        outcome(record)
     return record
 
 
-def read_result(record):
-    repo = record["repository"]
-    jobs = api(repo, f"actions/runs/{record['runId']}/jobs?per_page=100") or {}
-    for job in jobs.get("jobs", []):
-        check_run = str(job.get("check_run_url", "")).rsplit("/", 1)[-1]
-        if not check_run.isdigit():
-            continue
-        for note in api(repo, f"check-runs/{check_run}/annotations?per_page=100") or []:
-            if (
-                note.get("title") == RESULT_TITLE
-                and len(note.get("message", "")) <= 4096
-            ):
-                try:
-                    return json.loads(base64.b64decode(note["message"], validate=True))
-                except ValueError as error:
-                    raise ValueError("Invalid replay result annotation") from error
-    return None
+def replay_job(record):
+    jobs = api(
+        record["repository"], f"actions/runs/{record['runId']}/jobs?per_page=100"
+    )
+    jobs = (jobs or {}).get("jobs", [])
+    named = [job for job in jobs if job.get("name") == "replay"]
+    return (named or jobs or [None])[0]
+
+
+def job_log(record):
+    job = replay_job(record)
+    if job is None:
+        return []
+    for attempt in range(6):
+        try:
+            text = api(record["repository"], f"actions/jobs/{job['id']}/logs", raw=True)
+            return [LOG_TIMESTAMP.sub("", line) for line in text.splitlines()]
+        except RuntimeError:
+            if attempt == 5:
+                raise
+            time.sleep(POLL_SECONDS)
+    return []
+
+
+def read_result(lines):
+    chunks = [
+        line[len(RESULT_LINE) :] for line in lines if line.startswith(RESULT_LINE)
+    ]
+    if not chunks:
+        return None
+    try:
+        return json.loads(
+            zlib.decompress(base64.b64decode("".join(chunks), validate=True))
+        )
+    except ValueError as error:
+        raise ValueError("The runner left an unreadable replay result") from error
+
+
+def replay_output(lines):
+    if OUTPUT_BEGIN not in lines:
+        return None
+    start = lines.index(OUTPUT_BEGIN) + 1
+    end = lines.index(OUTPUT_END, start) if OUTPUT_END in lines[start:] else len(lines)
+    return lines[start:end]
+
+
+def outcome(record):
+    lines = job_log(record)
+    result = read_result(lines)
+    if result is None:
+        record["exitCode"] = 1
+        return {"record": record, "lines": lines, "result": None}
+    if (
+        result.get("executionId") != record["id"]
+        or result.get("commitSha") != record["sha"]
+    ):
+        raise ValueError("Replay result does not match this execution")
+    record["exitCode"] = result["exitCode"]
+    parsed = last_json(result.get("stdout", "")) or {}
+    test_run = result.get("testRunId") or parsed.get(
+        "testRunId", parsed.get("test_run_id")
+    )
+    if isinstance(test_run, str) and UUID.fullmatch(test_run):
+        record["testRunId"] = test_run
+    if result.get("stoppedEarly"):
+        record["stoppedEarly"] = result["stoppedEarly"]
+    return {"record": record, "lines": lines, "result": result}
+
+
+def print_outcome(found):
+    record, lines, result = found["record"], found["lines"], found["result"]
+    if result is None:
+        errors = [
+            index for index, line in enumerate(lines) if line.startswith("##[error]")
+        ]
+        shown = lines[: errors[0] + 1] if errors else lines
+        tail = [line for line in shown if line.strip()][-LOG_TAIL_LINES:]
+        for line in tail:
+            print(line, file=sys.stderr)
+        progress(
+            f"The run stopped before the replay finished ({record.get('conclusion')}); the end of its log is above. Full log: {record.get('url')}"
+        )
+        return 1
+    for line in replay_output(lines) or []:
+        print(line, file=sys.stderr)
+    sys.stderr.flush()
+    print(result.get("stdout", ""), end="", flush=True)
+    if record.get("stoppedEarly"):
+        progress(
+            f"Replay stopped early: {record['stoppedEarly']}. Traces that finished are saved"
+            + (
+                f" in experiment {record['testRunId']}"
+                if record.get("testRunId")
+                else ""
+            )
+        )
+        return result["exitCode"] or 1
+    return result["exitCode"]
 
 
 def cleanup(root, record):
@@ -901,6 +978,123 @@ def preflight(repo, workflow):
         )
 
 
+def describe_snapshot(source):
+    changed, new = len(source["changedFiles"]), len(source["newFiles"])
+    progress(
+        f"Snapshot of {source['baseSha'][:12]} with {changed} changed and {new} new files"
+        + (
+            f" ({', '.join(source['newFiles'][:5])}{', ...' if new > 5 else ''})"
+            if new
+            else ""
+        )
+    )
+
+
+def submit(root, repo, workflow, parsed, path):
+    execution_id = parsed["id"]
+    request, files = replay_request(root, parsed)
+    if "--cloud-preview" in parsed["switches"]:
+        return {
+            "preview": True,
+            "repository": repo,
+            **snapshot(root, workflow, files, request, preview=True),
+        }
+    if path.exists():
+        record = json.loads(path.read_text())
+        if record["request"] != request or record["repository"].lower() != repo.lower():
+            raise ValueError("Execution ID already belongs to a different request")
+        status(record, fetch_result=False)
+        if record["state"] == "prepared":
+            raise ValueError(
+                "Submission stopped before dispatch. Use --cloud-cleanup, then submit a new execution UUID"
+            )
+        return record
+    preflight(repo, workflow)
+    if dry_run(request["args"]):
+        progress(
+            "--dry-run dispatches a GitHub run that checks secrets and resolves the traces without replaying; it receives the workflow's secrets"
+        )
+    source = snapshot(root, workflow, files, request)
+    describe_snapshot(source)
+    record = {
+        "id": execution_id,
+        "repository": repo,
+        "workflow": workflow,
+        "branch": PREFIX + execution_id,
+        "request": request,
+        "state": "prepared",
+        **source,
+    }
+    save(path, record)
+    progress(f"Execution {execution_id}; resume with --cloud-watch {execution_id}")
+    ref = "refs/heads/" + record["branch"]
+    try:
+        git(
+            root,
+            "push",
+            f"--force-with-lease={ref}:",
+            "origin",
+            f"{record['sha']}:{ref}",
+        )
+    except RuntimeError as error:
+        raise ValueError(
+            f"Pushing the snapshot branch {record['branch']} to origin failed; check that git can push to {repo}"
+        ) from error
+    record["state"] = "dispatch_unknown"
+    save(path, record)
+    payload = {"ref": record["branch"]}
+    if DECLARED_INPUTS.search(
+        within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
+    ):
+        payload["inputs"] = {"execution_id": execution_id, "request": "-"}
+    try:
+        response = api(
+            repo,
+            f"actions/workflows/{workflow}/dispatches",
+            method="POST",
+            payload=payload,
+        )
+    except RuntimeError as error:
+        raise ValueError(
+            f"Dispatching {workflow} on {record['branch']} failed{http_status(error)}; the GitHub account needs write access to Actions, and the registered workflow must accept workflow_dispatch. Check the Actions tab, then resume with --cloud-watch {execution_id}"
+        ) from error
+    if isinstance(response, dict) and response.get("workflow_run_id"):
+        record["runId"] = response["workflow_run_id"]
+        record["url"] = response.get("html_url")
+    record["state"] = "queued"
+    return record
+
+
+def report_steps(record, shown):
+    job = replay_job(record)
+    for step in (job or {}).get("steps", []):
+        if step.get("status") != "queued" and step.get("name") not in shown:
+            shown.add(step.get("name"))
+            progress(step.get("name"))
+
+
+def wait(record, path):
+    started = time.monotonic()
+    announced, steps = None, set()
+    while record["state"] != "completed":
+        status(record, fetch_result=False)
+        save(path, record)
+        if record["state"] != announced and record.get("url"):
+            announced = record["state"]
+            progress(f"{announced.replace('_', ' ').capitalize()}: {record['url']}")
+        if record["state"] == "in_progress":
+            report_steps(record, steps)
+        if (
+            record["state"] == "dispatch_unknown"
+            and time.monotonic() - started >= 10 * 60
+        ):
+            raise ValueError(
+                f"GitHub has shown no run for this dispatch after 10 minutes. Check Actions, then resume with --cloud-watch {record['id']} or remove the snapshot branch with --cloud-cleanup {record['id']}"
+            )
+        if record["state"] != "completed":
+            time.sleep(POLL_SECONDS)
+
+
 def run_cli(argv):
     parsed = parse(argv)
     operation, execution_id = parsed["operation"], parsed["id"]
@@ -913,99 +1107,9 @@ def run_cli(argv):
     path = directory / f"{execution_id}.json"
     with execution_lock(directory, execution_id):
         if operation == "submit":
-            request, files = replay_request(root, parsed)
-            if "--cloud-dry-run" in parsed["switches"]:
-                return {
-                    "dryRun": True,
-                    "repository": repo,
-                    **snapshot(
-                        root,
-                        workflow,
-                        parsed["includes"],
-                        files,
-                        execution_id,
-                        dry_run=True,
-                    ),
-                }
-            if path.exists():
-                record = json.loads(path.read_text())
-                if (
-                    record["request"] != request
-                    or record["repository"].lower() != repo.lower()
-                ):
-                    raise ValueError(
-                        "Execution ID already belongs to a different request"
-                    )
-                status(record)
-                if record["state"] == "prepared":
-                    raise ValueError(
-                        "Submission stopped before dispatch. Use --cloud-cleanup, then submit a new execution UUID"
-                    )
-            else:
-                preflight(repo, workflow)
-                if request.get("check"):
-                    print(
-                        "Cloud dry run: dispatching a GitHub run that checks secrets and resolves the traces without replaying. It receives the workflow's secrets. Use --cloud-dry-run to only review the snapshot.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                source = snapshot(
-                    root, workflow, parsed["includes"], files, execution_id
-                )
-                record = {
-                    "id": execution_id,
-                    "repository": repo,
-                    "workflow": workflow,
-                    "branch": PREFIX + execution_id,
-                    "request": request,
-                    "state": "prepared",
-                    **source,
-                }
-                if "--fail-on-error" in parsed["switches"]:
-                    record["failOnError"] = True
-                save(path, record)
-                print(
-                    f"Cloud execution {execution_id}. Recover with --cloud-status {execution_id}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                ref = "refs/heads/" + record["branch"]
-                try:
-                    git(
-                        root,
-                        "push",
-                        f"--force-with-lease={ref}:",
-                        "origin",
-                        f"{record['sha']}:{ref}",
-                    )
-                except RuntimeError as error:
-                    raise ValueError(
-                        f"Pushing the snapshot branch {record['branch']} to origin failed; check that git can push to {repo}"
-                    ) from error
-                record["state"] = "dispatch_unknown"
-                save(path, record)
-                encoded = base64.b64encode(json.dumps(request).encode()).decode()
-                try:
-                    response = api(
-                        repo,
-                        f"actions/workflows/{workflow}/dispatches",
-                        method="POST",
-                        payload={
-                            "ref": record["branch"],
-                            "inputs": {
-                                "execution_id": execution_id,
-                                "request": encoded,
-                            },
-                        },
-                    )
-                except RuntimeError as error:
-                    raise ValueError(
-                        f"Dispatching {workflow} on {record['branch']} failed{http_status(error)}; the GitHub account needs write access to Actions, and the registered workflow must accept workflow_dispatch. Check the Actions tab, then resume with --cloud-status {execution_id}"
-                    ) from error
-                if isinstance(response, dict) and response.get("workflow_run_id"):
-                    record["runId"] = response["workflow_run_id"]
-                    record["url"] = response.get("html_url")
-                record["state"] = "queued"
+            record = submit(root, repo, workflow, parsed, path)
+            if record.get("preview"):
+                return record, None
         else:
             if not path.exists():
                 raise ValueError(
@@ -1014,7 +1118,7 @@ def run_cli(argv):
             record = json.loads(path.read_text())
             if record["repository"].lower() != repo.lower():
                 raise ValueError("origin no longer matches the execution repository")
-            status(record, fetch_result=operation != "cleanup")
+            status(record, fetch_result=operation == "status")
             if operation == "cancel" and record["state"] != "completed":
                 if not record.get("runId"):
                     raise ValueError(
@@ -1023,27 +1127,13 @@ def run_cli(argv):
                 api(repo, f"actions/runs/{record['runId']}/cancel", method="POST")
                 record["state"] = "cancel_requested"
         save(path, record)
-        if record["state"] == "prepared" and operation != "cleanup":
-            return record
-        if operation == "watch" or (
+        attached = operation == "watch" or (
             operation == "submit" and "--cloud-detach" not in parsed["switches"]
-        ):
-            started = time.monotonic()
-            while record["state"] != "completed":
-                status(record)
-                save(path, record)
-                if (
-                    record["state"] == "dispatch_unknown"
-                    and time.monotonic() - started >= 10 * 60
-                ):
-                    raise ValueError(
-                        "GitHub has shown no run for this dispatch after 10 minutes. Check Actions, then resume with --cloud-watch "
-                        + execution_id
-                        + " or remove the snapshot branch with --cloud-cleanup "
-                        + execution_id
-                    )
-                if record["state"] != "completed":
-                    time.sleep(5)
+        )
+        found = None
+        if attached and record["state"] != "prepared":
+            wait(record, path)
+            found = outcome(record)
         if record["state"] == "completed" or (
             operation == "cleanup" and record["state"] == "prepared"
         ):
@@ -1051,7 +1141,7 @@ def run_cli(argv):
         elif operation == "cleanup":
             raise ValueError("Execution is not completed; no branch was deleted")
         save(path, record)
-        return record
+        return record, found
 
 
 def replay_command():
@@ -1065,25 +1155,29 @@ def replay_command():
         or not all(isinstance(part, str) and part for part in value)
     ):
         raise ValueError(
-            "Start the Replay step with the SDK's bitfab-replay command and --cloud-execute, so the runner knows how to start the replay"
+            "Start the replay step with the SDK's bitfab-replay command and --cloud-execute, so the runner knows how to start the replay"
         )
     return value
 
 
-def dispatched_request():
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    inputs = event.get("inputs") or {}
-    request = json.loads(base64.b64decode(inputs.get("request", ""), validate=True))
-    if request.get("id") != inputs.get("execution_id"):
-        raise ValueError("Replay request does not match the dispatched execution")
-    version = request.get("version", 0)
-    if version < REQUEST_VERSION or "args" not in request:
+def snapshot_request(root, commit):
+    message = git(root, "log", "-1", "--format=%B", commit)
+    _, _, body = message.partition("\n\n")
+    try:
+        request = json.loads(body)
+    except ValueError:
+        request = None
+    if not isinstance(request, dict) or request.get("version") != REQUEST_VERSION:
+        version = request.get("version", 0) if isinstance(request, dict) else 0
+        newer = isinstance(version, int) and version > REQUEST_VERSION
         raise ValueError(
-            "This replay was submitted by an older SDK than the one the snapshot installs; update the SDK you run locally to match the lockfile"
+            "This replay was submitted by a "
+            + ("newer" if newer else "different")
+            + " SDK than the one the snapshot installs; match the SDK you run locally to the one in the lockfile"
         )
-    if version > REQUEST_VERSION:
+    if os.environ.get("GITHUB_REF_NAME") != PREFIX + str(request.get("id")):
         raise ValueError(
-            "This replay was submitted by a newer SDK than the one the snapshot installs; update the SDK in the lockfile to match the one you run locally"
+            "The runner replays only the snapshot branch its request names; start replays with bitfab-replay --cloud"
         )
     validate_arguments(request["args"])
     return request
@@ -1092,45 +1186,43 @@ def dispatched_request():
 def execute():
     if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
         raise ValueError("Submit a new replay instead of rerunning an Actions job")
-    request = dispatched_request()
     root = root_directory()
     commit = os.environ["GITHUB_SHA"]
     if git(root, "rev-parse", "HEAD") != commit:
         raise ValueError("Runner checkout does not match the dispatched snapshot SHA")
+    request = snapshot_request(root, commit)
     directory = within(root, request["cwd"])
     check_secrets(root)
-    names = {value.split("=", 1)[0] for value in request["args"]}
+    names = {option_name(value) for value in request["args"]}
     args = [
         *replay_command(),
         *request["args"],
         *([] if names & set(CODE_CHANGE_FLAGS) else ["--no-code-change"]),
     ]
-    identity = {"executionId": request["id"], "commitSha": commit}
-    if request.get("check"):
-        summary = {**identity, **run_check(directory, args)}
-        write_result(summary)
-        return summary
+    if dry_run(request["args"]):
+        run_check_command(directory)
     experiment = {}
     previous = signal.signal(signal.SIGTERM, raise_interrupt)
+    print(OUTPUT_BEGIN, flush=True)
     try:
-        summary = {
-            **identity,
-            **run_replay(directory, args, request.get("timeoutMinutes"), experiment),
-        }
-    except BaseException as error:
-        if UUID.fullmatch(experiment.get("id", "")):
-            write_result(
-                {
-                    **identity,
-                    "testRunId": experiment["id"],
-                    "stoppedEarly": (str(error) or type(error).__name__)[:300],
-                }
-            )
-        raise
+        code, stdout, stopped = run_command(
+            directory, args, request.get("timeoutMinutes"), experiment
+        )
     finally:
+        print(OUTPUT_END, flush=True)
         signal.signal(signal.SIGTERM, previous)
-    write_result(summary)
-    return summary
+    result = {
+        "executionId": request["id"],
+        "commitSha": commit,
+        "exitCode": code,
+        "stdout": stdout,
+    }
+    if stopped:
+        result["stoppedEarly"] = stopped
+        if UUID.fullmatch(experiment.get("id", "")):
+            result["testRunId"] = experiment["id"]
+    write_result(result)
+    return result
 
 
 def running_workflow(root):
@@ -1153,26 +1245,16 @@ def check_secrets(root):
         )
 
 
-def run_check(directory, args):
+def run_check_command(directory):
     check = os.environ.get(CHECK_COMMAND_ENV, "").strip()
-    if check:
-        print(f"Running {CHECK_COMMAND_ENV}: {check}", flush=True)
-        code = subprocess.run(
-            shlex.split(check), cwd=directory, stdin=subprocess.DEVNULL, check=False
-        ).returncode
-        if code:
-            raise ValueError(f"{CHECK_COMMAND_ENV} exited {code}; its output is above")
-    result = run_command(directory, [*args, "--dry-run"], None, {})
-    items = result.get("items")
-    if not isinstance(items, list):
-        raise ValueError("The replay dry run did not return its resolved items")
-    errors = item_errors(items)
-    report_item_errors(errors)
-    if errors:
-        raise ValueError(
-            f"{len(errors)} of {len(items)} traces failed to resolve; the errors are above"
-        )
-    return {"check": "passed", "resolved": len(items)}
+    if not check:
+        return
+    print(f"Running {CHECK_COMMAND_ENV}: {check}", flush=True)
+    code = subprocess.run(
+        shlex.split(check), cwd=directory, stdin=subprocess.DEVNULL, check=False
+    ).returncode
+    if code:
+        raise ValueError(f"{CHECK_COMMAND_ENV} exited {code}; its output is above")
 
 
 def item_errors(items):
@@ -1200,73 +1282,10 @@ def item_errors(items):
     return errors
 
 
-def report_item_errors(errors):
-    if not errors:
-        return
-    shown = errors[:ITEM_ERROR_LINES]
-    lines = [f"trace {trace}: {text}" for trace, text in shown]
-    if len(errors) > len(shown):
-        lines.append(f"and {len(errors) - len(shown)} more errored items")
-    print("Errored items:", file=sys.stderr)
-    for line in lines:
-        print("  " + line, file=sys.stderr)
-    sys.stderr.flush()
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with Path(summary).open("a") as file:
-            file.write(
-                "\n#### Errored items\n\n"
-                + "".join(f"- `{line.replace('`', chr(39))}`\n" for line in lines)
-            )
-
-
-def raise_interrupt(signum, frame):
-    raise KeyboardInterrupt
-
-
-def forward_stderr(stream, experiment):
-    for line in iter(stream.readline, b""):
-        sys.stderr.buffer.write(line)
-        sys.stderr.flush()
-        if "id" not in experiment:
-            match = EXPERIMENT_LINE.match(line)
-            if match:
-                experiment["id"] = match[1].decode()
-
-
-def write_result(summary):
-    message = base64.b64encode(json.dumps(summary).encode()).decode()
-    print(f"::notice title={RESULT_TITLE}::{message}", flush=True)
-    if "check" in summary:
-        heading = "Bitfab cloud check"
-        lines = [
-            f"Passed: every secret has a value and {summary['resolved']} traces resolved. Commit: `{summary['commitSha']}`"
-        ]
-    else:
-        heading = "Bitfab replay"
-        lines = [
-            f"Test run: `{summary['testRunId']}`",
-            f"Commit: `{summary['commitSha']}`",
-            f"Stopped early: {summary['stoppedEarly']}. Traces that finished are saved in this test run."
-            if "stoppedEarly" in summary
-            else f"Replayed: {summary['replayed']}, errored: {summary['errored']}",
-        ]
-    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as file:
-        file.write(f"### {heading}\n\n" + "\n\n".join(lines) + "\n")
-
-
-def run_replay(directory, args, timeout, experiment):
-    result = run_command(directory, args, timeout, experiment)
-    test_run = result.get("testRunId", result.get("test_run_id"))
-    if not isinstance(test_run, str) or not UUID.fullmatch(test_run):
-        raise ValueError("Replay did not return a valid persisted test run UUID")
-    items = result.get("items")
-    if not isinstance(items, list):
-        raise ValueError("Replay did not return its replayed items")
-    replayed = [item for item in items if not carried_over(item)]
-    errors = item_errors(replayed)
-    report_item_errors(errors)
-    return {"testRunId": test_run, "replayed": len(replayed), "errored": len(errors)}
+def item_errored(item):
+    return isinstance(item, dict) and any(
+        item.get(field) is not None for field in ITEM_ERROR_FIELDS
+    )
 
 
 def carried_over(item):
@@ -1275,18 +1294,75 @@ def carried_over(item):
     )
 
 
-def print_output_tail(text):
-    tail = text[-OUTPUT_TAIL_LENGTH:].strip()
-    if tail:
-        print(
-            "Last replay output:\n"
-            + "\n".join("  " + line for line in tail.splitlines()),
-            file=sys.stderr,
-            flush=True,
+def raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
+def forward_stderr(stream, experiment):
+    for line in iter(stream.readline, b""):
+        sys.stdout.write(line.decode(errors="replace"))
+        sys.stdout.flush()
+        if "id" not in experiment:
+            match = EXPERIMENT_LINE.match(line)
+            if match:
+                experiment["id"] = match[1].decode()
+
+
+def last_json(text):
+    decoder = json.JSONDecoder()
+    result = None
+    for offset in [0, *[i + 1 for i, value in enumerate(text) if value == "\n"]]:
+        if text.startswith("{", offset):
+            try:
+                value, end = decoder.raw_decode(text, offset)
+                if not text[end:].strip() and isinstance(value, dict):
+                    result = value
+            except json.JSONDecodeError:
+                pass
+    return result
+
+
+def write_result(result):
+    encoded = base64.b64encode(zlib.compress(json.dumps(result).encode())).decode()
+    for start in range(0, len(encoded), RESULT_CHUNK):
+        print(RESULT_LINE + encoded[start : start + RESULT_CHUNK])
+    sys.stdout.flush()
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with Path(summary).open("a") as file:
+            file.write(summary_markdown(result))
+
+
+def summary_markdown(result):
+    parsed = last_json(result["stdout"]) or {}
+    test_run = result.get("testRunId") or parsed.get(
+        "testRunId", parsed.get("test_run_id")
+    )
+    items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
+    replayed = [item for item in items if not carried_over(item)]
+    errors = item_errors(replayed)
+    lines = [f"Commit: `{result['commitSha']}`", f"Exit code: {result['exitCode']}"]
+    if test_run:
+        lines.insert(0, f"Test run: `{test_run}`")
+    if result.get("stoppedEarly"):
+        lines.append(f"Stopped early: {result['stoppedEarly']}")
+    elif items:
+        lines.append(f"Replayed: {len(replayed)}, errored: {len(errors)}")
+    text = "### Bitfab replay\n\n" + "\n\n".join(lines) + "\n"
+    if errors:
+        shown = [
+            f"trace {trace}: {error}" for trace, error in errors[:ITEM_ERROR_LINES]
+        ]
+        if len(errors) > len(shown):
+            shown.append(f"and {len(errors) - len(shown)} more errored items")
+        text += "\n#### Errored items\n\n" + "".join(
+            f"- `{line.replace('`', chr(39))}`\n" for line in shown
         )
+    return text
 
 
 def run_command(directory, args, timeout, experiment):
+    stopped = None
     with tempfile.TemporaryFile() as output:
         with subprocess.Popen(
             args,
@@ -1303,84 +1379,37 @@ def run_command(directory, args, timeout, experiment):
             try:
                 deadline = None if timeout is None else time.monotonic() + timeout * 60
                 while child.poll() is None:
-                    if os.fstat(output.fileno()).st_size > 16 * 1024 * 1024:
+                    if os.fstat(output.fileno()).st_size > OUTPUT_LIMIT:
                         raise ValueError("Replay output exceeded 16 MiB")
                     if deadline is not None and time.monotonic() >= deadline:
-                        raise ValueError(
-                            f"Replay stopped at the {timeout}-minute --cloud-timeout; traces that finished are saved in Bitfab as an interrupted experiment"
-                        )
+                        stopped = f"it reached the {timeout}-minute --cloud-timeout"
+                        stop(child)
+                        break
                     time.sleep(0.1)
-                code = child.returncode
+            except KeyboardInterrupt:
+                stopped = "the GitHub run was cancelled"
+                stop(child)
             except BaseException:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(child.pid, signal.SIGTERM)
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    child.wait(timeout=30)
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
+                stop(child)
                 raise
             finally:
                 reader.join(timeout=5)
-        if output.tell() > 16 * 1024 * 1024:
+            code = child.returncode
+        if output.tell() > OUTPUT_LIMIT:
             raise ValueError("Replay output exceeded 16 MiB")
         output.seek(0)
         text = output.read().decode(errors="replace")
-    if code:
-        print_output_tail(text)
-        raise ValueError(f"Replay command exited {code}; its output is above")
-    decoder = json.JSONDecoder()
-    result = None
-    for offset in [0, *[i + 1 for i, value in enumerate(text) if value == "\n"]]:
-        if text.startswith("{", offset):
-            try:
-                value, end = decoder.raw_decode(text, offset)
-                if not text[end:].strip() and isinstance(value, dict):
-                    result = value
-            except json.JSONDecodeError:
-                pass
-    if result is None:
-        print_output_tail(text)
-        raise ValueError("Replay did not print a JSON result; its output is above")
-    return result
+    return (code if code >= 0 else 1), text, stopped
 
 
-def item_errored(item):
-    return isinstance(item, dict) and any(
-        item.get(field) is not None for field in ITEM_ERROR_FIELDS
-    )
-
-
-def replay_counts(result):
-    replayed, errored = result.get("replayed"), result.get("errored")
-    if replayed is None and errored is None:
-        return None
-    if (
-        not all(
-            isinstance(value, int) and not isinstance(value, bool) and value >= 0
-            for value in (replayed, errored)
-        )
-        or errored > replayed
-    ):
-        raise ValueError("Replay result has invalid item counts")
-    return replayed, errored
-
-
-def report_errored_items(record):
-    replayed, errored = record.get("replayed"), record.get("errored")
-    if not errored:
-        return 0
-    if errored == replayed:
-        print(
-            f"Cloud replay: every replayed trace errored ({errored} of {replayed}), so nothing ran successfully. Open test run {record.get('testRunId')} to see why.",
-            file=sys.stderr,
-        )
-        return 1
-    print(
-        f"Cloud replay: {errored} of {replayed} replayed traces errored. Open test run {record.get('testRunId')} to see why.",
-        file=sys.stderr,
-    )
-    return 0
+def stop(child):
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(child.pid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        child.wait(timeout=30)
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(child.pid, signal.SIGKILL)
+    child.wait()
 
 
 PLAIN_SCALAR = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_ ./@*+=,()-]*")
@@ -1491,30 +1520,26 @@ def typescript_project(root, start):
         "yarn": "yarn install --frozen-lockfile",
         "npm": "npm ci" if lockfile else "npm install",
     }[manager]
-    node = {
-        "name": "Set up Node.js",
-        "uses": ACTIONS["node"],
-        "with": {
-            **version_input(root, start, "node", [".nvmrc", ".node-version"], "lts/*"),
-            **(
-                {"cache": manager}
-                if manager in ("pnpm", "yarn", "npm") and lockfile
-                else {}
-            ),
-        },
-    }
     steps = []
     if manager == "pnpm":
-        steps.append({"name": "Install pnpm", "uses": ACTIONS["pnpm"]})
+        steps.append({"uses": ACTIONS["pnpm"]})
     if manager == "bun":
-        steps.append({"name": "Install Bun", "uses": ACTIONS["bun"]})
+        steps.append({"uses": ACTIONS["bun"]})
     steps += [
-        node,
         {
-            "name": "Install dependencies",
-            **step_directory(root, directory or start),
-            "run": install,
+            "uses": ACTIONS["node"],
+            "with": {
+                **version_input(
+                    root, start, "node", [".nvmrc", ".node-version"], "lts/*"
+                ),
+                **(
+                    {"cache": manager}
+                    if manager in ("pnpm", "yarn", "npm") and lockfile
+                    else {}
+                ),
+            },
         },
+        {**step_directory(root, directory or start), "run": install},
     ]
     run = {
         "pnpm": "pnpm exec bitfab-replay",
@@ -1531,20 +1556,18 @@ def python_project(root, start):
     )
     location = step_directory(root, directory or start)
     python = {
-        "name": "Set up Python",
         "uses": ACTIONS["python"],
         "with": version_input(root, start, "python", [".python-version"], "3.12"),
     }
     if lockfile == "uv.lock":
         return [
-            {"name": "Install uv", "uses": ACTIONS["uv"]},
-            {"name": "Install dependencies", **location, "run": "uv sync --frozen"},
+            {"uses": ACTIONS["uv"]},
+            {**location, "run": "uv sync --frozen"},
         ], "uv run bitfab-replay"
     if lockfile == "poetry.lock":
         return [
             python,
             {
-                "name": "Install dependencies",
                 **location,
                 "run": "pipx install poetry && poetry install --no-interaction",
             },
@@ -1554,21 +1577,14 @@ def python_project(root, start):
         if lockfile == "requirements.txt"
         else "pip install ."
     )
-    return [
-        python,
-        {"name": "Install dependencies", **location, "run": install},
-    ], "bitfab-replay"
+    return [python, {**location, "run": install}], "bitfab-replay"
 
 
 def ruby_project(root, start):
     directory, _ = find_upward(root, start, ["Gemfile"])
     location = step_directory(root, directory or start)
     return [
-        {
-            "name": "Set up Ruby",
-            "uses": ACTIONS["ruby"],
-            "with": {"bundler-cache": True, **location},
-        }
+        {"uses": ACTIONS["ruby"], "with": {"bundler-cache": True, **location}}
     ], "bundle exec bitfab-replay"
 
 
@@ -1579,7 +1595,30 @@ def go_project(root, start):
         if name
         else {"go-version": "stable"}
     )
-    return [{"name": "Set up Go", "uses": ACTIONS["go"], "with": version}], None
+    return [{"uses": ACTIONS["go"], "with": version}], go_registry_command(root, start)
+
+
+def go_registry_command(root, start):
+    programs = set()
+    for directory, folders, names in os.walk(root):
+        folders[:] = [
+            folder
+            for folder in folders
+            if not folder.startswith(".")
+            and folder not in ("node_modules", "vendor", "testdata")
+        ]
+        for name in names:
+            if not name.endswith(".go") or name.endswith("_test.go"):
+                continue
+            text = (Path(directory) / name).read_text(errors="replace")
+            if "RunCloudReplayCLI(" in text and re.search(
+                r"^package main\b", text, re.MULTILINE
+            ):
+                programs.add(Path(directory))
+    if len(programs) != 1:
+        return None
+    relative = os.path.relpath(programs.pop(), start)
+    return f"go run {relative if relative.startswith('..') else './' + relative}"
 
 
 PROJECTS = {
@@ -1608,47 +1647,22 @@ def push_triggers(root, workflow):
     return found
 
 
-def reference(kind, name):
-    return "${{ " + kind + "." + name + " }}"
-
-
-def secret_env(names, prefix):
-    return {name: reference("secrets", prefix + name) for name in names}
-
-
-def replay_step(run, directory, env):
-    return {
-        "name": "Replay",
-        **({} if directory == "." else {"working-directory": directory}),
-        "run": f"{run} --cloud-execute",
-        "env": env,
-    }
-
-
-def workflow_document(steps, replay, *, runs_on="ubuntu-24.04", environment=None):
+def workflow_document(steps, run, directory, env, *, runs_on, environment):
     job = {"runs-on": runs_on}
     if environment:
         job["environment"] = environment
     job["steps"] = [
-        {
-            "name": "Check out the replay snapshot",
-            "uses": ACTIONS["checkout"],
-            "with": {"persist-credentials": False},
-        },
+        {"uses": ACTIONS["checkout"], "with": {"persist-credentials": False}},
         *steps,
-        replay,
+        {
+            **({} if directory == "." else {"working-directory": directory}),
+            "run": f"{run} --cloud-execute",
+            "env": env,
+        },
     ]
     return {
-        "name": "Bitfab cloud replay",
-        "run-name": RUN_NAME,
-        "on": {
-            "workflow_dispatch": {
-                "inputs": {
-                    "execution_id": {"required": True, "type": "string"},
-                    "request": {"required": True, "type": "string"},
-                }
-            }
-        },
+        "name": "Bitfab replay",
+        "on": "workflow_dispatch",
         "permissions": {"contents": "read"},
         "jobs": {"replay": job},
     }
@@ -1657,7 +1671,7 @@ def workflow_document(steps, replay, *, runs_on="ubuntu-24.04", environment=None
 def initialize(argv):
     parser = argparse.ArgumentParser(
         prog="bitfab-replay --cloud-init",
-        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository. It detects the runtime, package manager, and install command from the directory you run it in. Run it again to update a setup made by an older SDK; a current setup is left alone, so edit the workflow directly to change it.",
+        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. An existing workflow is left alone; edit it directly to change it.",
     )
     parser.add_argument(
         "--secret",
@@ -1677,24 +1691,24 @@ def initialize(argv):
     )
     parser.add_argument(
         "--run",
-        help='Command that starts the SDK\'s bitfab-replay on the runner, such as "pnpm exec bitfab-replay"; detected for TypeScript, Python, and Ruby, required for Go (such as "go run ./cmd/registry")',
+        help='Command that starts the SDK\'s bitfab-replay on the runner, such as "pnpm exec bitfab-replay"; detected for every SDK, including the Go program that calls RunCloudReplayCLI',
     )
     parser.add_argument("--runs-on", default="ubuntu-24.04", help="Runner label")
     parser.add_argument(
         "--check",
-        help='Command the runner also runs during a cloud dry run, such as "node scripts/checkBucket.js"',
+        help='Command the runner also runs on a --cloud --dry-run, such as "node scripts/checkBucket.js"',
     )
     args = parser.parse_args(argv)
     root = root_directory()
-    if within(root, OLD_CONFIG).exists():
-        return migrate(root, args)
+    refuse_old_setup(root)
     existing = find_workflow(root)
     if existing is not None:
         return {
             "files": [],
-            "updated": False,
             "workflow": f"{WORKFLOW_DIRECTORY}/{existing}",
-            "next": "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment",
+            "next": [
+                "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment"
+            ],
         }
     prefix = args.secret_prefix
     if prefix and not re.fullmatch(r"[A-Z][A-Z0-9_]*_", prefix):
@@ -1713,191 +1727,83 @@ def initialize(argv):
         raise ValueError(
             'Pass --run with the command that starts your registry program on the runner, such as --run "go run ./cmd/registry"'
         )
-    env = secret_env(names, prefix)
+    env = {name: "${{ secrets." + prefix + name + " }}" for name in names}
     if args.check:
         env[CHECK_COMMAND_ENV] = args.check
-    workflow = workflow_document(
-        steps,
-        replay_step(run, directory, env),
-        runs_on=args.runs_on,
-        environment=args.environment,
-    )
     path = f"{WORKFLOW_DIRECTORY}/{WORKFLOW}"
     target = within(root, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("x") as file:
-        file.write(to_yaml(workflow))
+        file.write(
+            to_yaml(
+                workflow_document(
+                    steps,
+                    run,
+                    directory,
+                    env,
+                    runs_on=args.runs_on,
+                    environment=args.environment,
+                )
+            )
+        )
+    secrets = sorted(prefix + name for name in names)
+    triggers = push_triggers(root, WORKFLOW)
+    try:
+        where = secrets_page(repository(root), args.environment)
+    except (ValueError, RuntimeError):
+        where = "the repository's Settings, Secrets and variables, Actions"
     return {
         "files": [path],
         "detected": {
             "language": language,
             "install": [step.get("run") or step["uses"] for step in steps],
-            "replay": replay_step(run, directory, env)["run"],
+            "replay": f"{run} --cloud-execute",
         },
-        "secrets": sorted(prefix + name for name in names),
-        "environment": args.environment,
-        "reviewPushTriggers": push_triggers(root, WORKFLOW),
-        "next": "Review the install steps against your CI and add anything detection missed, such as a build or code-generation step or a monorepo install filter; if you normally run replay through a wrapper script that sets environment variables, add them to the Replay step's env. Then create the secrets, exclude bitfab-replay/** from the push-triggered CI and deployments listed, merge the workflow to the default branch once so GitHub registers it, then run your replay with --cloud --dry-run",
+        "secrets": secrets,
+        "reviewPushTriggers": triggers,
+        "next": [
+            "Compare the install steps with your CI and add anything detection missed, such as a build or code-generation step",
+            f"Create the secrets {', '.join(secrets)} at {where}, or copy them from a local file with bitfab-replay --cloud-secrets --env-file .env",
+            *(
+                [
+                    f"Keep bitfab-replay/** branches from triggering {', '.join(triggers)}"
+                ]
+                if triggers
+                else []
+            ),
+            f"Commit {path} and merge it to the default branch once, so GitHub registers it",
+            "Add --cloud --dry-run to your replay command to check the runner, then replay with --cloud",
+        ],
     }
 
 
-def replace_file(target, content):
-    with tempfile.NamedTemporaryFile(mode="w", dir=target.parent, delete=False) as file:
-        file.write(content)
-        temporary = file.name
-    os.replace(temporary, target)
-
-
-def remove_old_files(root):
-    removed = []
-    for old in (OLD_CONFIG, OLD_SCRIPT):
-        if within(root, old).exists():
-            within(root, old).unlink()
-            removed.append(old)
-    return removed
-
-
-def migrate(root, args):
-    config = json.loads(within(root, OLD_CONFIG).read_text())
-    name = config.get("workflow", WORKFLOW)
-    path = f"{WORKFLOW_DIRECTORY}/{name}"
-    text = within(root, path).read_text() if within(root, path).is_file() else ""
-    try:
-        workflow = json.loads(text)
-        job = workflow["jobs"]["replay"]
-        steps = job["steps"]
-    except (ValueError, KeyError, TypeError) as error:
-        if "--cloud-execute" in text and not any(
-            old in text for old in (OLD_SCRIPT, OLD_UPLOAD_STEP, *OLD_RUNNER_ENV)
-        ):
-            if config.get("checkCommand") and CHECK_COMMAND_ENV not in text:
-                raise ValueError(
-                    f"{OLD_CONFIG} has a checkCommand the workflow lacks. Add {CHECK_COMMAND_ENV}: {shlex.join(config['checkCommand'])} to the Replay step's env, then run --cloud-init again"
-                ) from error
-            return {
-                "files": [],
-                "removed": remove_old_files(root),
-                "updated": True,
-                **dropped_command(config),
-                "next": "The workflow already holds these settings, so only the old files were removed",
-            }
-        raise ValueError(
-            f"{path} is not the workflow --cloud-init generated. Make its Replay step run the SDK's bitfab-replay command with --cloud-execute and read each secret in its env, then delete {OLD_CONFIG}"
-        ) from error
-    replay = [
-        index
-        for index, step in enumerate(steps)
-        if isinstance(step, dict) and step.get("name") == "Replay"
-    ]
-    if len(replay) != 1:
-        raise ValueError(f"{path} must contain exactly one step named Replay")
-    step = steps[replay[0]]
-    words = shlex.split(step.get("run") or "")
-    if args.run:
-        run = args.run
-    elif words[-1:] == ["--cloud-execute"] and OLD_SCRIPT not in step.get("run", ""):
-        run = shlex.join(words[:-1])
-    elif config.get("cliCommand"):
-        run = shlex.join(config["cliCommand"])
-    else:
-        raise ValueError(
-            'The Replay step does not start the SDK\'s bitfab-replay command; pass --run with the command that does, such as --run "npx --no-install bitfab-replay"'
-        )
-    prefix = config.get("secretPrefix", "")
-    env = {
-        **secret_env(config.get("secrets", []), prefix),
-        **{
-            key: value
-            for key, value in (step.get("env") or {}).items()
-            if key not in OLD_RUNNER_ENV
-        },
-    }
-    for variable, source in (config.get("env") or {}).items():
-        kind, target = next(iter(source.items()))
-        env.setdefault(
-            variable, reference("secrets" if kind == "secret" else "vars", target)
-        )
-    if config.get("checkCommand"):
-        env[CHECK_COMMAND_ENV] = shlex.join(config["checkCommand"])
-    kept = {
-        key: value
-        for key, value in step.items()
-        if key not in ("name", "uses", "with", "run", "working-directory", "env")
-    }
-    job["steps"] = [
-        {**replay_step(run, config.get("workingDirectory", "."), env), **kept}
-        if index == replay[0]
-        else entry
-        for index, entry in enumerate(steps)
-        if not (
-            isinstance(entry, dict)
-            and entry.get("name") == OLD_UPLOAD_STEP
-            and str(entry.get("uses", "")).startswith("actions/upload-artifact@")
-        )
-    ]
-    if job.get("timeout-minutes") == OLD_JOB_TIMEOUT:
-        del job["timeout-minutes"]
-    replace_file(within(root, path), to_yaml(workflow))
-    result = {
-        "files": [path],
-        "removed": remove_old_files(root),
-        "updated": True,
-        "next": "Review the diff. Replays run the workflow in their own snapshot, so the change applies without merging",
-    }
-    return {**result, **dropped_command(config)}
-
-
-def dropped_command(config):
-    if not config.get("command"):
-        return {}
-    return {
-        "droppedCommand": config["command"],
-        "droppedCommandNext": "The runner now starts the same bitfab-replay you run locally, from the same directory and with the same arguments, so this command is no longer used. "
-        "If it also set environment variables, add them to the Replay step's env",
-    }
+def print_json(value):
+    print(json.dumps(value, indent=2), flush=True)
 
 
 def main():
     argv = sys.argv[1:]
     try:
         if argv[:1] == ["--cloud-init"]:
-            result = initialize(argv[1:])
-        elif argv[:1] == ["--cloud-secrets"]:
-            result = configure_secrets(argv[1:])
-        elif argv == ["--cloud-execute"]:
+            print_json(initialize(argv[1:]))
+            return 0
+        if argv[:1] == ["--cloud-secrets"]:
+            print_json(configure_secrets(argv[1:]))
+            return 0
+        if argv == ["--cloud-execute"]:
             result = execute()
-        elif "-h" in argv or "--help" in argv:
+            return result["exitCode"] or (1 if result.get("stoppedEarly") else 0)
+        if "-h" in argv or "--help" in argv:
             print(HELP, end="")
             return 0
-        else:
-            result = run_cli(argv)
-        print(json.dumps(result, indent=2))
-        if result.get("state") == "completed" and result.get("conclusion") != "success":
-            if result.get("request", {}).get("check"):
-                print(
-                    f"Cloud check failed. The Replay step log names what is missing: {result.get('url')}",
-                    file=sys.stderr,
-                )
-            elif result.get("testRunId"):
-                print(
-                    f"Cloud replay stopped early ({result.get('stoppedEarly', result.get('conclusion'))}). Traces that finished are saved in test run {result['testRunId']}.",
-                    file=sys.stderr,
-                )
-            return 1
-        if result.get("state") == "completed":
-            code = report_errored_items(result)
-            if result.get("failOnError") and result.get("errored"):
-                print(
-                    "Cloud replay: exiting 1 because of --fail-on-error",
-                    file=sys.stderr,
-                )
-                return 1
-            return code
-        return 0
+        record, found = run_cli(argv)
+        if found is not None:
+            return print_outcome(found)
+        print_json(record)
+        return record.get("exitCode", 0) if record.get("state") == "completed" else 0
     except KeyboardInterrupt:
-        print(
-            "Detached. The GitHub job continues; use the printed execution UUID to resume or cancel.",
-            file=sys.stderr,
+        progress(
+            "Detached. The GitHub run continues; follow it with the printed execution UUID"
         )
         return 130
     except (

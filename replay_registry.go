@@ -293,7 +293,7 @@ var registryInitialEnvironment = os.Environ()
 // The first argument selects the pipeline; subsequent arguments match the other SDK registry CLIs.
 func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, stdout, stderr io.Writer) (any, error) {
 	if isCloudReplayCommand(args) {
-		return RunCloudReplayCLI(ctx, args, stdout, stderr)
+		return nil, RunCloudReplayCLI(ctx, args, stdout, stderr)
 	}
 	stderr = &replaySynchronizedWriter{writer: stderr}
 	parsed, err := parseRegistryCLI(registry, args, stderr)
