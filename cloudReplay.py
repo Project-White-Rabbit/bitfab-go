@@ -40,6 +40,7 @@ OUTPUT_BEGIN = "bitfab-replay-output-begin"
 OUTPUT_END = "bitfab-replay-output-end"
 LOG_TAIL_LINES = 40
 OUTPUT_LIMIT = 16 * 1024 * 1024
+DISK_LIMIT = 1024 * 1024 * 1024
 NEW_FILES_LIMIT = 20 * 1024 * 1024
 POLL_SECONDS = 5
 ITEM_ERROR_FIELDS = (
@@ -310,6 +311,16 @@ def parse_environment_file(text):
     return values
 
 
+def secret_value(value):
+    if "\n" not in value:
+        return value
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return value
+    return json.dumps(parsed, separators=(",", ":"))
+
+
 def ensure_environment(repo, environment):
     try:
         api(repo, f"environments/{environment}")
@@ -412,7 +423,7 @@ def configure_secrets(argv):
                 repo,
                 *(["--env", environment] if environment else []),
             ],
-            input=values.get(name, values.get(targets[name])),
+            input=secret_value(values.get(name, values.get(targets[name]))),
             env={**os.environ, "GH_TOKEN": token},
         )
     result["set"] = [targets[name] for name in found]
@@ -592,10 +603,8 @@ def validate_arguments(args):
     if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
         raise ValueError("Replay arguments must be a list of strings")
     for value in args:
-        if "\x00" in value or "\n" in value or len(value) > 1000:
-            raise ValueError(
-                "Replay options must be single-line values of at most 1000 characters"
-            )
+        if "\x00" in value or "\n" in value:
+            raise ValueError("Replay options must be single-line values")
         if value.startswith("--cloud"):
             raise ValueError("The runner replays locally and never dispatches again")
     if sum(len(value) for value in args) > 16000:
@@ -889,6 +898,10 @@ def print_outcome(found):
     for line in replay_output(lines) or []:
         print(line, file=sys.stderr)
     sys.stderr.flush()
+    if result.get("stdoutOmittedBytes"):
+        progress(
+            f"The replay also printed {result['stdoutOmittedBytes'] // (1024 * 1024)} MiB to stdout before its result, such as a library's logging; only the end was kept"
+        )
     print(result.get("stdout", ""), end="", flush=True)
     if record.get("stoppedEarly"):
         progress(
@@ -1049,7 +1062,10 @@ def submit(root, repo, workflow, parsed, path):
 def report_steps(record, shown):
     job = replay_job(record)
     for step in (job or {}).get("steps", []):
-        if step.get("status") != "queued" and step.get("name") not in shown:
+        if (
+            step.get("status") in ("in_progress", "completed")
+            and step.get("name") not in shown
+        ):
             shown.add(step.get("name"))
             progress(step.get("name"))
 
@@ -1186,7 +1202,7 @@ def execute():
     previous = signal.signal(signal.SIGTERM, raise_interrupt)
     print(OUTPUT_BEGIN, flush=True)
     try:
-        code, stdout, stopped = run_command(
+        code, stdout, omitted, stopped = run_command(
             directory, args, request.get("timeoutMinutes"), experiment
         )
     finally:
@@ -1198,6 +1214,8 @@ def execute():
         "exitCode": code,
         "stdout": stdout,
     }
+    if omitted:
+        result["stdoutOmittedBytes"] = omitted
     if stopped:
         result["stoppedEarly"] = stopped
         if UUID.fullmatch(experiment.get("id", "")):
@@ -1224,6 +1242,15 @@ def check_secrets(root):
             + ", ".join(f"{name} (secret {targets[name]})" for name in empty)
             + ". GitHub passes a secret that does not exist as an empty string. Create each one under Settings, Secrets and variables, Actions, in the repository or in the job's Environment"
         )
+    for name in targets:
+        if any(
+            0 < len(line.strip()) < 4
+            for line in os.environ.get(name, "").splitlines()[1:]
+        ):
+            print(
+                f"::warning title=Bitfab replay::{name} has a line of three characters or fewer, such as a lone brace in multi-line JSON, and GitHub masks that text everywhere in this log. Store it on one line; bitfab-replay --cloud-secrets does this for JSON",
+                flush=True,
+            )
 
 
 def run_check_command(directory):
@@ -1289,18 +1316,31 @@ def forward_stderr(stream, experiment):
                 experiment["id"] = match[1].decode()
 
 
-def last_json(text):
+def trailing_json(text):
     decoder = json.JSONDecoder()
-    result = None
     for offset in [0, *[i + 1 for i, value in enumerate(text) if value == "\n"]]:
         if text.startswith("{", offset):
             try:
                 value, end = decoder.raw_decode(text, offset)
-                if not text[end:].strip() and isinstance(value, dict):
-                    result = value
             except json.JSONDecodeError:
-                pass
-    return result
+                continue
+            if not text[end:].strip() and isinstance(value, dict):
+                return offset, value
+    return None, None
+
+
+def last_json(text):
+    return trailing_json(text)[1]
+
+
+def carried_stdout(output):
+    start = max(0, os.fstat(output.fileno()).st_size - OUTPUT_LIMIT)
+    output.seek(start)
+    text = output.read().decode(errors="replace")
+    if not start:
+        return text, 0
+    offset = trailing_json(text)[0] or 0
+    return text[offset:], start + len(text[:offset].encode())
 
 
 def write_result(result):
@@ -1312,6 +1352,16 @@ def write_result(result):
     if summary:
         with Path(summary).open("a") as file:
             file.write(summary_markdown(result))
+
+
+def annotate(result):
+    if result.get("stoppedEarly"):
+        message = f"Replay stopped early: {result['stoppedEarly']}"
+    elif result["exitCode"]:
+        message = f"Replay exited {result['exitCode']}; bitfab-replay --cloud reports it as its own exit code"
+    else:
+        return
+    print(f"::warning title=Bitfab replay::{message}", flush=True)
 
 
 def summary_markdown(result):
@@ -1359,13 +1409,19 @@ def run_command(directory, args, timeout, experiment):
             reader.start()
             try:
                 deadline = None if timeout is None else time.monotonic() + timeout * 60
+                parent = os.getppid()
+                checked = time.monotonic()
                 while child.poll() is None:
-                    if os.fstat(output.fileno()).st_size > OUTPUT_LIMIT:
-                        raise ValueError("Replay output exceeded 16 MiB")
+                    if os.fstat(output.fileno()).st_size > DISK_LIMIT:
+                        raise ValueError("Replay printed more than 1 GiB to stdout")
                     if deadline is not None and time.monotonic() >= deadline:
                         stopped = f"it reached the {timeout}-minute --cloud-timeout"
                         stop(child)
                         break
+                    if time.monotonic() - checked >= 1:
+                        checked = time.monotonic()
+                        if os.getppid() != parent:
+                            raise KeyboardInterrupt
                     time.sleep(0.1)
             except KeyboardInterrupt:
                 stopped = "the GitHub run was cancelled"
@@ -1376,11 +1432,8 @@ def run_command(directory, args, timeout, experiment):
             finally:
                 reader.join(timeout=5)
             code = child.returncode
-        if output.tell() > OUTPUT_LIMIT:
-            raise ValueError("Replay output exceeded 16 MiB")
-        output.seek(0)
-        text = output.read().decode(errors="replace")
-    return (code if code >= 0 else 1), text, stopped
+        text, omitted = carried_stdout(output)
+    return (code if code >= 0 else 1), text, omitted, stopped
 
 
 def stop(child):
@@ -1772,8 +1825,8 @@ def main():
             print_json(configure_secrets(argv[1:]))
             return 0
         if argv == ["--cloud-execute"]:
-            result = execute()
-            return result["exitCode"] or (1 if result.get("stoppedEarly") else 0)
+            annotate(execute())
+            return 0
         if "-h" in argv or "--help" in argv:
             print(HELP, end="")
             return 0
