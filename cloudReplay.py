@@ -413,7 +413,7 @@ def configure_secrets(argv):
                 *(["--env", environment] if environment else []),
             ],
             input=values.get(name, values.get(targets[name])),
-            env=None if token is None else {**os.environ, "GH_TOKEN": token},
+            env={**os.environ, "GH_TOKEN": token},
         )
     result["set"] = [targets[name] for name in found]
     if missing or empty:
@@ -425,8 +425,9 @@ def configure_secrets(argv):
 def github_access():
     if shutil.which("gh") is not None:
         with contextlib.suppress(RuntimeError, OSError, subprocess.SubprocessError):
-            command(["gh", "auth", "status", "--hostname", "github.com"])
-            return {"source": "the GitHub CLI", "token": None}
+            token = command(["gh", "auth", "token", "--hostname", "github.com"])
+            if token:
+                return {"source": "the GitHub CLI", "token": token}
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         if os.environ.get(name):
             return {"source": name, "token": os.environ[name]}
@@ -467,26 +468,6 @@ def api(repo, suffix, *, method="GET", payload=None, raw=False):
     path = f"repos/{repo}" + (f"/{suffix}" if suffix else "")
     access = github_access()
     data = None if payload is None else json.dumps(payload)
-    if access["token"] is None:
-        result = command(
-            [
-                "gh",
-                "api",
-                "--hostname",
-                "github.com",
-                "-H",
-                f"X-GitHub-Api-Version: {API_VERSION}",
-                *([] if raw else ["--jq", "tojson"]),
-                path,
-                "--method",
-                method,
-                *(["--input", "-"] if data is not None else []),
-            ],
-            input=data,
-        )
-        if raw:
-            return result
-        return json.loads(result) if result else None
     request = urllib.request.Request(
         f"https://api.github.com/{path}",
         method=method,
@@ -512,7 +493,7 @@ def api(repo, suffix, *, method="GET", payload=None, raw=False):
             raise CommandError(
                 "Python cannot verify GitHub's certificate because it has no certificate store. "
                 "On a python.org install, run Install Certificates.command from its Applications folder, "
-                "set SSL_CERT_FILE to a certificate bundle, or log in with the GitHub CLI (gh auth login), which cloud replay uses instead"
+                "or set SSL_CERT_FILE to a certificate bundle"
             ) from None
         raise CommandError(f"Could not reach api.github.com: {reason}") from None
     if raw:
