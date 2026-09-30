@@ -47,7 +47,7 @@ const (
 
 // LabelTarget names exactly one TraceID or OriginalTraceID. A replay verdict
 // uses OriginalTraceID with WithLabelExperimentID and, optionally, a zero-based
-// Attempt. AssertionID narrows either target to one assertion.
+// Attempt.
 type LabelTarget struct {
 	TraceID         string
 	OriginalTraceID string
@@ -80,6 +80,13 @@ func (target LabelTarget) payload() (map[string]any, error) {
 	return payload, nil
 }
 
+func (target LabelTarget) target() string {
+	if target.TraceID != "" {
+		return target.TraceID
+	}
+	return target.OriginalTraceID
+}
+
 // LabelUpdate sets a pass/fail verdict, skips a check, or archives its previous
 // verdict. With neither Skip nor Archive set, Label and Annotation are sent.
 // A false Label is a failing verdict and is never omitted. With Skip set,
@@ -101,6 +108,9 @@ func (update LabelUpdate) payload() (map[string]any, error) {
 	}
 	if update.Skip && update.Archive {
 		return nil, fmt.Errorf("bitfab: a label update cannot both skip and archive")
+	}
+	if !update.Archive && update.AssertionID == "" {
+		return nil, fmt.Errorf("bitfab: agent verdicts must name an assertion: %s. Set AssertionID to the assertion each verdict scores on Save, SaveAll, and Skip. Only Archive may omit it, to clear an old whole-trace verdict", update.target())
 	}
 	switch {
 	case update.Skip:
@@ -130,7 +140,6 @@ type LabelOutcome struct {
 	Action  LabelAction `json:"action"`
 }
 
-// HumanLabelUpdate writes a human-authored verdict, validated on write.
 type HumanLabelUpdate struct {
 	TraceID     string          `json:"traceId"`
 	AssertionID string          `json:"assertionId,omitempty"`
@@ -266,7 +275,6 @@ func (l *LabelsClient) Archive(ctx context.Context, target LabelTarget, options 
 	return l.Save(ctx, LabelUpdate{LabelTarget: target, Archive: true}, options...)
 }
 
-// SaveHuman writes one human-authored verdict, validated immediately by the server.
 func (l *LabelsClient) SaveHuman(ctx context.Context, update HumanLabelUpdate) (*HumanLabelOutcome, error) {
 	outcomes, err := l.SaveHumanAll(ctx, []HumanLabelUpdate{update})
 	if err != nil {
@@ -282,6 +290,15 @@ func (l *LabelsClient) SaveHuman(ctx context.Context, update HumanLabelUpdate) (
 func (l *LabelsClient) SaveHumanAll(ctx context.Context, updates []HumanLabelUpdate) ([]HumanLabelOutcome, error) {
 	if updates == nil {
 		updates = []HumanLabelUpdate{}
+	}
+	var unscoped []string
+	for _, update := range updates {
+		if update.AssertionID == "" {
+			unscoped = append(unscoped, update.TraceID)
+		}
+	}
+	if len(unscoped) > 0 {
+		return nil, fmt.Errorf("bitfab: human verdicts must name an assertion: %s. Set AssertionID to the assertion each verdict scores on SaveHuman and SaveHumanAll", strings.Join(unscoped, ", "))
 	}
 	var response struct {
 		Labels []HumanLabelOutcome `json:"labels"`

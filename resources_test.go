@@ -34,11 +34,11 @@ func TestResources_PropagateHTTPFailures(t *testing.T) {
 		},
 		"labels read": func() error { _, err := client.Labels.Get(ctx, "trace"); return err },
 		"labels save": func() error {
-			_, err := client.Labels.Save(ctx, LabelUpdate{LabelTarget: LabelTarget{TraceID: "trace"}, Label: false, Annotation: "failed"})
+			_, err := client.Labels.Save(ctx, LabelUpdate{LabelTarget: LabelTarget{TraceID: "trace", AssertionID: "assertion"}, Label: false, Annotation: "failed"})
 			return err
 		},
 		"human labels": func() error {
-			_, err := client.Labels.SaveHuman(ctx, HumanLabelUpdate{TraceID: "trace", Label: false, Annotation: "failed"})
+			_, err := client.Labels.SaveHuman(ctx, HumanLabelUpdate{TraceID: "trace", AssertionID: "assertion", Label: false, Annotation: "failed"})
 			return err
 		},
 		"grader labels": func() error {
@@ -60,7 +60,7 @@ func TestResources_MalformedResponseReturnsError(t *testing.T) {
 		return map[string]any{"labels": "not an array"}
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
-	_, err := client.Labels.Save(context.Background(), LabelUpdate{LabelTarget: LabelTarget{TraceID: "trace"}, Label: true, Annotation: "good"})
+	_, err := client.Labels.Save(context.Background(), LabelUpdate{LabelTarget: LabelTarget{TraceID: "trace", AssertionID: "assertion"}, Label: true, Annotation: "good"})
 	if err == nil || !strings.Contains(err.Error(), "decode SDK response") {
 		t.Fatalf("error = %v", err)
 	}

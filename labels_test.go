@@ -76,13 +76,13 @@ func TestLabels_SaveAndReadEvidence(t *testing.T) {
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	ctx := context.Background()
 	if _, err := client.Labels.Save(ctx, LabelUpdate{
-		LabelTarget: LabelTarget{TraceID: "one"}, Label: true,
+		LabelTarget: LabelTarget{TraceID: "one", AssertionID: "assertion"}, Label: true,
 		Annotation: "good", Evidence: &evidence,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{"labels": []any{map[string]any{
-		"traceId": "one", "label": true, "annotation": "good",
+		"traceId": "one", "assertionId": "assertion", "label": true, "annotation": "good",
 		"evidence": []any{map[string]any{"spanId": "span", "text": "Returned the right record"}},
 	}}}
 	if !reflect.DeepEqual(server.recorded()[0].body, want) {
@@ -102,14 +102,14 @@ func TestLabels_SkipCarriesItsReason(t *testing.T) {
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	if _, err := client.Labels.Save(context.Background(), LabelUpdate{
-		LabelTarget: LabelTarget{TraceID: "one"},
+		LabelTarget: LabelTarget{TraceID: "one", AssertionID: "assertion"},
 		Skip:        true,
 		Annotation:  "the turn never terminated",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{"labels": []any{map[string]any{
-		"traceId": "one", "skip": true, "annotation": "the turn never terminated",
+		"traceId": "one", "assertionId": "assertion", "skip": true, "annotation": "the turn never terminated",
 	}}}
 	if !reflect.DeepEqual(server.recorded()[0].body, want) {
 		t.Fatalf("request = %#v, want %#v", server.recorded()[0].body, want)
@@ -135,7 +135,7 @@ func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	ctx := context.Background()
 	_, err := client.Labels.SaveAll(ctx, []LabelUpdate{
-		{LabelTarget: LabelTarget{TraceID: "one"}, Label: true, Annotation: "works"},
+		{LabelTarget: LabelTarget{TraceID: "one", AssertionID: "check"}, Label: true, Annotation: "works"},
 		{LabelTarget: LabelTarget{TraceID: "two", AssertionID: "check"}, Skip: true},
 		{LabelTarget: LabelTarget{OriginalTraceID: "three"}, Archive: true},
 	}, WithLabelExperimentID("run"))
@@ -152,7 +152,7 @@ func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	if err != nil || archived.Action != LabelActionArchived {
 		t.Fatalf("Archive = %+v, %v", archived, err)
 	}
-	if _, err := client.Labels.Skip(ctx, LabelTarget{TraceID: "direct"}); err != nil {
+	if _, err := client.Labels.Skip(ctx, LabelTarget{TraceID: "direct", AssertionID: "check"}); err != nil {
 		t.Fatal(err)
 	}
 	requests := server.recorded()
@@ -164,7 +164,7 @@ func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 			t.Errorf("%s request = %#v", action, requests[index+1].body)
 		}
 	}
-	wantDirect := map[string]any{"labels": []any{map[string]any{"traceId": "direct", "skip": true}}}
+	wantDirect := map[string]any{"labels": []any{map[string]any{"traceId": "direct", "assertionId": "check", "skip": true}}}
 	if !reflect.DeepEqual(requests[3].body, wantDirect) {
 		t.Fatalf("direct skip = %#v", requests[3].body)
 	}
@@ -189,10 +189,10 @@ func TestLabels_HumanWritesUseDedicatedEndpoint(t *testing.T) {
 		t.Fatalf("SaveHuman = %+v, %v", result, err)
 	}
 	results, err := client.Labels.SaveHumanAll(context.Background(), []HumanLabelUpdate{
-		{TraceID: "two", Label: true, Annotation: "pass"},
-		{TraceID: "three", Label: false, Annotation: "fail"},
+		{TraceID: "two", AssertionID: "assertion", Label: true, Annotation: "pass"},
+		{TraceID: "three", AssertionID: "assertion", Label: false, Annotation: "fail"},
 	})
-	if err != nil || len(results) != 2 || results[0].AssertionID != nil {
+	if err != nil || len(results) != 2 || results[0].AssertionID == nil || *results[0].AssertionID != "assertion" {
 		t.Fatalf("SaveHumanAll = %+v, %v", results, err)
 	}
 	for _, request := range server.recorded() {
@@ -205,6 +205,27 @@ func TestLabels_HumanWritesUseDedicatedEndpoint(t *testing.T) {
 	}}}
 	if !reflect.DeepEqual(server.recorded()[0].body, want) {
 		t.Fatalf("human body = %#v", server.recorded()[0].body)
+	}
+}
+
+func TestLabels_HumanWritesRequireAnAssertion(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"labels": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Labels.SaveHuman(context.Background(), HumanLabelUpdate{
+		TraceID: "one", Label: true, Annotation: "whole trace",
+	}); err == nil || !strings.Contains(err.Error(), "human verdicts must name an assertion: one") {
+		t.Fatalf("SaveHuman without an assertion = %v", err)
+	}
+	if _, err := client.Labels.SaveHumanAll(context.Background(), []HumanLabelUpdate{
+		{TraceID: "two", AssertionID: "assertion", Label: true, Annotation: "scoped"},
+		{TraceID: "three", Label: false, Annotation: "whole trace"},
+	}); err == nil || !strings.Contains(err.Error(), "human verdicts must name an assertion: three") {
+		t.Fatalf("SaveHumanAll without an assertion = %v", err)
+	}
+	if recorded := server.recorded(); len(recorded) != 0 {
+		t.Fatalf("requests sent = %+v", recorded)
 	}
 }
 
@@ -256,8 +277,8 @@ func TestLabels_InvalidTargetsDoNotSendPartialBatch(t *testing.T) {
 		{OriginalTraceID: "one", Attempt: &negative}, {TraceID: "one", Attempt: &zero},
 	} {
 		_, err := client.Labels.SaveAll(context.Background(), []LabelUpdate{
-			{LabelTarget: LabelTarget{TraceID: "valid"}, Label: true, Annotation: "good"},
-			{LabelTarget: target, Skip: true},
+			{LabelTarget: LabelTarget{TraceID: "valid", AssertionID: "assertion"}, Label: true, Annotation: "good"},
+			{LabelTarget: target, Archive: true},
 		})
 		if err == nil {
 			t.Fatalf("invalid target accepted: %+v", target)
@@ -274,7 +295,7 @@ func TestLabels_ExperimentIDAcceptsDeprecatedTestRunIDAndRejectsConflicts(t *tes
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	ctx := context.Background()
-	target := LabelTarget{OriginalTraceID: "original"}
+	target := LabelTarget{OriginalTraceID: "original", AssertionID: "assertion"}
 	for _, options := range [][]LabelWriteOption{
 		{WithLabelExperimentID("experiment")},
 		{WithLabelTestRunID("experiment")},
@@ -294,5 +315,53 @@ func TestLabels_ExperimentIDAcceptsDeprecatedTestRunIDAndRejectsConflicts(t *tes
 	}
 	if len(server.recorded()) != 3 {
 		t.Fatal("conflicting options reached the server")
+	}
+}
+
+func TestLabels_AgentVerdictWithoutAssertionIsRefusedBeforeSending(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return map[string]any{} })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	ctx := context.Background()
+	operations := map[string]func() error{
+		"Save": func() error {
+			_, err := client.Labels.Save(ctx, LabelUpdate{LabelTarget: LabelTarget{TraceID: "one"}, Label: true, Annotation: "good"})
+			return err
+		},
+		"SaveAll": func() error {
+			_, err := client.Labels.SaveAll(ctx, []LabelUpdate{
+				{LabelTarget: LabelTarget{TraceID: "one", AssertionID: "assertion"}, Label: true, Annotation: "good"},
+				{LabelTarget: LabelTarget{OriginalTraceID: "two"}, Label: false, Annotation: "whole trace"},
+			}, WithLabelExperimentID("run"))
+			return err
+		},
+		"Skip": func() error {
+			_, err := client.Labels.Skip(ctx, LabelTarget{TraceID: "one"})
+			return err
+		},
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			if err := operation(); err == nil || !strings.Contains(err.Error(), "must name an assertion") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	if len(server.recorded()) != 0 {
+		t.Fatal("a verdict without an assertion reached the server")
+	}
+}
+
+func TestLabels_ArchiveMayOmitAssertionToClearWholeTraceVerdict(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"labels": []any{map[string]any{"key": "one", "traceId": "one", "action": "archived"}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	archived, err := client.Labels.Archive(context.Background(), LabelTarget{TraceID: "one"})
+	if err != nil || archived.Action != LabelActionArchived {
+		t.Fatalf("Archive = %+v, %v", archived, err)
+	}
+	want := map[string]any{"labels": []any{map[string]any{"traceId": "one", "archive": true}}}
+	if !reflect.DeepEqual(server.recorded()[0].body, want) {
+		t.Fatalf("archive body = %#v", server.recorded()[0].body)
 	}
 }
