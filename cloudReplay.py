@@ -34,6 +34,7 @@ REPLAY_COMMAND_ENV = "BITFAB_REPLAY_COMMAND"
 SDK_LANGUAGE_ENV = "BITFAB_SDK_LANGUAGE"
 CHECK_COMMAND_ENV = "BITFAB_REPLAY_CHECK"
 REQUEST_VERSION = 3
+OLDEST_DISPATCHED_VERSION = 2
 RESULT_LINE = "bitfab-replay-result "
 RESULT_CHUNK = 4000
 OUTPUT_BEGIN = "bitfab-replay-output-begin"
@@ -87,14 +88,20 @@ ENVIRONMENT_SETTING = re.compile(
 PUSH_TRIGGER = re.compile(
     r"^[ \t]*\"?(?:on\"?[ \t]*:.*\bpush\b|push\"?[ \t]*:)", re.MULTILINE
 )
-DECLARED_INPUTS = re.compile(r"^[ \t]*\"?execution_id\"?[ \t]*:", re.MULTILINE)
+DISPATCH_INPUTS = ("execution_id", "request")
+BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 FOLLOW_FLAGS = (
     "--cloud-status",
     "--cloud-watch",
     "--cloud-cancel",
     "--cloud-cleanup",
 )
-CLOUD_VALUE_FLAGS = (*FOLLOW_FLAGS, "--cloud-request-id", "--cloud-timeout")
+CLOUD_VALUE_FLAGS = (
+    *FOLLOW_FLAGS,
+    "--cloud-request-id",
+    "--cloud-timeout",
+    "--cloud-ref",
+)
 CLOUD_SWITCHES = ("--cloud", "--cloud-preview", "--cloud-detach", "--cloud-full-output")
 RENAMED_FLAGS = {
     "--cloud-dry-run": "--cloud-preview",
@@ -144,6 +151,23 @@ Options added by --cloud:
                          GitHub job log holds.
   --cloud-timeout MIN    Stop the replay after MIN minutes (1..7200).
   --cloud-request-id ID  Recover a submission whose response was lost.
+  --cloud-ref BRANCH     Replay BRANCH as it is on GitHub, with no snapshot of your
+                         working tree, and record the experiment on BRANCH. Meant for
+                         CI jobs, such as a nightly replay of dev. Needs only GitHub
+                         access that can run Actions, and a workflow on BRANCH that
+                         declares a request input.
+
+A workflow can also dispatch bitfab-replay.yml itself on any branch other than a
+bitfab-replay/ snapshot branch, passing the replay as JSON in the request input:
+
+  {"args": ["--registry", "scripts/replay.ts", "classify", "--dataset-ids", "UUID"],
+   "cwd": "web", "timeoutMinutes": 60}
+
+args are the replay options without --cloud. cwd is the directory to replay from,
+relative to the repository root, and defaults to the root. timeoutMinutes and
+fullOutput (true) match --cloud-timeout and --cloud-full-output. version and id are
+optional: version names the request format (3 now, 2 still accepted), and id is the
+execution UUID, which must match an execution_id input when the workflow has one.
 
 Follow a replay by the execution UUID it prints:
   --cloud-watch ID | --cloud-status ID | --cloud-cancel ID | --cloud-cleanup ID
@@ -611,6 +635,16 @@ def parse(argv):
             timeout.isdigit() and 1 <= int(timeout) <= 7200
         ):
             raise ValueError("--cloud-timeout must be 1..7200 minutes")
+        branch = cloud.get("--cloud-ref")
+        if branch is not None and (
+            not BRANCH_NAME.fullmatch(branch)
+            or branch.startswith(PREFIX)
+            or ".." in branch
+            or branch.endswith((".", "/", ".lock"))
+        ):
+            raise ValueError(
+                f"--cloud-ref takes a branch name such as dev, other than a {PREFIX} snapshot branch"
+            )
         operation = "submit"
         execution_id = cloud.get("--cloud-request-id") or str(uuid.uuid4())
     if not UUID.fullmatch(execution_id):
@@ -797,6 +831,8 @@ def execution_lock(directory, execution_id):
 
 
 def find_run(record):
+    if record.get("snapshot") is False:
+        return find_branch_run(record)
     query = urlencode(
         {"event": "workflow_dispatch", "branch": record["branch"], "per_page": 100}
     )
@@ -815,6 +851,31 @@ def find_run(record):
     return matches[0] if matches else None
 
 
+def find_branch_run(record):
+    query = urlencode(
+        {
+            "event": "workflow_dispatch",
+            "branch": record["branch"],
+            "created": ">=" + record["dispatchedAt"],
+            "per_page": 100,
+        }
+    )
+    runs = api(
+        record["repository"], f"actions/workflows/{record['workflow']}/runs?{query}"
+    )
+    matches = [
+        run
+        for run in runs["workflow_runs"]
+        if run["head_branch"] == record["branch"]
+        and run.get("created_at", "") >= record["dispatchedAt"]
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Several runs were dispatched on {record['branch']} at about the same time, so this execution cannot tell which is its own; find it in the Actions tab"
+        )
+    return matches[0] if matches else None
+
+
 def status(record, *, fetch_result=True):
     if record["state"] == "prepared":
         return record
@@ -826,6 +887,8 @@ def status(record, *, fetch_result=True):
     if run is None:
         record["state"] = "dispatch_unknown"
         return record
+    if record.get("snapshot") is False and run["head_branch"] == record["branch"]:
+        record["sha"] = run["head_sha"]
     if run["head_sha"] != record["sha"] or run["head_branch"] != record["branch"]:
         raise ValueError("GitHub run does not match the recorded execution")
     record.update(
@@ -955,6 +1018,9 @@ def print_outcome(found):
 def cleanup(root, record):
     if record.get("cleaned"):
         return
+    if record.get("snapshot") is False:
+        record["cleaned"] = True
+        return
     if record.get("state") not in ("completed", "prepared"):
         raise ValueError(
             "Cleanup requires a confirmed completed GitHub run; cancel and wait first"
@@ -983,7 +1049,7 @@ def http_status(error):
     return f" (HTTP {status})" if status else ""
 
 
-def preflight(repo, workflow):
+def preflight(repo, workflow, *, pushes=True):
     access = github_access()
     try:
         details = api(repo, "")
@@ -991,7 +1057,7 @@ def preflight(repo, workflow):
         raise ValueError(
             f"GitHub access from {access['source']} cannot read {repo}{http_status(error)}; use an account or token with write access to it"
         ) from error
-    if (details or {}).get("permissions", {}).get("push") is False:
+    if pushes and (details or {}).get("permissions", {}).get("push") is False:
         raise ValueError(
             f"GitHub access from {access['source']} cannot push to {repo}; use an account or token with write access to it"
         )
@@ -1072,27 +1138,127 @@ def submit(root, repo, workflow, parsed, path):
         ) from error
     record["state"] = "dispatch_unknown"
     save(path, record)
-    payload = {"ref": record["branch"]}
-    if DECLARED_INPUTS.search(
+    declared = declared_inputs(
         within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
-    ):
-        payload["inputs"] = {"execution_id": execution_id, "request": "-"}
+    )
+    return dispatch(record, {"execution_id": execution_id, "request": "-"}, declared)
+
+
+def declared_inputs(text):
+    return {
+        name
+        for name in DISPATCH_INPUTS
+        if re.search(rf"^[ \t]*\"?{name}\"?[ \t]*:", text, re.MULTILINE)
+    }
+
+
+def dispatch(record, inputs, declared, *, run_details=False):
+    payload = {"ref": record["branch"]}
+    sent = {name: value for name, value in inputs.items() if name in declared}
+    if sent:
+        payload["inputs"] = sent
+    path = f"actions/workflows/{record['workflow']}/dispatches"
     try:
-        response = api(
-            repo,
-            f"actions/workflows/{workflow}/dispatches",
-            method="POST",
-            payload=payload,
-        )
+        try:
+            response = api(
+                record["repository"],
+                path,
+                method="POST",
+                payload={**payload, "return_run_details": True}
+                if run_details
+                else payload,
+            )
+        except RuntimeError as error:
+            if not run_details or getattr(error, "http_status", None) != 422:
+                raise
+            response = api(record["repository"], path, method="POST", payload=payload)
     except RuntimeError as error:
         raise ValueError(
-            f"Dispatching {workflow} on {record['branch']} failed{http_status(error)}; the GitHub account needs write access to Actions, and the registered workflow must accept workflow_dispatch. Check the Actions tab, then resume with --cloud-watch {execution_id}"
+            f"Dispatching {record['workflow']} on {record['branch']} failed{http_status(error)}; the GitHub account needs write access to Actions, and the registered workflow must accept workflow_dispatch. Check the Actions tab, then resume with --cloud-watch {record['id']}"
         ) from error
     if isinstance(response, dict) and response.get("workflow_run_id"):
         record["runId"] = response["workflow_run_id"]
         record["url"] = response.get("html_url")
     record["state"] = "queued"
     return record
+
+
+def branch_head(repo, branch):
+    try:
+        found = api(repo, f"git/ref/heads/{branch}")
+    except RuntimeError as error:
+        if getattr(error, "http_status", None) == 404:
+            raise ValueError(f"{repo} has no branch {branch}") from error
+        raise
+    sha = ((found or {}).get("object") or {}).get("sha", "")
+    if not SHA.fullmatch(sha):
+        raise ValueError(f"GitHub gave no commit for branch {branch}")
+    return sha
+
+
+def branch_workflow(repo, workflow, sha):
+    path = f"{WORKFLOW_DIRECTORY}/{workflow}"
+    try:
+        found = api(repo, f"contents/{path}?ref={sha}")
+    except RuntimeError as error:
+        raise ValueError(
+            f"Could not read {path} at {sha[:12]}{http_status(error)}; the branch needs the workflow"
+        ) from error
+    return base64.b64decode((found or {}).get("content", "")).decode(errors="replace")
+
+
+def submit_as_is(root, repo, workflow, parsed, path):
+    execution_id = parsed["id"]
+    branch = parsed["cloud"]["--cloud-ref"]
+    request, _ = replay_request(root, parsed)
+    sha = branch_head(repo, branch)
+    if "--cloud-preview" in parsed["switches"]:
+        return {
+            "preview": True,
+            "repository": repo,
+            "branch": branch,
+            "sha": sha,
+            "request": request,
+        }
+    if path.exists():
+        record = json.loads(path.read_text())
+        if (
+            record["request"] != request
+            or record["repository"].lower() != repo.lower()
+            or record["branch"] != branch
+        ):
+            raise ValueError("Execution ID already belongs to a different request")
+        status(record, fetch_result=False)
+        return record
+    preflight(repo, workflow, pushes=False)
+    declared = declared_inputs(branch_workflow(repo, workflow, sha))
+    if "request" not in declared:
+        raise ValueError(
+            f"{WORKFLOW_DIRECTORY}/{workflow} on {branch} declares no request input, so it cannot take a replay; add request (type: string, required: false) under on.workflow_dispatch.inputs and land it on {branch}"
+        )
+    record = {
+        "id": execution_id,
+        "repository": repo,
+        "workflow": workflow,
+        "branch": branch,
+        "snapshot": False,
+        "request": request,
+        "state": "dispatch_unknown",
+        "sha": sha,
+        "dispatchedAt": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 5)
+        ),
+    }
+    save(path, record)
+    progress(
+        f"Replaying {branch} at {sha[:12]} as it is on GitHub, without local changes. Execution {execution_id}; resume with --cloud-watch {execution_id}"
+    )
+    return dispatch(
+        record,
+        {"execution_id": execution_id, "request": json.dumps(request)},
+        declared,
+        run_details=True,
+    )
 
 
 def report_steps(record, shown):
@@ -1140,7 +1306,8 @@ def run_cli(argv):
     path = directory / f"{execution_id}.json"
     with execution_lock(directory, execution_id):
         if operation == "submit":
-            record = submit(root, repo, workflow, parsed, path)
+            submitter = submit_as_is if "--cloud-ref" in parsed["cloud"] else submit
+            record = submitter(root, repo, workflow, parsed, path)
             if record.get("preview"):
                 return record, None
         else:
@@ -1216,14 +1383,86 @@ def snapshot_request(root, commit):
     return request
 
 
+def dispatched_inputs():
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not path or not Path(path).is_file():
+        return {}
+    inputs = json.loads(Path(path).read_text()).get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def decode_request(text):
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    try:
+        return json.loads(base64.b64decode(text, validate=True))
+    except ValueError as error:
+        raise ValueError(
+            "The request input is neither JSON nor base64-encoded JSON"
+        ) from error
+
+
+def dispatched_request():
+    branch = os.environ.get("GITHUB_REF_NAME", "")
+    inputs = dispatched_inputs()
+    text = str(inputs.get("request") or "").strip()
+    if text in ("", "-"):
+        raise ValueError(
+            f"A replay of {branch} takes its request from the workflow_dispatch request input, and this run has none; start replays with bitfab-replay --cloud, or --cloud --cloud-ref {branch} to replay the branch as it is"
+        )
+    request = decode_request(text)
+    if not isinstance(request, dict):
+        raise ValueError("The request input must be a JSON object")
+    version = request.get("version", REQUEST_VERSION)
+    if not isinstance(version, int) or version < OLDEST_DISPATCHED_VERSION:
+        raise ValueError(
+            f"Request version {version!r} is not supported; send version {REQUEST_VERSION}, or leave version out"
+        )
+    if version > REQUEST_VERSION:
+        raise ValueError(
+            f"This replay was submitted by a newer SDK than the one {branch} installs; the request is version {version} and this SDK reads up to {REQUEST_VERSION}"
+        )
+    execution_id = request.get("id") or inputs.get("execution_id") or str(uuid.uuid4())
+    if not isinstance(execution_id, str) or not UUID.fullmatch(execution_id):
+        raise ValueError("The request id must be a UUID")
+    if inputs.get("execution_id") and inputs["execution_id"] != execution_id:
+        raise ValueError("The request id does not match the execution_id input")
+    args = request.get("args")
+    validate_arguments(args)
+    if request.get("check") is True and "--dry-run" not in args:
+        args = [*args, "--dry-run"]
+    normalized = {
+        "version": REQUEST_VERSION,
+        "id": execution_id,
+        "cwd": request.get("cwd") or ".",
+        "args": args,
+    }
+    timeout = request.get("timeoutMinutes")
+    if timeout is not None:
+        if not isinstance(timeout, int) or not 1 <= timeout <= 7200:
+            raise ValueError("timeoutMinutes must be 1..7200")
+        normalized["timeoutMinutes"] = timeout
+    if request.get("fullOutput") is True:
+        normalized["fullOutput"] = True
+    return normalized
+
+
+def runner_request(root, commit):
+    if os.environ.get("GITHUB_REF_NAME", "").startswith(PREFIX):
+        return snapshot_request(root, commit)
+    return dispatched_request()
+
+
 def execute():
     if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
         raise ValueError("Submit a new replay instead of rerunning an Actions job")
     root = root_directory()
     commit = os.environ["GITHUB_SHA"]
     if git(root, "rev-parse", "HEAD") != commit:
-        raise ValueError("Runner checkout does not match the dispatched snapshot SHA")
-    request = snapshot_request(root, commit)
+        raise ValueError("Runner checkout does not match the dispatched commit")
+    request = runner_request(root, commit)
     directory = within(root, request["cwd"])
     check_secrets(root)
     names = {option_name(value) for value in request["args"]}
@@ -1828,7 +2067,11 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
     ]
     return {
         "name": "Bitfab replay",
-        "on": "workflow_dispatch",
+        "on": {
+            "workflow_dispatch": {
+                "inputs": {"request": {"type": "string", "required": False}}
+            }
+        },
         "permissions": {"contents": "read"},
         "jobs": {"replay": job},
     }
