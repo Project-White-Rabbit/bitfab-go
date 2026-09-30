@@ -53,6 +53,14 @@ ITEM_ERROR_FIELDS = (
 ITEM_ID_FIELDS = ("originalTraceId", "original_trace_id", "traceId", "trace_id")
 ITEM_ERROR_LINES = 20
 ITEM_ERROR_LENGTH = 500
+SUMMARY_ERROR_ITEMS = 100
+EXPERIMENT_FIELDS = {
+    "experimentId": ("experimentId", "experiment_id"),
+    "experimentUrl": ("experimentUrl", "experiment_url"),
+    "testRunId": ("testRunId", "test_run_id"),
+    "testRunUrl": ("testRunUrl", "test_run_url"),
+    "attempts": ("attempts",),
+}
 UUID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_REMOTE = re.compile(
@@ -60,6 +68,15 @@ GITHUB_REMOTE = re.compile(
 )
 LOG_TIMESTAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 EXPERIMENT_LINE = re.compile(rb"^\[replay\] Experiment ([0-9a-f-]{36}):")
+PROGRESS_PREFIX = b"@@bitfab:progress "
+PROGRESS_PAYLOAD_FIELDS = (
+    "input",
+    "result",
+    "originalOutput",
+    "original_output",
+    "selectiveReplay",
+    "selective_replay",
+)
 SECRET_REFERENCE = re.compile(
     r"[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?[ \t]*:[ \t]*[\"']?\$\{\{\s*secrets(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*[\"']([A-Za-z_][A-Za-z0-9_]*)[\"']\s*\])\s*\}\}"
 )
@@ -78,7 +95,7 @@ FOLLOW_FLAGS = (
     "--cloud-cleanup",
 )
 CLOUD_VALUE_FLAGS = (*FOLLOW_FLAGS, "--cloud-request-id", "--cloud-timeout")
-CLOUD_SWITCHES = ("--cloud", "--cloud-preview", "--cloud-detach")
+CLOUD_SWITCHES = ("--cloud", "--cloud-preview", "--cloud-detach", "--cloud-full-output")
 RENAMED_FLAGS = {
     "--cloud-dry-run": "--cloud-preview",
     "--cloud-check": "--dry-run",
@@ -114,9 +131,17 @@ does not ignore) from the same directory, and this command prints the replay's o
 and exits with its exit code. Credential-like files are refused. Requires git and
 Python 3.10+ on macOS or Linux, with a github.com origin.
 
+The replay's stderr comes back as it printed it. Its stdout result comes back as a
+short summary instead of every item: the experiment ID and URL, how many traces were
+replayed, same, changed, and errored, each errored trace with its error, and the exit
+code. Every item's input and output are already saved in the experiment in Bitfab.
+
 Options added by --cloud:
   --cloud-preview        List what the snapshot would contain and push nothing.
   --cloud-detach         Return after dispatch instead of waiting.
+  --cloud-full-output    Print the replay's whole stdout result, every item included,
+                         instead of the summary. Large runs can exceed what the
+                         GitHub job log holds.
   --cloud-timeout MIN    Stop the replay after MIN minutes (1..7200).
   --cloud-request-id ID  Recover a submission whose response was lost.
 
@@ -648,6 +673,8 @@ def replay_request(root, parsed):
     }
     if "--cloud-timeout" in parsed["cloud"]:
         request["timeoutMinutes"] = int(parsed["cloud"]["--cloud-timeout"])
+    if "--cloud-full-output" in parsed["switches"]:
+        request["fullOutput"] = True
     return request, files
 
 
@@ -871,9 +898,7 @@ def outcome(record):
         raise ValueError("Replay result does not match this execution")
     record["exitCode"] = result["exitCode"]
     parsed = last_json(result.get("stdout", "")) or {}
-    test_run = result.get("testRunId") or parsed.get(
-        "testRunId", parsed.get("test_run_id")
-    )
+    test_run = result.get("testRunId") or experiment_fields(parsed).get("testRunId")
     if isinstance(test_run, str) and UUID.fullmatch(test_run):
         record["testRunId"] = test_run
     if result.get("stoppedEarly"):
@@ -903,6 +928,17 @@ def print_outcome(found):
             f"The replay also printed {result['stdoutOmittedBytes'] // (1024 * 1024)} MiB to stdout before its result, such as a library's logging; only the end was kept"
         )
     print(result.get("stdout", ""), end="", flush=True)
+    summary = last_json(result.get("stdout", "")) or {}
+    if summary.get("cloudSummary") is True:
+        progress(
+            "Printed a summary of the result; every item's input and output are in the experiment"
+            + (
+                f" at {summary['experimentUrl']}"
+                if summary.get("experimentUrl")
+                else ""
+            )
+            + ". Add --cloud-full-output to print every item here instead"
+        )
     if record.get("stoppedEarly"):
         progress(
             f"Replay stopped early: {record['stoppedEarly']}. Traces that finished are saved"
@@ -1203,7 +1239,11 @@ def execute():
     print(OUTPUT_BEGIN, flush=True)
     try:
         code, stdout, omitted, stopped = run_command(
-            directory, args, request.get("timeoutMinutes"), experiment
+            directory,
+            args,
+            request.get("timeoutMinutes"),
+            experiment,
+            summarize=request.get("fullOutput") is not True,
         )
     finally:
         print(OUTPUT_END, flush=True)
@@ -1286,8 +1326,73 @@ def item_errors(items):
         text = " ".join(str(error).split())
         if len(text) > ITEM_ERROR_LENGTH:
             text = text[:ITEM_ERROR_LENGTH] + "..."
-        errors.append((trace, text))
+        errored = {"originalTraceId": trace, "error": text}
+        if isinstance(item.get("attempt"), int):
+            errored["attempt"] = item["attempt"]
+        errors.append(errored)
     return errors
+
+
+def item_field(item, camel, snake):
+    return item[camel] if camel in item else item.get(snake)
+
+
+def canonical(value):
+    return json.dumps(value, separators=(",", ":"))
+
+
+def experiment_fields(parsed):
+    fields = {}
+    for name, spellings in EXPERIMENT_FIELDS.items():
+        value = next(
+            (parsed[key] for key in spellings if parsed.get(key) is not None), None
+        )
+        if value is not None:
+            fields[name] = value
+    return fields
+
+
+def replay_summary(parsed):
+    items = [item for item in parsed["items"] if isinstance(item, dict)]
+    replayed = [item for item in items if not carried_over(item)]
+    errors = item_errors(replayed)
+    counts = {
+        "replayed": len(replayed),
+        "carriedOver": len(items) - len(replayed),
+        "same": 0,
+        "changed": 0,
+        "matchedExpected": 0,
+        "missedExpected": 0,
+        "errored": len(errors),
+    }
+    for item in replayed:
+        if item_errored(item):
+            continue
+        equal = canonical(item.get("result")) == canonical(
+            item_field(item, "originalOutput", "original_output")
+        )
+        if item_field(item, "ingestionType", "ingestion_type") == "seeded":
+            counts["matchedExpected" if equal else "missedExpected"] += 1
+        else:
+            counts["same" if equal else "changed"] += 1
+    summary = {
+        "cloudSummary": True,
+        **experiment_fields(parsed),
+        "counts": counts,
+        "erroredItems": errors[:SUMMARY_ERROR_ITEMS],
+    }
+    if len(errors) > SUMMARY_ERROR_ITEMS:
+        summary["erroredItemsOmitted"] = len(errors) - SUMMARY_ERROR_ITEMS
+    return summary
+
+
+def result_summary(stdout):
+    parsed = last_json(stdout) or {}
+    if parsed.get("cloudSummary") is True:
+        return parsed
+    if isinstance(parsed.get("items"), list):
+        return replay_summary(parsed)
+    return None
 
 
 def item_errored(item):
@@ -1306,8 +1411,24 @@ def raise_interrupt(signum, frame):
     raise KeyboardInterrupt
 
 
-def forward_stderr(stream, experiment):
+def without_item_payload(line):
+    try:
+        event = json.loads(line[len(PROGRESS_PREFIX) :])
+    except ValueError:
+        return line
+    item = event.get("item") if isinstance(event, dict) else None
+    if not isinstance(item, dict):
+        return line
+    event["item"] = {
+        key: value for key, value in item.items() if key not in PROGRESS_PAYLOAD_FIELDS
+    }
+    return PROGRESS_PREFIX + json.dumps(event).encode() + b"\n"
+
+
+def forward_stderr(stream, experiment, summarize):
     for line in iter(stream.readline, b""):
+        if summarize and line.startswith(PROGRESS_PREFIX):
+            line = without_item_payload(line)
         sys.stdout.write(line.decode(errors="replace"))
         sys.stdout.flush()
         if "id" not in experiment:
@@ -1331,6 +1452,15 @@ def trailing_json(text):
 
 def last_json(text):
     return trailing_json(text)[1]
+
+
+def relayed_stdout(output, code, summarize):
+    if summarize:
+        output.seek(0)
+        parsed = last_json(output.read().decode(errors="replace"))
+        if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
+            return json.dumps({**replay_summary(parsed), "exitCode": code}) + "\n", 0
+    return carried_stdout(output)
 
 
 def carried_stdout(output):
@@ -1365,34 +1495,34 @@ def annotate(result):
 
 
 def summary_markdown(result):
-    parsed = last_json(result["stdout"]) or {}
-    test_run = result.get("testRunId") or parsed.get(
-        "testRunId", parsed.get("test_run_id")
-    )
-    items = parsed.get("items") if isinstance(parsed.get("items"), list) else []
-    replayed = [item for item in items if not carried_over(item)]
-    errors = item_errors(replayed)
+    summary = result_summary(result["stdout"]) or {}
+    counts = summary.get("counts", {})
+    test_run = result.get("testRunId") or summary.get("testRunId")
+    errors = summary.get("erroredItems", [])
     lines = [f"Commit: `{result['commitSha']}`", f"Exit code: {result['exitCode']}"]
     if test_run:
         lines.insert(0, f"Test run: `{test_run}`")
     if result.get("stoppedEarly"):
         lines.append(f"Stopped early: {result['stoppedEarly']}")
-    elif items:
-        lines.append(f"Replayed: {len(replayed)}, errored: {len(errors)}")
+    elif counts.get("replayed") or counts.get("carriedOver"):
+        lines.append(
+            f"Replayed: {counts['replayed']}, same: {counts['same']}, changed: {counts['changed']}, errored: {counts['errored']}"
+        )
     text = "### Bitfab replay\n\n" + "\n\n".join(lines) + "\n"
     if errors:
         shown = [
-            f"trace {trace}: {error}" for trace, error in errors[:ITEM_ERROR_LINES]
+            f"trace {error['originalTraceId']}: {error['error']}"
+            for error in errors[:ITEM_ERROR_LINES]
         ]
-        if len(errors) > len(shown):
-            shown.append(f"and {len(errors) - len(shown)} more errored items")
+        if counts.get("errored", 0) > len(shown):
+            shown.append(f"and {counts['errored'] - len(shown)} more errored items")
         text += "\n#### Errored items\n\n" + "".join(
             f"- `{line.replace('`', chr(39))}`\n" for line in shown
         )
     return text
 
 
-def run_command(directory, args, timeout, experiment):
+def run_command(directory, args, timeout, experiment, *, summarize=True):
     stopped = None
     with tempfile.TemporaryFile() as output:
         with subprocess.Popen(
@@ -1404,7 +1534,9 @@ def run_command(directory, args, timeout, experiment):
             start_new_session=True,
         ) as child:
             reader = threading.Thread(
-                target=forward_stderr, args=(child.stderr, experiment), daemon=True
+                target=forward_stderr,
+                args=(child.stderr, experiment, summarize),
+                daemon=True,
             )
             reader.start()
             try:
@@ -1431,9 +1563,9 @@ def run_command(directory, args, timeout, experiment):
                 raise
             finally:
                 reader.join(timeout=5)
-            code = child.returncode
-        text, omitted = carried_stdout(output)
-    return (code if code >= 0 else 1), text, omitted, stopped
+            code = child.returncode if child.returncode >= 0 else 1
+        text, omitted = relayed_stdout(output, code, summarize)
+    return code, text, omitted, stopped
 
 
 def stop(child):
