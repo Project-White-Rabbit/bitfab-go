@@ -169,6 +169,9 @@ fullOutput (true) match --cloud-timeout and --cloud-full-output. version and id 
 optional: version names the request format (3 now, 2 still accepted), and id is the
 execution UUID, which must match an execution_id input when the workflow has one.
 
+The runner's job exits with the replay's exit code, so the Actions run fails when
+the replay does. Traces that errored fail it only under --fail-on-error.
+
 Follow a replay by the execution UUID it prints:
   --cloud-watch ID | --cloud-status ID | --cloud-cancel ID | --cloud-cleanup ID
 
@@ -1727,10 +1730,16 @@ def annotate(result):
     if result.get("stoppedEarly"):
         message = f"Replay stopped early: {result['stoppedEarly']}"
     elif result["exitCode"]:
-        message = f"Replay exited {result['exitCode']}; bitfab-replay --cloud reports it as its own exit code"
+        message = f"Replay exited {result['exitCode']}, so this job exits with it too"
     else:
         return
     print(f"::warning title=Bitfab replay::{message}", flush=True)
+
+
+def runner_exit_code(result):
+    if result.get("stoppedEarly"):
+        return result["exitCode"] or 1
+    return result["exitCode"]
 
 
 def summary_markdown(result):
@@ -2200,8 +2209,9 @@ def main():
             print_json(configure_secrets(argv[1:]))
             return 0
         if argv == ["--cloud-execute"]:
-            annotate(execute())
-            return 0
+            result = execute()
+            annotate(result)
+            return runner_exit_code(result)
         if "-h" in argv or "--help" in argv:
             print(HELP, end="")
             return 0
