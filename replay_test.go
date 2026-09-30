@@ -759,6 +759,94 @@ func TestReplayJudgesAssertionsByDefault(t *testing.T) {
 	}
 }
 
+func replayStartInvocation(t *testing.T, options *ReplayOptions) map[string]any {
+	t.Helper()
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+	if _, err := client.Replay(context.Background(), "invocation-workflow", func() {}, options); err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	invocation, _ := state.startBody["invocation"].(map[string]any)
+	return invocation
+}
+
+func TestReplayStartsWithoutAnInvocationWhenBuildingItPanics(t *testing.T) {
+	previous := buildInvocation
+	buildInvocation = func(*ReplayOptions) map[string]any { panic("boom") }
+	t.Cleanup(func() { buildInvocation = previous })
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	result, err := client.Replay(context.Background(), "invocation-workflow", func() {}, &ReplayOptions{DisableCodeChangeCapture: true, Name: "baseline"})
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if _, present := state.startBody["invocation"]; present {
+		t.Fatalf("start body carried an invocation: %#v", state.startBody["invocation"])
+	}
+	if state.startBody["name"] != "baseline" || result.ExperimentID == "" {
+		t.Fatalf("start body = %#v, result = %#v", state.startBody, result)
+	}
+}
+
+func TestReplayReportsTheOptionsTheCallerPassedAsFlags(t *testing.T) {
+	clearInvocationEnvironment(t)
+	invocation := replayStartInvocation(t, &ReplayOptions{
+		DisableCodeChangeCapture: true,
+		Name:                     "baseline",
+		MaxConcurrency:           2,
+		DatasetIDs:               []string{"ds-1"},
+		Metadata:                 map[string]string{"team": "search", "owner": "ada"},
+		OnItemStart:              func(ReplayItemStartProgress) {},
+	})
+	want := map[string]any{
+		"disable-code-change-capture": true,
+		"name":                        "baseline",
+		"concurrency":                 float64(2),
+		"dataset-ids":                 []any{"ds-1"},
+		"metadata":                    []any{"owner", "team"},
+		"on-item-start":               true,
+	}
+	if !reflect.DeepEqual(invocation["flags"], want) {
+		t.Fatalf("flags = %#v, want %#v", invocation["flags"], want)
+	}
+	if !reflect.DeepEqual(invocation["sdk"], map[string]any{"language": "go", "version": Version}) || invocation["environment"] != "local" {
+		t.Fatalf("invocation = %#v", invocation)
+	}
+}
+
+func TestReplayReportsTheCommandLineFlagsWhenTheCLIStartedIt(t *testing.T) {
+	invocation := replayStartInvocation(t, &ReplayOptions{
+		DisableCodeChangeCapture: true,
+		Limit:                    2,
+		cliFlags:                 map[string]any{"limit": 2, "dry-run": true},
+	})
+	want := map[string]any{"limit": float64(2), "dry-run": true}
+	if !reflect.DeepEqual(invocation["flags"], want) {
+		t.Fatalf("flags = %#v, want %#v", invocation["flags"], want)
+	}
+}
+
+func TestReplayReportsTheCloudRunner(t *testing.T) {
+	clearInvocationEnvironment(t)
+	t.Setenv("BITFAB_REPLAY_EXECUTION_TARGET", "hosted")
+	invocation := replayStartInvocation(t, &ReplayOptions{DisableCodeChangeCapture: true})
+	if invocation["environment"] != "cloud_replay" {
+		t.Fatalf("environment = %#v", invocation["environment"])
+	}
+}
+
 func TestReplayDeprecatedJudgeAssertionsSendsJudgingAndWarnsOnce(t *testing.T) {
 	resetWarnOnce()
 	defer resetWarnOnce()

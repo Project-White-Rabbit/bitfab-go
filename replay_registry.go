@@ -94,6 +94,7 @@ type registryCLIArgs struct {
 	parameters                                                                                                                        []string
 	metadata                                                                                                                          map[string]string
 	visited                                                                                                                           map[string]bool
+	flags                                                                                                                             map[string]any
 }
 
 type registryParameters []string
@@ -151,7 +152,11 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	if fs.NArg() != 0 {
 		return out, fmt.Errorf("bitfab: unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	fs.Visit(func(f *flag.Flag) { out.visited[f.Name] = true })
+	out.flags = map[string]any{}
+	fs.Visit(func(f *flag.Flag) {
+		out.visited[f.Name] = true
+		recordRegistryFlag(out.flags, f)
+	})
 	out.parameters = params
 	for _, key := range []string{"limit", "attempts", "concurrency", "max-concurrency"} {
 		if out.visited[key] {
@@ -176,6 +181,34 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	return out, nil
 }
 
+var registryFlagsOutsideReplay = map[string]bool{"seed": true, "cases": true, "run": true, "from-trace": true, "execute-item": true}
+
+func recordRegistryFlag(flags map[string]any, f *flag.Flag) {
+	if registryFlagsOutsideReplay[f.Name] {
+		return
+	}
+	name := canonicalCLIFlag(f.Name)
+	if commaSeparatedIDFlags[name] {
+		flags[name] = splitCommaSeparatedIDs(f.Value.String())
+		return
+	}
+	switch value := f.Value.(type) {
+	case *registryParameters:
+		items := make([]string, 0, len(*value))
+		for _, raw := range *value {
+			if f.Name == "param" {
+				raw, _, _ = strings.Cut(raw, "=")
+			}
+			items = append(items, raw)
+		}
+		flags[name] = items
+	case flag.Getter:
+		flags[name] = value.Get()
+	default:
+		flags[name] = f.Value.String()
+	}
+}
+
 func registryMetadata(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -189,6 +222,16 @@ func registryMetadata(pairs []string) (map[string]string, error) {
 		metadata[key] = value
 	}
 	return metadata, nil
+}
+
+func splitCommaSeparatedIDs(raw string) []string {
+	ids := []string{}
+	for _, value := range strings.Split(raw, ",") {
+		if id := strings.TrimSpace(value); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func registryIDs(raw string) ([]string, error) {
@@ -499,6 +542,7 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		fmt.Fprintf(stderr, "[replay] Experiment %s: %s\n", event.ExperimentID, event.ExperimentURL)
 	}
 	fmt.Fprintf(stderr, "[replay] Replaying %q...\n", entry.TraceFunctionKey)
+	options.cliFlags = parsed.flags
 	result, err := entry.Client.Replay(ctx, entry.TraceFunctionKey, entry.Function, &options)
 	if err != nil {
 		var replayErr *ReplayError

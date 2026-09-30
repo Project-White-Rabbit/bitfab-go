@@ -225,6 +225,8 @@ type ReplayOptions struct {
 	OnItemFinish             func(ReplayItemFinishProgress)
 	OnExperimentStart        func(ReplayExperimentStart)
 	dbBranchSettings         map[string]any
+	cliFlags                 map[string]any
+	invocation               map[string]any
 }
 
 // ReportReplayProgress writes a replay lifecycle event using the Bitfab plugin wire protocol.
@@ -560,6 +562,7 @@ func (c *Client) Replay(
 	if err != nil {
 		return ReplayResult{}, err
 	}
+	resolved.invocation = safeReplayInvocation(options)
 	if resolved.JudgeAssertions {
 		warnOnce("judge-assertions-deprecated", judgeAssertionsDeprecation)
 	}
@@ -842,6 +845,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.DryRun {
 		payload["dryRun"] = true
+	}
+	if options.invocation != nil {
+		payload["invocation"] = options.invocation
 	}
 
 	timeout := 30 * time.Second

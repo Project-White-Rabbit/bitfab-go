@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -131,6 +133,43 @@ func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
 	state.mu.Unlock()
 	if body != nil {
 		t.Fatalf("usage error still started a replay: %+v", body)
+	}
+}
+
+func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{
+		Client:   client,
+		Function: BindReplayFunction("registry", func(string, int) {}),
+		Options:  ReplayOptions{TraceIDs: []string{"a"}, Notes: "registered"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"pipeline", "--dry-run", "--name", "baseline", "--max-concurrency", "2", "--dataset-id", "ds-1", "--metadata", "team=search", "--metadata", "owner=ada", "--param", "model=gpt", "--no-db-branch"}
+	if _, err := RunReplayCLI(context.Background(), registry, args, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	invocation, _ := state.startBody["invocation"].(map[string]any)
+	state.mu.Unlock()
+	want := map[string]any{
+		"dry-run":      true,
+		"name":         "baseline",
+		"concurrency":  float64(2),
+		"dataset-ids":  []any{"ds-1"},
+		"metadata":     []any{"owner", "team"},
+		"param":        []any{"model"},
+		"no-db-branch": true,
+	}
+	if !reflect.DeepEqual(invocation["flags"], want) {
+		t.Fatalf("flags = %#v, want %#v", invocation["flags"], want)
 	}
 }
 
@@ -451,5 +490,25 @@ func TestReplayRegistryCLIHelpListsFailOnError(t *testing.T) {
 	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
 	if !strings.Contains(stderr.String(), "-fail-on-error") {
 		t.Fatalf("help = %s", stderr.String())
+	}
+}
+
+func TestRecordRegistryFlagSendsCommaSeparatedIDsAsLists(t *testing.T) {
+	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
+	fs.String("trace-ids", "", "")
+	fs.String("dataset-id", "", "")
+	fs.String("grader-ids", "", "")
+	if err := fs.Parse([]string{"--trace-ids", "a, b,,c", "--dataset-id", "ds-1", "--grader-ids", "g-1"}); err != nil {
+		t.Fatal(err)
+	}
+	flags := map[string]any{}
+	fs.Visit(func(f *flag.Flag) { recordRegistryFlag(flags, f) })
+	want := map[string]any{
+		"trace-ids":   []string{"a", "b", "c"},
+		"dataset-ids": []string{"ds-1"},
+		"grader-ids":  []string{"g-1"},
+	}
+	if !reflect.DeepEqual(flags, want) {
+		t.Fatalf("flags = %#v, want %#v", flags, want)
 	}
 }

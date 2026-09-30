@@ -33,6 +33,8 @@ API_VERSION = "2026-03-10"
 REPLAY_COMMAND_ENV = "BITFAB_REPLAY_COMMAND"
 SDK_LANGUAGE_ENV = "BITFAB_SDK_LANGUAGE"
 CHECK_COMMAND_ENV = "BITFAB_REPLAY_CHECK"
+EXECUTION_TARGET_ENV = "BITFAB_REPLAY_EXECUTION_TARGET"
+HOSTED_EXECUTION_TARGET = "hosted"
 REQUEST_VERSION = 3
 OLDEST_DISPATCHED_VERSION = 2
 RESULT_LINE = "bitfab-replay-result "
@@ -1776,6 +1778,7 @@ def run_command(directory, args, timeout, experiment, *, summarize=True):
         with subprocess.Popen(
             args,
             cwd=directory,
+            env={**os.environ, EXECUTION_TARGET_ENV: HOSTED_EXECUTION_TARGET},
             stdout=output,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
