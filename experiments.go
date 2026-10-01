@@ -89,10 +89,11 @@ type ExperimentPage struct {
 	HasMore     bool         `json:"hasMore"`
 }
 
-// ExperimentTotals counts the replays a run produced by status. Total is the
-// scenario count.
+// ExperimentTotals counts the replays a run produced by status. Total counts
+// one replay per trace per attempt, and Traces counts distinct traces.
 type ExperimentTotals struct {
 	Total          int `json:"total"`
+	Traces         int `json:"traces"`
 	Succeeded      int `json:"succeeded"`
 	Failed         int `json:"failed"`
 	Pending        int `json:"pending"`
@@ -104,8 +105,8 @@ type ExperimentTotals struct {
 }
 
 // ExperimentTally counts verdicts against their originals. A trace or an
-// assertion passes when at least 75 percent of its attempts passed, and
-// Passing / (Passing + Failing) is the pass rate.
+// assertion passes when at least 75 percent of its attempts passed. Passing
+// and Failing count every verdict, so Passing / (Passing + Failing) is the pass rate.
 type ExperimentTally struct {
 	Fixed             int `json:"fixed"`
 	StillPassing      int `json:"stillPassing"`
