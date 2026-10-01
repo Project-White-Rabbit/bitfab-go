@@ -35,7 +35,8 @@ SDK_LANGUAGE_ENV = "BITFAB_SDK_LANGUAGE"
 CHECK_COMMAND_ENV = "BITFAB_REPLAY_CHECK"
 EXECUTION_TARGET_ENV = "BITFAB_REPLAY_EXECUTION_TARGET"
 HOSTED_EXECUTION_TARGET = "hosted"
-REQUEST_VERSION = 3
+REQUEST_VERSION = 4
+PLAIN_REQUEST_VERSION = 3
 OLDEST_DISPATCHED_VERSION = 2
 RESULT_LINE = "bitfab-replay-result "
 RESULT_CHUNK = 4000
@@ -92,6 +93,13 @@ PUSH_TRIGGER = re.compile(
 )
 DISPATCH_INPUTS = ("execution_id", "request")
 BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RESERVED_ENV_PREFIXES = ("GITHUB_", "RUNNER_", "ACTIONS_", "BITFAB_REPLAY_")
+SECRET_ENV_NAME = re.compile(
+    r"(?:^|_)(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?)(?:_|$)", re.IGNORECASE
+)
+ENV_FLAG = "--cloud-env"
+URL_PASSWORD = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@")
 FOLLOW_FLAGS = (
     "--cloud-status",
     "--cloud-watch",
@@ -152,6 +160,11 @@ Options added by --cloud:
                          instead of the summary. Large runs can exceed what the
                          GitHub job log holds.
   --cloud-timeout MIN    Stop the replay after MIN minutes (1..7200).
+  --cloud-env NAME=VALUE Set an environment variable for this replay only; repeat it
+                         for more. NAME alone copies the value from your shell. The
+                         value is stored in the snapshot commit on GitHub, so this is
+                         for settings, never secrets: names that look like secrets,
+                         and names the workflow reads from a secret, are refused.
   --cloud-request-id ID  Recover a submission whose response was lost.
   --cloud-ref BRANCH     Replay BRANCH as it is on GitHub, with no snapshot of your
                          working tree, and record the experiment on BRANCH. Meant for
@@ -163,12 +176,13 @@ A workflow can also dispatch bitfab-replay.yml itself on any branch other than a
 bitfab-replay/ snapshot branch, passing the replay as JSON in the request input:
 
   {"args": ["--registry", "scripts/replay.ts", "classify", "--dataset-ids", "UUID"],
-   "cwd": "web", "timeoutMinutes": 60}
+   "cwd": "web", "timeoutMinutes": 60, "env": {"LOG_LEVEL": "debug"}}
 
 args are the replay options without --cloud. cwd is the directory to replay from,
 relative to the repository root, and defaults to the root. timeoutMinutes and
-fullOutput (true) match --cloud-timeout and --cloud-full-output. version and id are
-optional: version names the request format (3 now, 2 still accepted), and id is the
+fullOutput (true) match --cloud-timeout and --cloud-full-output, and env holds the
+values --cloud-env sets. version and id are optional: version names the request
+format (4 when env is set, otherwise 3; 2 is still accepted), and id is the
 execution UUID, which must match an execution_id input when the workflow has one.
 
 The runner's job exits with the replay's exit code, so the Actions run fails when
@@ -595,7 +609,17 @@ def split_arguments(argv):
         name = option_name(token)
         if name in RENAMED_FLAGS:
             raise ValueError(f"{name} is gone; use {RENAMED_FLAGS[name]}")
-        if name in CLOUD_VALUE_FLAGS:
+        if name == ENV_FLAG:
+            if "=" in token:
+                value = token.split("=", 1)[1]
+                index += 1
+            elif index + 1 < len(argv):
+                value = argv[index + 1]
+                index += 2
+            else:
+                raise ValueError(f"{ENV_FLAG} needs NAME=VALUE or NAME")
+            cloud.setdefault(ENV_FLAG, []).append(value)
+        elif name in CLOUD_VALUE_FLAGS:
             if "=" in token:
                 value = token.split("=", 1)[1]
                 index += 1
@@ -650,6 +674,8 @@ def parse(argv):
             raise ValueError(
                 f"--cloud-ref takes a branch name such as dev, other than a {PREFIX} snapshot branch"
             )
+        if ENV_FLAG in cloud:
+            cloud[ENV_FLAG] = replay_environment(cloud[ENV_FLAG])
         operation = "submit"
         execution_id = cloud.get("--cloud-request-id") or str(uuid.uuid4())
     if not UUID.fullmatch(execution_id):
@@ -673,6 +699,62 @@ def validate_arguments(args):
             raise ValueError("The runner replays locally and never dispatches again")
     if sum(len(value) for value in args) > 16000:
         raise ValueError("Replay options exceed 16000 characters")
+
+
+def replay_environment(assignments):
+    values = {}
+    for assignment in assignments:
+        name, separator, value = assignment.partition("=")
+        if not separator:
+            if name not in os.environ:
+                raise ValueError(
+                    f"{ENV_FLAG} {name} copies {name} from your shell, and it is not set there; pass {ENV_FLAG} {name}=VALUE instead"
+                )
+            value = os.environ[name]
+        if name in values:
+            raise ValueError(f"{ENV_FLAG} sets {name} twice")
+        values[name] = value
+    validate_environment(values)
+    return values
+
+
+def validate_environment(values):
+    if not isinstance(values, dict) or not all(
+        isinstance(name, str) and isinstance(value, str)
+        for name, value in values.items()
+    ):
+        raise ValueError("Replay environment must map names to string values")
+    for name, value in values.items():
+        if not ENV_NAME.fullmatch(name):
+            raise ValueError(
+                f"{name!r} is not an environment variable name; use letters, digits, and underscores"
+            )
+        if name.upper().startswith(RESERVED_ENV_PREFIXES) or name.upper() == "CI":
+            raise ValueError(
+                f"{name} belongs to GitHub Actions or the cloud runner and cannot be set per replay"
+            )
+        if SECRET_ENV_NAME.search(name):
+            raise ValueError(
+                f"{name} looks like a secret, and {ENV_FLAG} values are stored in the snapshot commit on GitHub. Map it in the workflow's replay step env from a GitHub secret instead, then set it with bitfab-replay --cloud-secrets"
+            )
+        if "\x00" in value or "\n" in value or "\r" in value:
+            raise ValueError(f"{name} must be a single-line value")
+        if URL_PASSWORD.search(value):
+            raise ValueError(
+                f"{name} holds a URL with a password, and {ENV_FLAG} values are stored in the snapshot commit on GitHub. Map it in the workflow's replay step env from a GitHub secret instead, then set it with bitfab-replay --cloud-secrets"
+            )
+    if sum(len(name) + len(value) for name, value in values.items()) > 16000:
+        raise ValueError("Replay environment exceeds 16000 characters")
+
+
+def workflow_environment_conflicts(root, values):
+    path = running_workflow(root)
+    mapped = workflow_secrets(path.read_text()) if path.is_file() else {}
+    conflicts = sorted(name for name in values if name in mapped)
+    if conflicts:
+        raise ValueError(
+            f"The workflow already reads {', '.join(conflicts)} from a GitHub secret, so a replay cannot set it; update the secret with bitfab-replay --cloud-secrets"
+        )
 
 
 def dry_run(args):
@@ -705,7 +787,9 @@ def replay_request(root, parsed):
         index += 1
     validate_arguments(args)
     request = {
-        "version": REQUEST_VERSION,
+        "version": REQUEST_VERSION
+        if parsed["cloud"].get(ENV_FLAG)
+        else PLAIN_REQUEST_VERSION,
         "id": parsed["id"],
         "cwd": working_directory(root),
         "args": args,
@@ -714,6 +798,8 @@ def replay_request(root, parsed):
         request["timeoutMinutes"] = int(parsed["cloud"]["--cloud-timeout"])
     if "--cloud-full-output" in parsed["switches"]:
         request["fullOutput"] = True
+    if parsed["cloud"].get(ENV_FLAG):
+        request["env"] = parsed["cloud"][ENV_FLAG]
     return request, files
 
 
@@ -1372,7 +1458,10 @@ def snapshot_request(root, commit):
         request = json.loads(body)
     except ValueError:
         request = None
-    if not isinstance(request, dict) or request.get("version") != REQUEST_VERSION:
+    if not isinstance(request, dict) or request.get("version") not in (
+        PLAIN_REQUEST_VERSION,
+        REQUEST_VERSION,
+    ):
         version = request.get("version", 0) if isinstance(request, dict) else 0
         newer = isinstance(version, int) and version > REQUEST_VERSION
         raise ValueError(
@@ -1385,6 +1474,8 @@ def snapshot_request(root, commit):
             "The runner replays only the snapshot branch its request names; start replays with bitfab-replay --cloud"
         )
     validate_arguments(request["args"])
+    if "env" in request:
+        validate_environment(request["env"])
     return request
 
 
@@ -1451,6 +1542,9 @@ def dispatched_request():
         normalized["timeoutMinutes"] = timeout
     if request.get("fullOutput") is True:
         normalized["fullOutput"] = True
+    if request.get("env"):
+        validate_environment(request["env"])
+        normalized["env"] = request["env"]
     return normalized
 
 
@@ -1470,6 +1564,10 @@ def execute():
     request = runner_request(root, commit)
     directory = within(root, request["cwd"])
     check_secrets(root)
+    environment = request.get("env") or {}
+    if environment:
+        workflow_environment_conflicts(root, environment)
+        print(f"Setting {', '.join(sorted(environment))} from the request", flush=True)
     names = {option_name(value) for value in request["args"]}
     args = [
         *replay_command(),
@@ -1477,7 +1575,7 @@ def execute():
         *([] if names & set(CODE_CHANGE_FLAGS) else ["--no-code-change"]),
     ]
     if dry_run(request["args"]):
-        run_check_command(directory)
+        run_check_command(directory, environment)
     experiment = {}
     previous = signal.signal(signal.SIGTERM, raise_interrupt)
     print(OUTPUT_BEGIN, flush=True)
@@ -1488,6 +1586,7 @@ def execute():
             request.get("timeoutMinutes"),
             experiment,
             summarize=request.get("fullOutput") is not True,
+            environment=environment,
         )
     finally:
         print(OUTPUT_END, flush=True)
@@ -1537,13 +1636,17 @@ def check_secrets(root):
             )
 
 
-def run_check_command(directory):
+def run_check_command(directory, environment=None):
     check = os.environ.get(CHECK_COMMAND_ENV, "").strip()
     if not check:
         return
     print(f"Running {CHECK_COMMAND_ENV}: {check}", flush=True)
     code = subprocess.run(
-        shlex.split(check), cwd=directory, stdin=subprocess.DEVNULL, check=False
+        shlex.split(check),
+        cwd=directory,
+        env={**os.environ, **(environment or {})},
+        stdin=subprocess.DEVNULL,
+        check=False,
     ).returncode
     if code:
         raise ValueError(f"{CHECK_COMMAND_ENV} exited {code}; its output is above")
@@ -1772,13 +1875,19 @@ def summary_markdown(result):
     return text
 
 
-def run_command(directory, args, timeout, experiment, *, summarize=True):
+def run_command(
+    directory, args, timeout, experiment, *, summarize=True, environment=None
+):
     stopped = None
     with tempfile.TemporaryFile() as output:
         with subprocess.Popen(
             args,
             cwd=directory,
-            env={**os.environ, EXECUTION_TARGET_ENV: HOSTED_EXECUTION_TARGET},
+            env={
+                **os.environ,
+                **(environment or {}),
+                EXECUTION_TARGET_ENV: HOSTED_EXECUTION_TARGET,
+            },
             stdout=output,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
