@@ -218,6 +218,45 @@ func TestReplayChildDeliveryFailureReachesTheParent(t *testing.T) {
 	}
 }
 
+func TestReplayChildUnconfirmedDeliveryWarnsWithoutFailingTheRun(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "registry")
+	build := exec.Command("go", "build", "-o", binary, "./testdata/process_registry")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build: %v %s", err, output)
+	}
+	state := &replayTestServerState{}
+	base := replayTestHandler(t, state, replayItems())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == otelTracesEndpoint {
+			http.Error(w, "rejected", http.StatusBadRequest)
+			return
+		}
+		base(w, r)
+	}))
+	defer server.Close()
+	command := exec.Command(binary, "pipeline", "--fail-on-error")
+	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_DISABLE_CODE_CHANGE_CAPTURE=1", "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200")
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("run exited with %v, want 0:\n%s", err, stderr.String())
+	}
+	output := stderr.String()
+	for _, label := range []string{"original-trace-1#0", "original-trace-1#1", "original-trace-2#0", "original-trace-2#1"} {
+		want := "[replay] span delivery problem for " + label + ": [bitfab] replay " + label + " could not confirm all spans reached Bitfab within 0.2s. The run continues; Bitfab will show this replay as capture incomplete."
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q on the parent stderr:\n%s", want, output)
+		}
+	}
+	state.mu.Lock()
+	completed := state.completeBody != nil
+	state.mu.Unlock()
+	if !completed {
+		t.Fatal("the run never called complete_replay")
+	}
+}
+
 const (
 	replayStallCalm     = "some avg10=35.00 avg60=20.00 avg300=5.00 total=100\nfull avg10=0.40 avg60=0.10 avg300=0.00 total=10\n"
 	replayStallCritical = "some avg10=80.00 avg60=60.00 avg300=20.00 total=100\nfull avg10=12.50 avg60=4.00 avg300=1.00 total=10\n"

@@ -64,7 +64,7 @@ func runAssignedReplayItem(ctx context.Context, entry ReplayRegistration, option
 	client.httpClient.trackTraceDeliveries([]string{assignment.LocalTraceID})
 	item := client.runReplayItem(ctx, entry.TraceFunctionKey, callable, normalized, assignment.ExperimentID, assignment.ServerItem, assignment.LocalTraceID)
 	if item.localTraceID != "" {
-		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.ExperimentID, []string{item.localTraceID}, deliveryTimeout)
+		persisted, persistErr := client.waitForReplayPersistence(ctx, assignment.ExperimentID, []string{item.localTraceID}, deliveryTimeout, replayLabels([]ReplayItem{item}))
 		if persistErr != nil {
 			setReplaySetupError(&item, persistErr)
 			problems.add(persistErr.Error())

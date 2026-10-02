@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -648,7 +649,7 @@ func (c *Client) Replay(
 		}
 	}
 
-	persisted, err := c.waitForReplayPersistence(ctx, start.ExperimentID, executedTraceIDs, replayPersistenceTimeout)
+	persisted, err := c.waitForReplayPersistence(ctx, start.ExperimentID, executedTraceIDs, replayPersistenceTimeout, replayLabels(result.Items))
 	if err != nil {
 		return ReplayResult{}, newReplayRunError(err, result)
 	}
@@ -1228,7 +1229,25 @@ func setReplaySetupError(item *ReplayItem, err error) {
 	item.ReplayError = err
 }
 
-func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID string, traceIDs []string, timeout time.Duration) (map[string]string, error) {
+func replayLabels(items []ReplayItem) map[string]string {
+	labels := make(map[string]string, len(items))
+	for _, item := range items {
+		if item.localTraceID != "" {
+			labels[item.localTraceID] = fmt.Sprintf("%s#%d", item.OriginalTraceID, item.Attempt)
+		}
+	}
+	return labels
+}
+
+func unconfirmedReplayWarning(label string, timeout time.Duration, flushed bool) string {
+	message := fmt.Sprintf("[bitfab] replay %s could not confirm all spans reached Bitfab within %gs. The run continues; Bitfab will show this replay as capture incomplete.", label, timeout.Seconds())
+	if !flushed {
+		message += " Some spans likely never left this process."
+	}
+	return message
+}
+
+func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID string, traceIDs []string, timeout time.Duration, labels map[string]string) (map[string]string, error) {
 	if len(traceIDs) == 0 {
 		return map[string]string{}, nil
 	}
@@ -1256,20 +1275,21 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 	}
 
 	deadline := time.Now().Add(timeout)
-	missing := len(expected)
 	for {
 		status, err := c.getReplayStatus(ctx, experimentID, expected)
+		var missing []string
 		if err == nil {
-			missing = 0
-			for traceID := range expected {
-				if status.TraceIDs[traceID] == "" {
-					missing++
-				}
-			}
-			if missing == 0 {
-				for traceID, serverID := range status.TraceIDs {
+			for traceID, serverID := range status.TraceIDs {
+				if serverID != "" {
 					readBackTraceIDs[traceID] = serverID
 				}
+			}
+			for traceID := range expected {
+				if status.TraceIDs[traceID] == "" {
+					missing = append(missing, traceID)
+				}
+			}
+			if len(missing) == 0 {
 				return readBackTraceIDs, nil
 			}
 		}
@@ -1277,17 +1297,17 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 			if err != nil {
 				return nil, fmt.Errorf("bitfab: replay traces were not fully persisted before the deadline: %w", err)
 			}
-			cause := ""
-			if !flushed {
-				cause = " Delivery was also not confirmed before the flush deadline, so the spans likely never reached the server."
+			sort.Strings(missing)
+			for _, traceID := range missing {
+				label := labels[traceID]
+				if label == "" {
+					label = traceID
+				}
+				message := unconfirmedReplayWarning(label, timeout, flushed)
+				log.Print(message)
+				recordReplayDeliveryProblem(message)
 			}
-			return nil, fmt.Errorf(
-				"bitfab: replay traces were not fully persisted before the delivery deadline (experiment %s, missing %d of %d traces).%s",
-				experimentID,
-				missing,
-				len(expected),
-				cause,
-			)
+			return readBackTraceIDs, nil
 		}
 		timer := time.NewTimer(100 * time.Millisecond)
 		select {

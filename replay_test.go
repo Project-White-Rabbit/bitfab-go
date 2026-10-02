@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -256,6 +258,91 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 	for _, trace := range state.traces {
 		if trace["experimentId"] != "run-1" || trace["testRunId"] != "run-1" {
 			t.Errorf("trace omitted experiment ID keys: %#v", trace)
+		}
+	}
+}
+
+type lockedLogBuffer struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
+}
+
+func TestReplayCompletesWithOneWarningPerUnconfirmedReplay(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	base := replayTestHandler(t, state, replayItems())
+	legacy := newLegacyCarrierServer(t, base)
+	defer legacy.Close()
+	var interrupted atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case otelTracesEndpoint:
+			legacy.Config.Handler.ServeHTTP(httptest.NewRecorder(), r)
+			http.Error(w, "rejected", http.StatusBadRequest)
+		case "/api/sdk/replay/status":
+			writeReplayTestJSON(t, w, map[string]any{"traceIds": map[string]string{}})
+		case "/api/sdk/replay/interrupt":
+			interrupted.Store(true)
+			writeReplayTestJSON(t, w, map[string]any{})
+		default:
+			base(w, r)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	logged := &lockedLogBuffer{}
+	previousOutput, previousFlags := log.Writer(), log.Flags()
+	log.SetOutput(logged)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	}()
+
+	result, err := client.Replay(
+		context.Background(),
+		"typed-workflow",
+		func(ctx context.Context, name string, count int) (string, error) {
+			return fmt.Sprintf("%s:%d", name, count), nil
+		},
+		&ReplayOptions{Limit: 2, MaxConcurrency: 2},
+	)
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	for _, item := range result.Items {
+		if item.Error != nil {
+			t.Fatalf("item %s errored: %s", item.OriginalTraceID, *item.Error)
+		}
+	}
+	state.mu.Lock()
+	completed := state.completeBody != nil
+	state.mu.Unlock()
+	if !completed {
+		t.Fatal("the run never called complete_replay")
+	}
+	if interrupted.Load() {
+		t.Fatal("the run was interrupted")
+	}
+	output := logged.String()
+	for _, label := range []string{"original-trace-1#0", "original-trace-2#0"} {
+		want := "[bitfab] replay " + label + " could not confirm all spans reached Bitfab within 30s. The run continues; Bitfab will show this replay as capture incomplete.\n"
+		if strings.Count(output, want) != 1 {
+			t.Fatalf("want exactly one %q in:\n%s", want, output)
 		}
 	}
 }
