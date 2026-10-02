@@ -90,7 +90,8 @@ type ExperimentPage struct {
 }
 
 // ExperimentTotals counts the replays a run produced by status. Total counts
-// one replay per trace per attempt, and Traces counts distinct traces.
+// one replay per trace per attempt, Traces counts distinct traces, and Judging
+// counts traces, replays or originals, with an assertion verdict still being judged.
 type ExperimentTotals struct {
 	Total          int `json:"total"`
 	Traces         int `json:"traces"`
@@ -101,6 +102,7 @@ type ExperimentTotals struct {
 	Errored        int `json:"errored"`
 	WithErrors     int `json:"withErrors"`
 	Ungradable     int `json:"ungradable"`
+	Judging        int `json:"judging"`
 	Skipped        int `json:"skipped"`
 }
 

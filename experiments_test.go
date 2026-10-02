@@ -32,7 +32,7 @@ func experimentRollupJSON(id string) map[string]any {
 		"experimentId": id,
 		"totals": map[string]any{
 			"total": 12, "succeeded": 10, "failed": 1, "pending": 0, "awaitingLabels": 0,
-			"errored": 1, "withErrors": 1, "ungradable": 0, "skipped": 0,
+			"errored": 1, "withErrors": 1, "ungradable": 0, "judging": 2, "skipped": 0,
 		},
 		"rollup": map[string]any{
 			"traces": tally, "skippedTraces": 1, "labels": tally, "checks": tally,
@@ -142,7 +142,7 @@ func TestExperiments_GetRollup(t *testing.T) {
 	if len(requests) != 1 || requests[0].path != "/api/sdk/experiments/experiment-1/rollup" {
 		t.Fatalf("requests = %+v", requests)
 	}
-	if rollup.ExperimentID != "experiment-1" || rollup.Totals.Total != 12 || rollup.Totals.Succeeded != 10 ||
+	if rollup.ExperimentID != "experiment-1" || rollup.Totals.Total != 12 || rollup.Totals.Succeeded != 10 || rollup.Totals.Judging != 2 ||
 		rollup.Rollup.Traces.Passing != 8 || rollup.Rollup.Traces.Failing != 9 || rollup.Rollup.SkippedTraces != 1 ||
 		rollup.Rollup.Labels.Fixed != 1 || rollup.Rollup.Checks.OriginalUnlabeled != 5 ||
 		len(rollup.Rollup.Categories) != 1 || rollup.Rollup.Categories[0].Category.Title != "Safety" ||
