@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -156,6 +157,21 @@ func TestHTTPClient_SimulationPlanReadsReuseOneConnection(t *testing.T) {
 	}
 	if got := newConns.Load(); got != 1 {
 		t.Errorf("five sim plan reads opened %d connections, want 1", got)
+	}
+}
+
+func TestHTTPClient_SimulationPlanReadSendsNothingWithoutAPIKey(t *testing.T) {
+	server, newConns := newConnCountingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"nodes":[]}`))
+	}))
+	for _, key := range []string{"", "  "} {
+		hc := newHTTPClient(key, server.URL)
+		if _, err := hc.getSimulationPlan(); !errors.Is(err, errNoAPIKeyForSimulationPlan) {
+			t.Fatalf("key %q: got error %v, want errNoAPIKeyForSimulationPlan", key, err)
+		}
+	}
+	if got := newConns.Load(); got != 0 {
+		t.Errorf("keyless sim plan reads opened %d connections, want 0", got)
 	}
 }
 

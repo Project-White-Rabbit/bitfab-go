@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,8 @@ const simulationPlanReadTimeout = 5 * time.Second
 const simulationPlanRefreshInterval = 60 * time.Second
 const simulationPlanRetryInterval = 10 * time.Second
 const simulationPlanMaxHeld = 1000
+
+var errNoAPIKeyForSimulationPlan = errors.New("no API key is set")
 
 type simulationPlanPolicy uint8
 
@@ -519,6 +522,10 @@ func (p *simulationPlan) stop() {
 }
 
 func (h *httpClient) getSimulationPlan() (map[string]any, error) {
+	// Without a key the server answers 401, so skip the request entirely.
+	if strings.TrimSpace(h.resolveAPIKey()) == "" {
+		return nil, errNoAPIKeyForSimulationPlan
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), simulationPlanReadTimeout)
 	defer cancel()
 	var body map[string]any
