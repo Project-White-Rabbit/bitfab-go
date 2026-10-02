@@ -306,6 +306,21 @@ func (c *Client) GetTraceSpan(ctx context.Context, traceID string, lookup SpanLo
 	return response.Span, nil
 }
 
+func (c *Client) GetSpan(ctx context.Context, spanID string) (*CapturedSpan, error) {
+	if strings.TrimSpace(spanID) == "" {
+		return nil, fmt.Errorf("bitfab: invalid span ID")
+	}
+
+	var response struct {
+		Span *CapturedSpan `json:"span"`
+	}
+	endpoint := "/api/sdk/spans/" + url.PathEscape(spanID)
+	if err := c.httpClient.get(ctx, endpoint, &response); err != nil {
+		return nil, err
+	}
+	return response.Span, nil
+}
+
 // SpanFunc is the function signature for code executed inside a span.
 type SpanFunc func(ctx context.Context) (any, error)
 
