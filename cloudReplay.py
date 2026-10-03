@@ -36,6 +36,16 @@ SDK_LANGUAGE_ENV = "BITFAB_SDK_LANGUAGE"
 CHECK_COMMAND_ENV = "BITFAB_REPLAY_CHECK"
 EXECUTION_TARGET_ENV = "BITFAB_REPLAY_EXECUTION_TARGET"
 HOSTED_EXECUTION_TARGET = "hosted"
+API_KEY_ENV = "BITFAB_REPLAY_BITFAB_API_KEY"
+PRINT_API_KEY_FLAG = "--print-api-key"
+API_KEY_LINE = "@@bitfab:api-key "
+KEY_INPUT = "key_id"
+KEY_SECRET_PREFIX = "BITFAB_REPLAY_KEY_"
+KEY_SECRET_REFERENCE = (
+    "${{ secrets[format('" + KEY_SECRET_PREFIX + "{0}', inputs." + KEY_INPUT + ")] }}"
+)
+API_KEY_PROBE_SECONDS = 120
+RUN_NAME = "Bitfab replay ${{ inputs.execution_id || github.ref_name }}"
 REQUEST_VERSION = 4
 PLAIN_REQUEST_VERSION = 3
 OLDEST_DISPATCHED_VERSION = 2
@@ -95,7 +105,7 @@ ENVIRONMENT_SETTING = re.compile(
 PUSH_TRIGGER = re.compile(
     r"^[ \t]*\"?(?:on\"?[ \t]*:.*\bpush\b|push\"?[ \t]*:)", re.MULTILINE
 )
-DISPATCH_INPUTS = ("execution_id", "request")
+DISPATCH_INPUTS = ("execution_id", "request", KEY_INPUT)
 BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 RESERVED_ENV_PREFIXES = ("GITHUB_", "RUNNER_", "ACTIONS_", "BITFAB_REPLAY_")
@@ -204,6 +214,14 @@ values --cloud-env sets. version and id are optional: version names the request
 format (4 when env is set, otherwise 3; 2 is still accepted), and id is the
 execution UUID, which must match an execution_id input when the workflow has one.
 
+The replay runs with the Bitfab API key it would use on your machine, so the
+experiment is recorded as yours. Before dispatch, the replay's registry is loaded
+locally to read its client's key, which the GitHub CLI stores as a GitHub secret
+named for this execution and deletes once the replay starts. Without the GitHub
+CLI, without permission to manage the repository's Actions secrets, with no key
+resolved locally, or with a workflow that declares no key_id input, the run uses
+the workflow's BITFAB_API_KEY secret instead.
+
 The runner's job exits with the replay's exit code, so the Actions run fails when
 the replay does. Traces that errored fail it only under --fail-on-error.
 
@@ -216,7 +234,10 @@ Set up once:
   --cloud-init [--secret NAME ...] [--environment NAME] [--run COMMAND]
                [--runs-on LABEL] [--secret-prefix PREFIX] [--check COMMAND]
       Writes .github/workflows/bitfab-replay.yml, the only file cloud replay keeps
-      in the repository, and lists what is left to do.
+      in the repository, and lists what is left to do. On an existing workflow it
+      adds only the lines a newer SDK needs and lists what it changed.
+  --cloud-update [same options]
+      The same command as --cloud-init, for bringing an existing setup up to date.
   --cloud-secrets --env-file FILE [NAME ...] [--environment NAME] [--dry-run]
       Copies local values into the GitHub secrets the workflow reads.
 
@@ -1189,6 +1210,7 @@ def print_outcome(found):
 
 
 def cleanup(root, record):
+    remove_key(record)
     if record.get("cleaned"):
         return
     if record.get("snapshot") is False:
@@ -1335,10 +1357,110 @@ def submit(root, repo, workflow, parsed, path):
         ) from error
     record["state"] = "dispatch_unknown"
     save(path, record)
-    declared = declared_inputs(
-        within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
+    text = within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
+    declared = declared_inputs(text)
+    key_inputs = store_key(root, record, declared, text)
+    save(path, record)
+    return dispatch(
+        record,
+        {"execution_id": execution_id, "request": "-", **key_inputs},
+        declared,
     )
-    return dispatch(record, {"execution_id": execution_id, "request": "-"}, declared)
+
+
+def local_api_key(root, request):
+    try:
+        output = command(
+            [*replay_command(), *request["args"], PRINT_API_KEY_FLAG],
+            cwd=within(root, request["cwd"]),
+            timeout=API_KEY_PROBE_SECONDS,
+            input="",
+        )
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+    for line in reversed(output.splitlines()):
+        if not line.startswith(API_KEY_LINE):
+            continue
+        try:
+            key = json.loads(line.removeprefix(API_KEY_LINE)).get("apiKey")
+        except (ValueError, AttributeError):
+            return None
+        return key if isinstance(key, str) and key.strip() else None
+    return None
+
+
+def store_key(root, record, declared, workflow_text):
+    shared = "so the run uses the workflow's BITFAB_API_KEY secret"
+    if KEY_INPUT not in declared:
+        progress(
+            f"The workflow takes no {KEY_INPUT} input, {shared}. To replay with your own Bitfab API key, run bitfab-replay --cloud-init, which adds the {KEY_INPUT} input and {API_KEY_ENV} to the workflow"
+        )
+        return {}
+    if shutil.which("gh") is None:
+        progress(
+            f"Replaying with your own Bitfab API key needs the GitHub CLI (https://cli.github.com) to store it as a GitHub secret, {shared}"
+        )
+        return {}
+    key = local_api_key(root, record["request"])
+    if key is None:
+        progress(
+            f"The replay's Bitfab client resolved no API key on this machine, {shared}"
+        )
+        return {}
+    key_id = record["id"].replace("-", "").upper()
+    name = KEY_SECRET_PREFIX + key_id
+    configured = ENVIRONMENT_SETTING.search(workflow_text)
+    environment = configured[1] if configured else None
+    try:
+        command(
+            [
+                "gh",
+                "secret",
+                "set",
+                name,
+                "--repo",
+                record["repository"],
+                *(["--env", environment] if environment else []),
+            ],
+            input=key,
+            env={**os.environ, "GH_TOKEN": github_access()["token"]},
+        )
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
+        progress(
+            f"Could not store your Bitfab API key as the GitHub secret {name}, which needs permission to manage the repository's Actions secrets, {shared}"
+        )
+        return {}
+    record["keySecret"] = {"name": name, "environment": environment}
+    progress(
+        f"Replaying with the Bitfab API key from this machine, stored as the GitHub secret {name} until the replay starts"
+    )
+    return {KEY_INPUT: key_id}
+
+
+def remove_key(record):
+    secret = record.get("keySecret")
+    if not secret or secret.get("removed"):
+        return
+    try:
+        command(
+            [
+                "gh",
+                "secret",
+                "delete",
+                secret["name"],
+                "--repo",
+                record["repository"],
+                *(["--env", secret["environment"]] if secret["environment"] else []),
+            ],
+            env={**os.environ, "GH_TOKEN": github_access()["token"]},
+        )
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        if getattr(error, "http_status", None) != 404:
+            progress(
+                f"Could not delete the GitHub secret {secret['name']}; delete it at {secrets_page(record['repository'], secret['environment'])}"
+            )
+            return
+    secret["removed"] = True
 
 
 def declared_inputs(text):
@@ -1446,7 +1568,8 @@ def submit_as_is(root, repo, workflow, parsed, path):
     preflight(
         repo, workflow, pushes=False, full_output=request.get("fullOutput") is True
     )
-    declared = declared_inputs(branch_workflow(repo, workflow, sha))
+    text = branch_workflow(repo, workflow, sha)
+    declared = declared_inputs(text)
     if "request" not in declared:
         raise ValueError(
             f"{WORKFLOW_DIRECTORY}/{workflow} on {branch} declares no request input, so it cannot take a replay; add request (type: string, required: false) under on.workflow_dispatch.inputs and land it on {branch}"
@@ -1466,9 +1589,11 @@ def submit_as_is(root, repo, workflow, parsed, path):
     progress(
         f"Replaying {branch} at {sha[:12]} as it is on GitHub, without local changes. Execution {execution_id}; resume with --cloud-watch {execution_id}"
     )
+    key_inputs = store_key(root, record, declared, text)
+    save(path, record)
     return dispatch(
         record,
-        {"execution_id": execution_id, "request": json.dumps(request)},
+        {"execution_id": execution_id, "request": json.dumps(request), **key_inputs},
         declared,
         run_details=True,
     )
@@ -1477,10 +1602,11 @@ def submit_as_is(root, repo, workflow, parsed, path):
 def report_steps(record, shown):
     job = replay_job(record)
     for step in (job or {}).get("steps", []):
-        if (
-            step.get("status") in ("in_progress", "completed")
-            and step.get("name") not in shown
-        ):
+        if step.get("status") not in ("in_progress", "completed"):
+            continue
+        if "--cloud-execute" in (step.get("name") or ""):
+            remove_key(record)
+        if step.get("name") not in shown:
             shown.add(step.get("name"))
             progress(step.get("name"))
 
@@ -1701,6 +1827,11 @@ def execute():
     request = runner_request(root, commit)
     directory = within(root, request["cwd"])
     check_secrets(root)
+    if os.environ.get(API_KEY_ENV, "").strip():
+        print(
+            "Replaying with the Bitfab API key of the person who started this run",
+            flush=True,
+        )
     environment = request.get("env") or {}
     if environment:
         workflow_environment_conflicts(root, environment)
@@ -2376,12 +2507,13 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
     ]
     return {
         "name": "Bitfab replay",
-        "run-name": "Bitfab replay ${{ inputs.execution_id || github.ref_name }}",
+        "run-name": RUN_NAME,
         "on": {
             "workflow_dispatch": {
                 "inputs": {
                     "execution_id": {"type": "string", "required": False},
                     "request": {"type": "string", "required": False},
+                    KEY_INPUT: {"type": "string", "required": False},
                 }
             }
         },
@@ -2390,10 +2522,141 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
     }
 
 
-def initialize(argv):
+def indentation(line):
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def block_end(lines, start, indent):
+    end = start + 1
+    while end < len(lines) and (
+        not lines[end].strip() or indentation(lines[end]) > indent
+    ):
+        end += 1
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return end
+
+
+def add_input(lines, name):
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r'[ \t]*"?request"?[ \t]*:[ \t]*', line):
+            continue
+        indent = indentation(line)
+        child = " " * (
+            indentation(lines[index + 1])
+            if block_end(lines, index, indent) > index + 1
+            else indent + 2
+        )
+        end = block_end(lines, index, indent - 1)
+        lines[end:end] = [
+            f"{line[:indent]}{name}:",
+            f"{child}type: string",
+            f"{child}required: false",
+        ]
+        return True
+    return False
+
+
+def add_run_name(lines):
+    named = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(r'"?name"?[ \t]*:', line)
+        ),
+        -1,
+    )
+    lines.insert(named + 1, f"run-name: {json.dumps(RUN_NAME)}")
+
+
+def replay_step_key(lines):
+    for index, line in enumerate(lines):
+        if "--cloud-execute" not in line:
+            continue
+        for above in range(index, -1, -1):
+            match = re.match(r"([ \t]*)(- +)?run[ \t]*:", lines[above])
+            if match and indentation(lines[above]) <= indentation(line):
+                return above, len(match[1]) + len(match[2] or "")
+    return None
+
+
+def add_key_env(lines):
+    found = replay_step_key(lines)
+    if found is None:
+        return False
+    run, key = found
+    start = run
+    while start > 0 and not re.match(r"[ \t]*- ", lines[start]):
+        start -= 1
+    end = block_end(lines, run, key - 1)
+    entry = f'{API_KEY_ENV}: "{KEY_SECRET_REFERENCE}"'
+    for index in range(start, end):
+        line = lines[index]
+        if not re.fullmatch(r"[ \t]*(- +)?env[ \t]*:[ \t]*", line):
+            continue
+        if len(line) - len(line.lstrip(" \t-")) != key:
+            continue
+        entries = block_end(lines, index, key)
+        child = indentation(lines[index + 1]) if entries > index + 1 else key + 2
+        lines.insert(entries, " " * child + entry)
+        return True
+    lines[end:end] = [" " * key + "env:", " " * (key + 2) + entry]
+    return True
+
+
+def update_workflow(root, path):
+    target = within(root, path)
+    text = target.read_text()
+    lines = text.split("\n")
+    updated, by_hand = [], []
+    declared = declared_inputs(text)
+    for name in ("execution_id", KEY_INPUT):
+        if name in declared:
+            continue
+        if add_input(lines, name):
+            updated.append(f"Added the {name} input")
+        else:
+            by_hand.append(
+                f"{name} (type: string, required: false) under on.workflow_dispatch.inputs"
+            )
+    if not re.search(r'^"?run-name"?[ \t]*:', text, re.MULTILINE):
+        add_run_name(lines)
+        updated.append("Named each run after its execution")
+    if API_KEY_ENV not in text:
+        if add_key_env(lines):
+            updated.append(f"Added {API_KEY_ENV} to the replay step's env")
+        else:
+            by_hand.append(
+                f'{API_KEY_ENV}: "{KEY_SECRET_REFERENCE}" in the replay step\'s env'
+            )
+    if updated:
+        target.write_text("\n".join(lines))
+    steps = []
+    if updated:
+        steps.append(
+            f"Commit {path}. A --cloud replay runs the workflow in its own snapshot, so the next one uses it; --cloud-ref replays need it on the branch they replay"
+        )
+    if by_hand:
+        steps.append(
+            "Cloud replay could not place these lines, so add them by hand: "
+            + "; ".join(by_hand)
+        )
+    if not steps:
+        steps.append(
+            "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment"
+        )
+    return {
+        "files": [path] if updated else [],
+        "workflow": path,
+        "updated": updated,
+        "next": steps,
+    }
+
+
+def initialize(argv, name="--cloud-init"):
     parser = argparse.ArgumentParser(
-        prog="bitfab-replay --cloud-init",
-        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. An existing workflow is left alone; edit it directly to change it.",
+        prog=f"bitfab-replay {name}",
+        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the run name, and BITFAB_REPLAY_BITFAB_API_KEY) and lists what it changed; edit it directly for anything else.",
     )
     parser.add_argument(
         "--secret",
@@ -2425,13 +2688,7 @@ def initialize(argv):
     refuse_old_setup(root)
     existing = find_workflow(root)
     if existing is not None:
-        return {
-            "files": [],
-            "workflow": f"{WORKFLOW_DIRECTORY}/{existing}",
-            "next": [
-                "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment"
-            ],
-        }
+        return update_workflow(root, f"{WORKFLOW_DIRECTORY}/{existing}")
     prefix = args.secret_prefix
     if prefix and not re.fullmatch(r"[A-Z][A-Z0-9_]*_", prefix):
         raise ValueError(
@@ -2450,6 +2707,7 @@ def initialize(argv):
             'Pass --run with the command that starts your registry program on the runner, such as --run "go run ./cmd/registry"'
         )
     env = {name: "${{ secrets." + prefix + name + " }}" for name in names}
+    env[API_KEY_ENV] = KEY_SECRET_REFERENCE
     if args.check:
         env[CHECK_COMMAND_ENV] = args.check
     path = f"{WORKFLOW_DIRECTORY}/{WORKFLOW}"
@@ -2506,8 +2764,8 @@ def print_json(value):
 def main():
     argv = sys.argv[1:]
     try:
-        if argv[:1] == ["--cloud-init"]:
-            print_json(initialize(argv[1:]))
+        if argv[:1] in (["--cloud-init"], ["--cloud-update"]):
+            print_json(initialize(argv[1:], argv[0]))
             return 0
         if argv[:1] == ["--cloud-secrets"]:
             print_json(configure_secrets(argv[1:]))

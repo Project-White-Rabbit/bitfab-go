@@ -153,7 +153,10 @@ type Client struct {
 	Experiments *ExperimentsClient
 }
 
-const captureEnabledEnv = "BITFAB_CAPTURE_ENABLED"
+const (
+	captureEnabledEnv = "BITFAB_CAPTURE_ENABLED"
+	replayAPIKeyEnv   = "BITFAB_REPLAY_BITFAB_API_KEY"
+)
 
 var trueEnvValues = map[string]bool{"1": true, "true": true, "yes": true}
 var falseEnvValues = map[string]bool{"0": true, "false": true, "no": true}
@@ -248,7 +251,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	c.httpClient.apiKeyFunc = c.resolveAPIKey
 	c.httpClient.simulationPlan = newSimulationPlan(c.httpClient.getSimulationPlan, !c.simulationPlanDisabled)
-	if c.apiKeyFunc == nil && (strings.TrimSpace(c.apiKey) != "" || strings.TrimSpace(os.Getenv("BITFAB_API_KEY")) != "") {
+	if replayAPIKeyOverride() != "" || (c.apiKeyFunc == nil && (strings.TrimSpace(c.apiKey) != "" || strings.TrimSpace(os.Getenv("BITFAB_API_KEY")) != "")) {
 		c.httpClient.simulationPlan.refresh()
 	}
 	if c.requestTimeout > 0 {

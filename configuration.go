@@ -13,14 +13,7 @@ func (c *Client) resolveAPIKey() string {
 	if c.resolvedAPIKey != "" {
 		return c.resolvedAPIKey
 	}
-	key := c.apiKey
-	if c.apiKeyFunc != nil {
-		key = c.apiKeyFunc()
-	}
-	if strings.TrimSpace(key) == "" {
-		key = os.Getenv("BITFAB_API_KEY")
-	}
-	if strings.TrimSpace(key) != "" {
+	if key := c.candidateAPIKey(); key != "" {
 		c.resolvedAPIKey = key
 		return key
 	}
@@ -32,6 +25,43 @@ func (c *Client) resolveAPIKey() string {
 		log.Println("Bitfab: API key is empty; tracing is disabled until credentials are available. https://bitfab.ai/settings/api-keys")
 	}
 	return ""
+}
+
+func (c *Client) probeAPIKey() string {
+	if override := replayAPIKeyOverride(); override != "" {
+		return override
+	}
+	c.apiKeyMu.Lock()
+	defer c.apiKeyMu.Unlock()
+	if c.resolvedAPIKey != "" {
+		return c.resolvedAPIKey
+	}
+	return c.candidateAPIKey()
+}
+
+func (c *Client) candidateAPIKey() string {
+	if override := replayAPIKeyOverride(); override != "" {
+		return override
+	}
+	key := c.apiKey
+	if c.apiKeyFunc != nil {
+		key = c.apiKeyFunc()
+	}
+	if strings.TrimSpace(key) == "" {
+		key = os.Getenv("BITFAB_API_KEY")
+	}
+	if strings.TrimSpace(key) == "" {
+		return ""
+	}
+	return key
+}
+
+func replayAPIKeyOverride() string {
+	override := os.Getenv(replayAPIKeyEnv)
+	if strings.TrimSpace(override) == "" {
+		return ""
+	}
+	return override
 }
 
 // CaptureEnabled reports whether ordinary calls can currently record traces.

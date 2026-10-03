@@ -87,3 +87,51 @@ func TestConfiguration_StrictIsLazy(t *testing.T) {
 		t.Fatal("strict client did not resolve late key")
 	}
 }
+
+func TestConfiguration_ReplayAPIKeyOverride(t *testing.T) {
+	cases := []struct {
+		name     string
+		override string
+		env      string
+		client   func() *Client
+		want     string
+	}{
+		{"wins over configured key", "override-key", "env-key", func() *Client { return NewClient("configured-key") }, "override-key"},
+		{"wins over key func", "override-key", "env-key", func() *Client { return NewClient("", WithAPIKeyFunc(func() string { return "func-key" })) }, "override-key"},
+		{"wins over env fallback", "override-key", "env-key", func() *Client { return NewClient("") }, "override-key"},
+		{"blank override keeps configured key", "   ", "env-key", func() *Client { return NewClient("configured-key") }, "configured-key"},
+		{"blank override keeps key func", "", "env-key", func() *Client { return NewClient("", WithAPIKeyFunc(func() string { return "func-key" })) }, "func-key"},
+		{"blank override keeps env fallback", " ", "env-key", func() *Client { return NewClient("") }, "env-key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(replayAPIKeyEnv, tc.override)
+			t.Setenv("BITFAB_API_KEY", tc.env)
+			client := tc.client()
+			defer client.Close(time.Second)
+			if got := client.resolveAPIKey(); got != tc.want {
+				t.Fatalf("resolved %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfiguration_ReplayAPIKeyOverrideSendsAuthorizationAndSatisfiesStrict(t *testing.T) {
+	t.Setenv("BITFAB_API_KEY", "")
+	t.Setenv(replayAPIKeyEnv, "override-key")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer override-key" {
+			t.Errorf("authorization: %q", r.Header.Get("Authorization"))
+		}
+		json.NewEncoder(w).Encode(map[string]any{"labels": []any{}})
+	}))
+	defer server.Close()
+	client := NewClient("", WithServiceURL(server.URL), WithStrict(true))
+	defer client.Close(time.Second)
+	if !client.CaptureEnabled() {
+		t.Fatal("override did not enable capture")
+	}
+	if _, err := client.Labels.GetAll(context.Background(), []string{"trace"}); err != nil {
+		t.Fatal(err)
+	}
+}

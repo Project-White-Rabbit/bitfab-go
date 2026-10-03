@@ -512,3 +512,77 @@ func TestRecordRegistryFlagSendsCommaSeparatedIDsAsLists(t *testing.T) {
 		t.Fatalf("flags = %#v, want %#v", flags, want)
 	}
 }
+
+func TestReplayRegistryCLIPrintsTheResolvedAPIKeyWithoutReplaying(t *testing.T) {
+	cases := []struct {
+		name     string
+		override string
+		env      string
+		client   func() *Client
+		want     string
+	}{
+		{"configured key", "", "", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"configured-key"}`},
+		{"key func", "", "", func() *Client {
+			return NewClient("", WithServiceURL("http://127.0.0.1:1"), WithAPIKeyFunc(func() string { return "func-key" }))
+		}, `{"apiKey":"func-key"}`},
+		{"env fallback", "", "env-key", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"env-key"}`},
+		{"override", "override-key", "env-key", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"override-key"}`},
+		{"no key under strict", "", "", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1"), WithStrict(true)) }, `{"apiKey":null}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(replayAPIKeyEnv, tc.override)
+			t.Setenv("BITFAB_API_KEY", tc.env)
+			client := tc.client()
+			defer client.Close(time.Second)
+			registry := NewReplayRegistry()
+			calls := 0
+			if err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string) { calls++ })}); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			result, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--print-api-key", "--trace-ids", "a"}, &stdout, &stderr)
+			if err != nil || result != nil {
+				t.Fatalf("probe returned %v %v", result, err)
+			}
+			if got := stdout.String(); got != "@@bitfab:api-key "+tc.want+"\n" {
+				t.Fatalf("stdout %q", got)
+			}
+			if calls != 0 || stderr.Len() != 0 {
+				t.Fatalf("probe replayed: calls=%d stderr=%q", calls, stderr.String())
+			}
+		})
+	}
+}
+
+func TestReplayRegistryCLIAPIKeyProbeRejectsAnUnknownPipeline(t *testing.T) {
+	client := NewClient("key", WithServiceURL("http://127.0.0.1:1"))
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string) {})}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	_, err := RunReplayCLI(context.Background(), registry, []string{"missing", "--print-api-key"}, &stdout, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), `unknown pipeline "missing"`) {
+		t.Fatalf("error %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+}
+
+func TestReplayRegistryCLIIgnoresThePrintAPIKeyEnvironmentVariable(t *testing.T) {
+	t.Setenv("BITFAB_REPLAY_PRINT_API_KEY", "1")
+	client := NewClient("key", WithServiceURL("http://127.0.0.1:1"))
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string) {})}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--trace-ids", "a"}, &stdout, io.Discard)
+	if strings.Contains(stdout.String(), "@@bitfab:api-key") {
+		t.Fatalf("stdout %q", stdout.String())
+	}
+}

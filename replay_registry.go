@@ -357,9 +357,13 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		return nil, runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr, check)
 	}
 	stderr = &replaySynchronizedWriter{writer: stderr}
+	args, printAPIKey := removeReplayFlag(args, "--print-api-key")
 	parsed, err := parseRegistryCLI(registry, args, stderr)
 	if err != nil {
 		return nil, err
+	}
+	if printAPIKey {
+		return nil, printRegistryAPIKey(registry, parsed.pipeline, stdout)
 	}
 	if parsed.seed != "" || parsed.fromTrace != "" {
 		return runSeedRegistryCLI(ctx, registry, parsed, stdout, stderr)
@@ -591,6 +595,41 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		return result, erroredItemsError(result, options.DryRun)
 	}
 	return result, nil
+}
+
+func removeReplayFlag(args []string, flag string) ([]string, bool) {
+	rest := make([]string, 0, len(args))
+	found := false
+	for _, arg := range args {
+		if arg == flag {
+			found = true
+			continue
+		}
+		rest = append(rest, arg)
+	}
+	return rest, found
+}
+
+func printRegistryAPIKey(registry *ReplayRegistry, pipeline string, stdout io.Writer) error {
+	entry, err := registry.fetch(pipeline)
+	if err != nil {
+		return err
+	}
+	var payload struct {
+		APIKey *string `json:"apiKey"`
+	}
+	if key := entry.Client.probeAPIKey(); key != "" {
+		payload.APIKey = &key
+	}
+	var line strings.Builder
+	line.WriteString("@@bitfab:api-key ")
+	encoder := json.NewEncoder(&line)
+	encoder.SetEscapeHTML(false)
+	if err = encoder.Encode(payload); err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout, line.String())
+	return err
 }
 
 func erroredItemsError(result ReplayResult, dryRun bool) error {
