@@ -332,11 +332,29 @@ func (w *replaySynchronizedWriter) Write(data []byte) (int, error) {
 
 var registryInitialEnvironment = os.Environ()
 
+const checkArgumentsFlag = "--check-arguments"
+
+func checkRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer) error {
+	parsed, err := parseRegistryCLI(registry, args, stderr)
+	if err != nil {
+		return err
+	}
+	_, err = registry.fetch(parsed.pipeline)
+	return err
+}
+
 // RunReplayCLI executes a compiled project's registry command and writes machine-readable results.
 // The first argument selects the pipeline; subsequent arguments match the other SDK registry CLIs.
 func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, stdout, stderr io.Writer) (any, error) {
+	if len(args) > 0 && args[0] == checkArgumentsFlag {
+		return nil, checkRegistryCLI(registry, args[1:], stderr)
+	}
 	if isCloudReplayCommand(args) {
-		return nil, RunCloudReplayCLI(ctx, args, stdout, stderr)
+		var check func([]string) error
+		if registry != nil {
+			check = func(replay []string) error { return checkRegistryCLI(registry, replay, stderr) }
+		}
+		return nil, runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr, check)
 	}
 	stderr = &replaySynchronizedWriter{writer: stderr}
 	parsed, err := parseRegistryCLI(registry, args, stderr)

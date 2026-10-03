@@ -44,7 +44,7 @@ func TestCloudPassesArgumentsAndTheReplayCommand(t *testing.T) {
 	helper := []byte("import json, os, sys\nopen(" + strconv.Quote(mark) + ", 'w').write(json.dumps({'args': sys.argv[1:], 'command': json.loads(os.environ['BITFAB_REPLAY_COMMAND']), 'language': os.environ['BITFAB_SDK_LANGUAGE']}))\nprint('replay output')\nraise SystemExit(3)\n")
 	args := []string{"--cloud", "pipeline", "--trace-ids", "id", "--fail-on-error"}
 	var output bytes.Buffer
-	err := runCloudReplayHelper(context.Background(), helper, args, &output, io.Discard)
+	err := runCloudReplayHelper(context.Background(), helper, args, &output, io.Discard, nil)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
 		t.Fatalf("expected exit 3, got %v", err)
@@ -89,5 +89,83 @@ func TestCloudHelpComesFromThePackagedHelper(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "--cloud-init") {
 		t.Fatalf("help missing setup flags: %s", output.String())
+	}
+}
+
+func TestCheckArgumentsParsesReplayOptionsWithoutRunning(t *testing.T) {
+	registry := NewReplayRegistry()
+	calls := 0
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), Function: BindReplayFunction("registry", func(string) { calls++ })}); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		args    []string
+		message string
+	}{
+		{[]string{"pipeline", "--trace-ids", "t1", "--fail-on-error"}, ""},
+		{[]string{"pipeline", "--resume", "e1"}, "flag provided but not defined: -resume"},
+		{[]string{"other", "--trace-ids", "t1"}, "other"},
+	} {
+		var stdout, stderr bytes.Buffer
+		_, err := RunReplayCLI(context.Background(), registry, append([]string{"--check-arguments"}, check.args...), &stdout, &stderr)
+		if check.message == "" && err != nil {
+			t.Fatalf("%v: %v", check.args, err)
+		}
+		if check.message != "" && (err == nil || !strings.Contains(err.Error(), check.message)) {
+			t.Fatalf("%v: got %v, want %q", check.args, err, check.message)
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("%v printed %q", check.args, stdout.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatal("check ran the replay")
+	}
+}
+
+func TestCloudChecksReplayOptionsInThisProcessBeforeHandingOff(t *testing.T) {
+	root := cloudTestRepo(t)
+	mark := filepath.Join(root, "mark.json")
+	helper := []byte("import json, os, sys\nif sys.argv[1] == '--replay-arguments':\n    print(json.dumps(sys.argv[2:-1]))\n    raise SystemExit(0)\nopen(" + strconv.Quote(mark) + ", 'w').write(os.environ.get('BITFAB_REPLAY_ARGUMENTS_CHECKED', ''))\n")
+	args := []string{"pipeline", "--trace-ids", "t1", "--cloud"}
+	var checked []string
+	refused := errors.New("flag provided but not defined: -resume")
+	err := runCloudReplayHelper(context.Background(), helper, args, io.Discard, io.Discard, func(replay []string) error {
+		checked = replay
+		return refused
+	})
+	if !errors.Is(err, refused) {
+		t.Fatalf("expected the check's error, got %v", err)
+	}
+	if strings.Join(checked, " ") != "pipeline --trace-ids t1" {
+		t.Fatalf("checked %v", checked)
+	}
+	if _, err := os.Stat(mark); err == nil {
+		t.Fatal("handed off after the check refused the options")
+	}
+	if err := runCloudReplayHelper(context.Background(), helper, args, io.Discard, io.Discard, func([]string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(mark); string(data) != "1" {
+		t.Fatalf("the script was not told the options were checked: %q", data)
+	}
+}
+
+func TestCloudRefusesABadOptionWithTheLocalError(t *testing.T) {
+	cloudTestRepo(t)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), Function: BindReplayFunction("registry", func(string) {})}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--resume", "e1", "--cloud"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -resume") {
+		t.Fatalf("expected the local parse error, got %v", err)
+	}
+}
+
+func TestCloudEntryPointRefusesTheOptionCheckInsteadOfLooping(t *testing.T) {
+	err := RunCloudReplayCLI(context.Background(), []string{"--check-arguments", "pipeline", "--trace-ids", "t1"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "route arguments without --cloud to RunReplayCLI") {
+		t.Fatalf("expected an immediate routing error, got %v", err)
 	}
 }

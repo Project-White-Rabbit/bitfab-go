@@ -26,10 +26,25 @@ func isCloudReplayCommand(args []string) bool {
 }
 
 func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	return runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr)
+	if len(args) > 0 && args[0] == checkArgumentsFlag {
+		return errors.New("bitfab: cloud replay checks replay options with RunReplayCLI and your registry; route arguments without --cloud to RunReplayCLI, and only --cloud commands to RunCloudReplayCLI")
+	}
+	return runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr, nil)
 }
 
-func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer) error {
+func cloudReplayArguments(ctx context.Context, helper string, args []string) []string {
+	output, err := exec.CommandContext(ctx, "python3", append([]string{helper, "--replay-arguments"}, args...)...).Output()
+	if err != nil {
+		return nil
+	}
+	var replay []string
+	if json.Unmarshal(output, &replay) != nil {
+		return nil
+	}
+	return replay
+}
+
+func runCloudReplayHelper(ctx context.Context, script []byte, args []string, stdout, stderr io.Writer, check func([]string) error) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -51,8 +66,17 @@ func runCloudReplayHelper(ctx context.Context, script []byte, args []string, std
 	if err := file.Close(); err != nil {
 		return err
 	}
+	env := append(os.Environ(), "BITFAB_REPLAY_COMMAND="+string(replayCommand), "BITFAB_SDK_LANGUAGE=go")
+	if check != nil {
+		if replay := cloudReplayArguments(ctx, helper, args); replay != nil {
+			if err := check(replay); err != nil {
+				return err
+			}
+			env = append(env, "BITFAB_REPLAY_ARGUMENTS_CHECKED=1")
+		}
+	}
 	command := exec.CommandContext(ctx, "python3", append([]string{helper}, args...)...)
-	command.Env = append(os.Environ(), "BITFAB_REPLAY_COMMAND="+string(replayCommand), "BITFAB_SDK_LANGUAGE=go")
+	command.Env = env
 	command.Stdout, command.Stderr = stdout, stderr
 	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt)
