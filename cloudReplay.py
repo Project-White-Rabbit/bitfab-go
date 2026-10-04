@@ -2569,9 +2569,13 @@ def add_run_name(lines):
     lines.insert(named + 1, f"run-name: {json.dumps(RUN_NAME)}")
 
 
+def without_yaml_comment(line):
+    return re.sub(r"(^|\s)#.*", "", line)
+
+
 def replay_step_key(lines):
     for index, line in enumerate(lines):
-        if "--cloud-execute" not in line:
+        if "--cloud-execute" not in without_yaml_comment(line):
             continue
         for above in range(index, -1, -1):
             match = re.match(r"([ \t]*)(- +)?run[ \t]*:", lines[above])
