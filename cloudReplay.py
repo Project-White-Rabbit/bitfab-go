@@ -137,6 +137,11 @@ RENAMED_FLAGS = {
 SEED_FLAGS = ("--seed", "--cases", "--from-trace", "--run")
 PATH_FLAGS = ("--registry", "--params", "--code-change")
 CODE_CHANGE_FLAGS = ("--code-change", "--no-code-change")
+CHECKOUT_DEPTH = 2
+CODE_CHANGE_PATH_ENV = "BITFAB_CODE_CHANGE_PATH"
+CODE_CHANGE_MAX_FILES = 60
+CODE_CHANGE_MAX_FILE_BYTES = 500_000
+CODE_CHANGE_MAX_TOTAL_BYTES = 2_000_000
 CHECK_ARGUMENTS_SECONDS = 300
 CHECK_ARGUMENTS_FLAG = "--check-arguments"
 REPLAY_ARGUMENTS_FLAG = "--replay-arguments"
@@ -165,6 +170,8 @@ Every replay option works as it does locally, including --dry-run and --fail-on-
 and your SDK checks them before anything is uploaded. The runner replays a snapshot of
 your working tree (changed files, plus new files git does not ignore) from the same
 directory, and this command prints the replay's output and exits with its exit code.
+The experiment records your branch, the commit the snapshot was taken on, and the
+snapshot's changed files as its code change, as it would for a local replay.
 Credential-like files that are not on GitHub yet are refused unless you name them with
 --cloud-allow-file. Requires git and Python 3.10+ on macOS or Linux, with a github.com
 origin.
@@ -887,6 +894,13 @@ def replay_request(root, parsed):
     return request, files
 
 
+def current_branch(root):
+    try:
+        return git(root, "symbolic-ref", "--short", "-q", "HEAD") or None
+    except CommandError:
+        return None
+
+
 def sensitive(path):
     parts = Path(path).parts
     name = Path(path).name.lower()
@@ -1300,6 +1314,9 @@ def allowed_files(root, parsed):
 def submit(root, repo, workflow, parsed, path):
     execution_id = parsed["id"]
     request, files = replay_request(root, parsed)
+    branch = current_branch(root)
+    if branch:
+        request["branch"] = branch
     check_arguments(parsed["replay"])
     allowed = allowed_files(root, parsed)
     if "--cloud-preview" in parsed["switches"]:
@@ -1817,6 +1834,111 @@ def runner_request(root, commit):
     return dispatched_request()
 
 
+def check_out_snapshot_base(root, commit, branch):
+    try:
+        base = git(root, "rev-parse", "--verify", "-q", f"{commit}^")
+    except CommandError:
+        print(
+            "This checkout does not include the commit the snapshot was taken on, so the experiment records no code change; set fetch-depth: 2 on the workflow's actions/checkout step, or run bitfab-replay --cloud-update",
+            flush=True,
+        )
+        return None
+    if isinstance(branch, str) and BRANCH_NAME.fullmatch(branch):
+        try:
+            git(root, "update-ref", f"refs/heads/{branch}", base)
+            git(root, "symbolic-ref", "HEAD", f"refs/heads/{branch}")
+            return base
+        except CommandError:
+            pass
+    git(root, "reset", "-q", "--soft", base)
+    return base
+
+
+def replay_name(args):
+    for index, value in enumerate(args):
+        if value.startswith("--name="):
+            return value.partition("=")[2]
+        if value == "--name" and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def git_blob(root, ref, path):
+    try:
+        size = int(git(root, "cat-file", "-s", f"{ref}:{path}"))
+    except (CommandError, ValueError):
+        return None
+    if size > CODE_CHANGE_MAX_FILE_BYTES:
+        return None
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"{ref}:{path}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode or b"\x00" in result.stdout[:8000]:
+        return None
+    return result.stdout.decode("utf-8", "replace").replace("\r\n", "\n")
+
+
+def changed_paths(root, base, commit):
+    raw = git(
+        root,
+        "diff",
+        "--name-status",
+        "--find-renames",
+        "-z",
+        base,
+        commit,
+        "--",
+        ":!.bitfab",
+    )
+    parts = [part for part in raw.split("\x00") if part]
+    index = 0
+    while index + 1 < len(parts):
+        status, before_path = parts[index][0], parts[index + 1]
+        index += 2
+        path = before_path
+        if status in "RC" and index < len(parts):
+            path = parts[index]
+            index += 1
+        yield status, before_path, path
+
+
+def snapshot_code_change(root, base, commit, name):
+    files, total = [], 0
+    for status, before_path, path in changed_paths(root, base, commit):
+        if len(files) >= CODE_CHANGE_MAX_FILES:
+            break
+        before = "" if status == "A" else git_blob(root, base, before_path)
+        after = "" if status == "D" else git_blob(root, commit, path)
+        if before is None or after is None or before == after:
+            continue
+        size = len(before.encode()) + len(after.encode())
+        if total + size > CODE_CHANGE_MAX_TOTAL_BYTES:
+            continue
+        total += size
+        files.append({"path": path, "before": before, "after": after})
+    if not files:
+        return None
+    head = (name or "").strip() or git(root, "log", "-1", "--format=%s", base)
+    word = "file" if len(files) == 1 else "files"
+    return {
+        "description": f"{head or 'Working-tree change'} ({len(files)} {word} changed uncommitted (vs HEAD))",
+        "files": files,
+    }
+
+
+def write_code_change(change):
+    handle, path = tempfile.mkstemp(
+        prefix="bitfab-code-change-",
+        suffix=".json",
+        dir=os.environ.get("RUNNER_TEMP") or None,
+    )
+    with os.fdopen(handle, "w") as out:
+        json.dump(change, out)
+    return path
+
+
 def execute():
     if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
         raise ValueError("Submit a new replay instead of rerunning an Actions job")
@@ -1825,6 +1947,11 @@ def execute():
     if git(root, "rev-parse", "HEAD") != commit:
         raise ValueError("Runner checkout does not match the dispatched commit")
     request = runner_request(root, commit)
+    base = (
+        check_out_snapshot_base(root, commit, request.get("branch"))
+        if os.environ.get("GITHUB_REF_NAME", "").startswith(PREFIX)
+        else None
+    )
     directory = within(root, request["cwd"])
     check_secrets(root)
     if os.environ.get(API_KEY_ENV, "").strip():
@@ -1837,10 +1964,19 @@ def execute():
         workflow_environment_conflicts(root, environment)
         print(f"Setting {', '.join(sorted(environment))} from the request", flush=True)
     names = {option_name(value) for value in request["args"]}
+    explicit_change = bool(names & set(CODE_CHANGE_FLAGS))
+    change = (
+        None
+        if explicit_change or base is None
+        else snapshot_code_change(root, base, commit, replay_name(request["args"]))
+    )
+    run_environment = dict(environment)
+    if change:
+        run_environment[CODE_CHANGE_PATH_ENV] = write_code_change(change)
     args = [
         *replay_command(),
         *request["args"],
-        *([] if names & set(CODE_CHANGE_FLAGS) else ["--no-code-change"]),
+        *([] if explicit_change or change else ["--no-code-change"]),
     ]
     if dry_run(request["args"]):
         run_check_command(directory, environment)
@@ -1854,7 +1990,7 @@ def execute():
             request.get("timeoutMinutes"),
             experiment,
             summarize=request.get("fullOutput") is not True,
-            environment=environment,
+            environment=run_environment,
         )
     finally:
         print(OUTPUT_END, flush=True)
@@ -2497,7 +2633,10 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
     if environment:
         job["environment"] = environment
     job["steps"] = [
-        {"uses": ACTIONS["checkout"], "with": {"persist-credentials": False}},
+        {
+            "uses": ACTIONS["checkout"],
+            "with": {"persist-credentials": False, "fetch-depth": CHECKOUT_DEPTH},
+        },
         *steps,
         {
             **({} if directory == "." else {"working-directory": directory}),
@@ -2608,6 +2747,57 @@ def add_key_env(lines):
     return True
 
 
+def raise_checkout_depth(lines, start, end):
+    for at in range(start, end):
+        if not re.match(r'[ \t]*"?fetch-depth"?[ \t]*:', lines[at]):
+            continue
+        depth = re.match(
+            r'([ \t]*"?fetch-depth"?[ \t]*:[ \t]*)["\']?(\d+)["\']?(.*)',
+            lines[at],
+        )
+        if depth is None or int(depth[2]) == 0 or int(depth[2]) >= CHECKOUT_DEPTH:
+            return False
+        lines[at] = f"{depth[1]}{CHECKOUT_DEPTH}{depth[3]}"
+        return True
+    return None
+
+
+def add_checkout_depth(lines):
+    for index, line in enumerate(lines):
+        match = re.match(
+            r'([ \t]*)(- +)?"?uses"?[ \t]*:[ \t]*"?actions/checkout@',
+            without_yaml_comment(line),
+        )
+        if not match:
+            continue
+        key = len(match[1]) + len(match[2] or "")
+        start = index
+        while start > 0 and not re.match(r"[ \t]*- ", lines[start]):
+            start -= 1
+        end = block_end(lines, start, key - 1)
+        raised = raise_checkout_depth(lines, start, end)
+        if raised is not None:
+            return "updated" if raised else "unchanged"
+        entry = f"fetch-depth: {CHECKOUT_DEPTH}"
+        for at in range(start, end):
+            with_key = re.fullmatch(
+                r"[ \t]*(- +)?with[ \t]*:(.*)", without_yaml_comment(lines[at])
+            )
+            if not with_key:
+                continue
+            if len(lines[at]) - len(lines[at].lstrip(" \t-")) != key:
+                continue
+            if with_key[2].strip():
+                return "by hand"
+            entries = block_end(lines, at, key)
+            child = indentation(lines[at + 1]) if entries > at + 1 else key + 2
+            lines.insert(entries, " " * child + entry)
+            return "updated"
+        lines[end:end] = [" " * key + "with:", " " * (key + 2) + entry]
+        return "updated"
+    return "unchanged"
+
+
 def update_workflow(root, path):
     target = within(root, path)
     text = target.read_text()
@@ -2633,6 +2823,15 @@ def update_workflow(root, path):
             by_hand.append(
                 f'{API_KEY_ENV}: "{KEY_SECRET_REFERENCE}" in the replay step\'s env'
             )
+    depth = add_checkout_depth(lines)
+    if depth == "updated":
+        updated.append(
+            "Checked out the commit each snapshot is taken on, so experiments record the code change"
+        )
+    elif depth == "by hand":
+        by_hand.append(
+            f"fetch-depth: {CHECKOUT_DEPTH} in the actions/checkout step's with"
+        )
     if updated:
         target.write_text("\n".join(lines))
     steps = []
