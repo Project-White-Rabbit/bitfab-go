@@ -110,6 +110,60 @@ func TestGetTraceSpan_RejectsInvalidSelector(t *testing.T) {
 	}
 }
 
+func TestGetTraceSpan_TypeLookupSendsTypeInTheQuery(t *testing.T) {
+	traceID := "11111111-1111-4111-8111-111111111111"
+	var queries []map[string][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		json.NewEncoder(w).Encode(map[string]any{"span": nil})
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	if _, err := client.GetTraceSpan(ctx, traceID, SpanLookup{Type: "llm", Occurrence: FirstSpanOccurrence}); err != nil {
+		t.Fatalf("type lookup: %v", err)
+	}
+	if _, err := client.GetTraceSpan(ctx, traceID, SpanLookup{Name: "step", Type: "function"}); err != nil {
+		t.Fatalf("name and type lookup: %v", err)
+	}
+	first, second := queries[0], queries[1]
+	if len(first) != 2 || first["type"][0] != "llm" || first["occurrence"][0] != "first" {
+		t.Fatalf("type query = %v", first)
+	}
+	if len(second) != 3 || second["type"][0] != "function" || second["name"][0] != "step" || second["occurrence"][0] != "last" {
+		t.Fatalf("name and type query = %v", second)
+	}
+}
+
+func TestGetTraceSpan_RejectsIDWithTypeAndUnknownTypeBeforeAnyRequest(t *testing.T) {
+	traceID := "11111111-1111-4111-8111-111111111111"
+	spanID := "22222222-2222-4222-8222-222222222222"
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	ctx := context.Background()
+	_, err := client.GetTraceSpan(ctx, traceID, SpanLookup{ID: spanID, Type: "llm"})
+	if err == nil || err.Error() != "bitfab: provide id, or name and/or type" {
+		t.Fatalf("id and type err = %v", err)
+	}
+	_, err = client.GetTraceSpan(ctx, traceID, SpanLookup{})
+	if err == nil || err.Error() != "bitfab: provide id, or name and/or type" {
+		t.Fatalf("empty lookup err = %v", err)
+	}
+	_, err = client.GetTraceSpan(ctx, traceID, SpanLookup{Type: "tool"})
+	if err == nil || !strings.Contains(err.Error(), "invalid span type") {
+		t.Fatalf("unknown type err = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
 func TestGetSpan_EscapesSpanIDAndReturnsSpan(t *testing.T) {
 	traceID := "11111111-1111-4111-8111-111111111111"
 	bitfabSpanID := "22222222-2222-4222-8222-222222222222"

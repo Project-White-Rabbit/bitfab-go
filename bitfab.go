@@ -67,11 +67,15 @@ func SpanOccurrenceAt(index int) SpanOccurrence {
 	return SpanOccurrence(strconv.Itoa(index))
 }
 
-// SpanLookup identifies a span by its Bitfab ID or name.
-// Set exactly one of ID or Name.
+// SpanLookup identifies a span by its Bitfab ID, or by its name and/or type.
+// Set ID alone, or Name, Type, or both. Occurrence picks among the spans that
+// match Name and Type in the order they ran, and is ignored with ID.
 type SpanLookup struct {
-	ID         string
-	Name       string
+	ID   string
+	Name string
+	// Type is one of llm, agent, function, guardrail, handoff, or custom.
+	// Any other value is refused before a request is sent.
+	Type       string
 	Occurrence SpanOccurrence
 }
 
@@ -145,6 +149,7 @@ type Client struct {
 	OrganizationMembers *OrganizationMembersClient
 	// Traces searches traces and reads or writes their assertions.
 	Traces *TracesClient
+	Spans  *SpansClient
 	// Labels reads and writes trace and assertion verdicts.
 	Labels *LabelsClient
 	// Graders reads the individual verdicts recorded by automated graders.
@@ -261,6 +266,7 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.AssertionCategories = &AssertionCategoriesClient{httpClient: c.httpClient}
 	c.OrganizationMembers = &OrganizationMembersClient{httpClient: c.httpClient}
 	c.Traces = &TracesClient{httpClient: c.httpClient}
+	c.Spans = &SpansClient{httpClient: c.httpClient}
 	c.Labels = &LabelsClient{httpClient: c.httpClient}
 	c.Graders = &GradersClient{httpClient: c.httpClient}
 	c.Experiments = &ExperimentsClient{httpClient: c.httpClient}
@@ -269,13 +275,17 @@ func NewClient(apiKey string, opts ...Option) *Client {
 }
 
 // GetTraceSpan fetches one persisted span without loading the full trace.
-// Name lookups default to the last matching span.
+// Name and type lookups default to the last matching span.
 func (c *Client) GetTraceSpan(ctx context.Context, traceID string, lookup SpanLookup) (*CapturedSpan, error) {
 	if !traceIDPattern.MatchString(traceID) {
 		return nil, fmt.Errorf("bitfab: invalid trace ID")
 	}
-	if (lookup.ID == "") == (lookup.Name == "") {
-		return nil, fmt.Errorf("bitfab: provide exactly one of ID or Name")
+	byPosition := lookup.Name != "" || lookup.Type != ""
+	if (lookup.ID == "") != byPosition {
+		return nil, fmt.Errorf("bitfab: provide id, or name and/or type")
+	}
+	if lookup.Type != "" && !validSpanTypes[lookup.Type] {
+		return nil, fmt.Errorf("bitfab: invalid span type %q", lookup.Type)
 	}
 
 	query := url.Values{}
@@ -295,7 +305,12 @@ func (c *Client) GetTraceSpan(ctx context.Context, traceID string, lookup SpanLo
 				return nil, fmt.Errorf("bitfab: occurrence must be first, last, or a non-negative index")
 			}
 		}
-		query.Set("name", lookup.Name)
+		if lookup.Name != "" {
+			query.Set("name", lookup.Name)
+		}
+		if lookup.Type != "" {
+			query.Set("type", lookup.Type)
+		}
 		query.Set("occurrence", string(occurrence))
 	}
 

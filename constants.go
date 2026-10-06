@@ -4,7 +4,7 @@ package bitfab
 const DefaultServiceURL = "https://bitfab.ai"
 
 // Version is the SDK version string sent with every API request.
-const Version = "0.64.17"
+const Version = "0.64.18"
 
 // Valid span types matching the backend enum.
 var validSpanTypes = map[string]bool{
