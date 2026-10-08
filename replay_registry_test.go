@@ -521,13 +521,13 @@ func TestReplayRegistryCLIPrintsTheResolvedAPIKeyWithoutReplaying(t *testing.T) 
 		client   func() *Client
 		want     string
 	}{
-		{"configured key", "", "", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"configured-key"}`},
+		{"configured key", "", "", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"configured-key","serviceUrl":"http://127.0.0.1:1"}`},
 		{"key func", "", "", func() *Client {
 			return NewClient("", WithServiceURL("http://127.0.0.1:1"), WithAPIKeyFunc(func() string { return "func-key" }))
-		}, `{"apiKey":"func-key"}`},
-		{"env fallback", "", "env-key", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"env-key"}`},
-		{"override", "override-key", "env-key", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"override-key"}`},
-		{"no key under strict", "", "", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1"), WithStrict(true)) }, `{"apiKey":null}`},
+		}, `{"apiKey":"func-key","serviceUrl":"http://127.0.0.1:1"}`},
+		{"env fallback", "", "env-key", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"env-key","serviceUrl":"http://127.0.0.1:1"}`},
+		{"override", "override-key", "env-key", func() *Client { return NewClient("configured-key", WithServiceURL("http://127.0.0.1:1")) }, `{"apiKey":"override-key","serviceUrl":"http://127.0.0.1:1"}`},
+		{"no key under strict", "", "", func() *Client { return NewClient("", WithServiceURL("http://127.0.0.1:1"), WithStrict(true)) }, `{"apiKey":null,"serviceUrl":"http://127.0.0.1:1"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

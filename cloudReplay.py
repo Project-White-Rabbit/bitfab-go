@@ -40,9 +40,19 @@ API_KEY_ENV = "BITFAB_REPLAY_BITFAB_API_KEY"
 PRINT_API_KEY_FLAG = "--print-api-key"
 API_KEY_LINE = "@@bitfab:api-key "
 KEY_INPUT = "key_id"
-KEY_SECRET_PREFIX = "BITFAB_REPLAY_KEY_"
-KEY_SECRET_REFERENCE = (
-    "${{ secrets[format('" + KEY_SECRET_PREFIX + "{0}', inputs." + KEY_INPUT + ")] }}"
+KEY_TOKEN_PREFIX = "bfcr_"
+LEFTOVER_KEY_SECRET_PREFIX = "BITFAB_REPLAY_KEY_"
+SECRETS_PER_PAGE = 100
+LEGACY_KEY_SECRET_REFERENCE = re.compile(
+    r"^[ \t]*\"?"
+    + API_KEY_ENV
+    + r"\"?[ \t]*:[ \t]*[\"']?\$\{\{\s*secrets\[\s*format\(.*$"
+)
+DEFAULT_SERVICE_URL = "https://bitfab.ai"
+OIDC_AUDIENCE = "bitfab-cloud-replay"
+ID_TOKEN_PERMISSION = re.compile(
+    r"^[ \t]*(\"?id-token\"?[ \t]*:[ \t]*[\"']?write[\"']?|\"?permissions\"?[ \t]*:[ \t]*[\"']?write-all[\"']?)[ \t]*(#.*)?$",
+    re.MULTILINE,
 )
 API_KEY_PROBE_SECONDS = 120
 RUN_NAME = "Bitfab replay ${{ inputs.execution_id || github.ref_name }}"
@@ -221,13 +231,15 @@ values --cloud-env sets. version and id are optional: version names the request
 format (4 when env is set, otherwise 3; 2 is still accepted), and id is the
 execution UUID, which must match an execution_id input when the workflow has one.
 
-The replay runs with the Bitfab API key it would use on your machine, so the
-experiment is recorded as yours. Before dispatch, the replay's registry is loaded
-locally to read its client's key, which the GitHub CLI stores as a GitHub secret
-named for this execution and deletes once the replay starts. Without the GitHub
-CLI, without permission to manage the repository's Actions secrets, with no key
-resolved locally, or with a workflow that declares no key_id input, the run uses
-the workflow's BITFAB_API_KEY secret instead.
+The replay runs as the person who started it, so the experiment is recorded as
+yours. Before dispatch, the replay's registry is loaded locally to read its
+client's key, which asks Bitfab for a one-time token passed as the key_id input,
+tied to the repository, branch, and workflow of the run. The runner trades that
+token, together with the GitHub Actions OIDC token of its own run, for a key that
+works only until the replay ends, so only that run can use it; the token alone
+opens nothing. With no key resolved locally, a token Bitfab will not issue or
+trade, or a workflow that declares no key_id input or does not grant
+id-token: write, the run uses the workflow's BITFAB_API_KEY secret instead.
 
 The runner's job exits with the replay's exit code, so the Actions run fails when
 the replay does. Traces that errored fail it only under --fail-on-error.
@@ -243,8 +255,11 @@ Set up once:
       Writes .github/workflows/bitfab-replay.yml, the only file cloud replay keeps
       in the repository, and lists what is left to do. On an existing workflow it
       adds only the lines a newer SDK needs and lists what it changed.
-  --cloud-update [same options]
+  --cloud-update [same options] [--remove-old-key-secrets]
       The same command as --cloud-init, for bringing an existing setup up to date.
+      It also lists BITFAB_REPLAY_KEY_* secrets an older SDK left in the
+      repository, each a copy of someone's Bitfab API key, and with
+      --remove-old-key-secrets deletes them.
   --cloud-secrets --env-file FILE [NAME ...] [--environment NAME] [--dry-run]
       Copies local values into the GitHub secrets the workflow reads.
 
@@ -1376,7 +1391,7 @@ def submit(root, repo, workflow, parsed, path):
     save(path, record)
     text = within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
     declared = declared_inputs(text)
-    key_inputs = store_key(root, record, declared, text)
+    key_inputs = issue_key_token(root, record, text)
     save(path, record)
     return dispatch(
         record,
@@ -1385,7 +1400,7 @@ def submit(root, repo, workflow, parsed, path):
     )
 
 
-def local_api_key(root, request):
+def local_client(root, request):
     try:
         output = command(
             [*replay_command(), *request["args"], PRINT_API_KEY_FLAG],
@@ -1399,59 +1414,101 @@ def local_api_key(root, request):
         if not line.startswith(API_KEY_LINE):
             continue
         try:
-            key = json.loads(line.removeprefix(API_KEY_LINE)).get("apiKey")
-        except (ValueError, AttributeError):
+            reported = json.loads(line.removeprefix(API_KEY_LINE))
+        except ValueError:
             return None
-        return key if isinstance(key, str) and key.strip() else None
+        if not isinstance(reported, dict):
+            return None
+        key = reported.get("apiKey")
+        if not isinstance(key, str) or not key.strip():
+            return None
+        url = reported.get("serviceUrl")
+        if not isinstance(url, str) or not url.strip():
+            url = DEFAULT_SERVICE_URL
+        return {"apiKey": key, "serviceUrl": url.rstrip("/")}
     return None
 
 
-def store_key(root, record, declared, workflow_text):
+def bitfab_api(client, path, *, method="POST", payload=None):
+    data = None if payload is None else json.dumps(payload).encode()
+    request = urllib.request.Request(
+        f"{client['serviceUrl']}/api/sdk/{path}",
+        method=method,
+        data=data,
+        headers={
+            **(
+                {"Authorization": f"Bearer {client['apiKey']}"}
+                if client.get("apiKey")
+                else {}
+            ),
+            "User-Agent": "bitfab-cloud-replay",
+            **({"Content-Type": "application/json"} if data is not None else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        try:
+            reason = json.loads(error.read()).get("error")
+        except (ValueError, AttributeError, OSError):
+            reason = None
+        raise CommandError(
+            f"Bitfab {method} {path} failed (HTTP {error.code})"
+            + (f": {reason}" if reason else ""),
+            error.code,
+        ) from None
+    except (urllib.error.URLError, OSError) as error:
+        raise CommandError(
+            f"Could not reach {client['serviceUrl']}: {getattr(error, 'reason', error)}"
+        ) from None
+    return json.loads(body) if body.strip() else {}
+
+
+def grants_id_token(text):
+    return ID_TOKEN_PERMISSION.search(text) is not None
+
+
+def issue_key_token(root, record, text):
     shared = "so the run uses the workflow's BITFAB_API_KEY secret"
-    if KEY_INPUT not in declared:
+    if KEY_INPUT not in declared_inputs(text):
         progress(
-            f"The workflow takes no {KEY_INPUT} input, {shared}. To replay with your own Bitfab API key, run bitfab-replay --cloud-init, which adds the {KEY_INPUT} input and {API_KEY_ENV} to the workflow"
+            f"The workflow takes no {KEY_INPUT} input, {shared}. To replay as yourself, run bitfab-replay --cloud-update, which adds the {KEY_INPUT} input to the workflow"
         )
         return {}
-    if shutil.which("gh") is None:
+    if not grants_id_token(text):
         progress(
-            f"Replaying with your own Bitfab API key needs the GitHub CLI (https://cli.github.com) to store it as a GitHub secret, {shared}"
+            f"The workflow does not grant id-token: write, so its run cannot prove to Bitfab which run it is, {shared}. To replay as yourself, run bitfab-replay --cloud-update, which adds it"
         )
         return {}
-    key = local_api_key(root, record["request"])
-    if key is None:
+    client = local_client(root, record["request"])
+    if client is None:
         progress(
             f"The replay's Bitfab client resolved no API key on this machine, {shared}"
         )
         return {}
-    key_id = record["id"].replace("-", "").upper()
-    name = KEY_SECRET_PREFIX + key_id
-    configured = ENVIRONMENT_SETTING.search(workflow_text)
-    environment = configured[1] if configured else None
     try:
-        command(
-            [
-                "gh",
-                "secret",
-                "set",
-                name,
-                "--repo",
-                record["repository"],
-                *(["--env", environment] if environment else []),
-            ],
-            input=key,
-            env={**os.environ, "GH_TOKEN": github_access()["token"]},
+        issued = bitfab_api(
+            client,
+            "replay/cloudKey",
+            payload={
+                "executionId": record["id"],
+                "repository": record["repository"],
+                "ref": "refs/heads/" + record["branch"],
+                "workflow": record["workflow"],
+            },
         )
-    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
-        progress(
-            f"Could not store your Bitfab API key as the GitHub secret {name}, which needs permission to manage the repository's Actions secrets, {shared}"
-        )
+    except CommandError as error:
+        progress(f"{error}, {shared}")
         return {}
-    record["keySecret"] = {"name": name, "environment": environment}
+    token = issued.get("token")
+    if not isinstance(token, str) or not token.startswith(KEY_TOKEN_PREFIX):
+        progress(f"Bitfab issued no replay token, {shared}")
+        return {}
     progress(
-        f"Replaying with the Bitfab API key from this machine, stored as the GitHub secret {name} until the replay starts"
+        f"Replaying as you: the run gets a one-time token that only {record['workflow']} running on {record['branch']} in {record['repository']} can use"
     )
-    return {KEY_INPUT: key_id}
+    return {KEY_INPUT: token}
 
 
 def remove_key(record):
@@ -1606,7 +1663,7 @@ def submit_as_is(root, repo, workflow, parsed, path):
     progress(
         f"Replaying {branch} at {sha[:12]} as it is on GitHub, without local changes. Execution {execution_id}; resume with --cloud-watch {execution_id}"
     )
-    key_inputs = store_key(root, record, declared, text)
+    key_inputs = issue_key_token(root, record, text)
     save(path, record)
     return dispatch(
         record,
@@ -1954,11 +2011,6 @@ def execute():
     )
     directory = within(root, request["cwd"])
     check_secrets(root)
-    if os.environ.get(API_KEY_ENV, "").strip():
-        print(
-            "Replaying with the Bitfab API key of the person who started this run",
-            flush=True,
-        )
     environment = request.get("env") or {}
     if environment:
         workflow_environment_conflicts(root, environment)
@@ -1981,6 +2033,7 @@ def execute():
     if dry_run(request["args"]):
         run_check_command(directory, environment)
     experiment = {}
+    starter = starter_key(root, request)
     previous = signal.signal(signal.SIGTERM, raise_interrupt)
     print(OUTPUT_BEGIN, flush=True)
     try:
@@ -1995,6 +2048,7 @@ def execute():
     finally:
         print(OUTPUT_END, flush=True)
         signal.signal(signal.SIGTERM, previous)
+        revoke_starter_key(starter)
     result = {
         "executionId": request["id"],
         "commitSha": commit,
@@ -2009,6 +2063,114 @@ def execute():
             result["testRunId"] = experiment["id"]
     write_result(result)
     return result
+
+
+def runner_warning(message):
+    print(f"::warning title=Bitfab replay::{message}", flush=True)
+
+
+def warn_if_workflow_outdated():
+    problems = []
+    if API_KEY_ENV in os.environ:
+        problems.append(
+            f"still sets {API_KEY_ENV} from a secret named by the run's inputs, which makes GitHub give this run every secret in the repository"
+        )
+    if not os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL"):
+        problems.append(
+            "does not grant id-token: write, so replays use the workflow's BITFAB_API_KEY secret instead of running as the person who started them"
+        )
+    if problems:
+        runner_warning(
+            f"This workflow {' and '.join(problems)}. Run bitfab-replay --cloud-update and commit the workflow it updates"
+        )
+
+
+def starter_key(root, request):
+    warn_if_workflow_outdated()
+    if os.environ.get(API_KEY_ENV, "").strip():
+        print(
+            "Replaying with the Bitfab API key of the person who started this run",
+            flush=True,
+        )
+        return None
+    token = str(dispatched_inputs().get(KEY_INPUT) or "").strip()
+    if not token.startswith(KEY_TOKEN_PREFIX):
+        return None
+    shared = "so this run uses the workflow's BITFAB_API_KEY secret"
+    runner = local_client(root, request)
+    if runner is None:
+        runner_warning(
+            f"The replay's Bitfab client resolved no API key on the runner, {shared}"
+        )
+        return None
+    try:
+        identity = github_run_identity()
+    except CommandError as error:
+        runner_warning(f"{error}, {shared}")
+        return None
+    timeout = request.get("timeoutMinutes")
+    try:
+        redeemed = bitfab_api(
+            {"serviceUrl": runner["serviceUrl"]},
+            "replay/cloudKey/redeem",
+            payload={
+                "token": token,
+                "oidcToken": identity,
+                **({"minutes": timeout} if timeout else {}),
+            },
+        )
+    except CommandError as error:
+        runner_warning(f"{error}, {shared}")
+        return None
+    key = redeemed.get("apiKey")
+    if not isinstance(key, str) or not key.strip():
+        runner_warning(f"Bitfab returned no key for the replay token, {shared}")
+        return None
+    print(f"::add-mask::{key}", flush=True)
+    os.environ[API_KEY_ENV] = key
+    print(
+        "Replaying as the person who started this run, with a key that is turned off when the replay ends",
+        flush=True,
+    )
+    return {"apiKey": key, "serviceUrl": runner["serviceUrl"]}
+
+
+def github_run_identity():
+    url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+    bearer = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not url or not bearer:
+        raise CommandError(
+            "The workflow does not grant id-token: write, so this run cannot prove to Bitfab which run it is; run bitfab-replay --cloud-update to add it"
+        )
+    separator = "&" if "?" in url else "?"
+    request = urllib.request.Request(
+        f"{url}{separator}{urlencode({'audience': OIDC_AUDIENCE})}",
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "User-Agent": "bitfab-cloud-replay",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            value = json.loads(response.read()).get("value")
+    except (urllib.error.URLError, OSError, ValueError, AttributeError) as error:
+        raise CommandError(
+            f"GitHub did not issue this run's OIDC token: {getattr(error, 'reason', error)}"
+        ) from None
+    if not isinstance(value, str) or not value:
+        raise CommandError("GitHub returned no OIDC token for this run")
+    return value
+
+
+def revoke_starter_key(starter):
+    if starter is None:
+        return
+    try:
+        bitfab_api(starter, "replay/cloudKey", method="DELETE")
+    except CommandError as error:
+        runner_warning(
+            f"Could not turn off this replay's key ({error}); it expires on its own 30 minutes after the replay's timeout"
+        )
 
 
 def running_workflow(root):
@@ -2656,7 +2818,7 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
                 }
             }
         },
-        "permissions": {"contents": "read"},
+        "permissions": {"contents": "read", "id-token": "write"},
         "jobs": {"replay": job},
     }
 
@@ -2712,38 +2874,11 @@ def without_yaml_comment(line):
     return re.sub(r"(^|\s)#.*", "", line)
 
 
-def replay_step_key(lines):
-    for index, line in enumerate(lines):
-        if "--cloud-execute" not in without_yaml_comment(line):
-            continue
-        for above in range(index, -1, -1):
-            match = re.match(r"([ \t]*)(- +)?run[ \t]*:", lines[above])
-            if match and indentation(lines[above]) <= indentation(line):
-                return above, len(match[1]) + len(match[2] or "")
-    return None
-
-
-def add_key_env(lines):
-    found = replay_step_key(lines)
-    if found is None:
+def remove_legacy_key_env(lines):
+    kept = [line for line in lines if not LEGACY_KEY_SECRET_REFERENCE.match(line)]
+    if len(kept) == len(lines):
         return False
-    run, key = found
-    start = run
-    while start > 0 and not re.match(r"[ \t]*- ", lines[start]):
-        start -= 1
-    end = block_end(lines, run, key - 1)
-    entry = f'{API_KEY_ENV}: "{KEY_SECRET_REFERENCE}"'
-    for index in range(start, end):
-        line = lines[index]
-        if not re.fullmatch(r"[ \t]*(- +)?env[ \t]*:[ \t]*", line):
-            continue
-        if len(line) - len(line.lstrip(" \t-")) != key:
-            continue
-        entries = block_end(lines, index, key)
-        child = indentation(lines[index + 1]) if entries > index + 1 else key + 2
-        lines.insert(entries, " " * child + entry)
-        return True
-    lines[end:end] = [" " * key + "env:", " " * (key + 2) + entry]
+    lines[:] = kept
     return True
 
 
@@ -2798,7 +2933,100 @@ def add_checkout_depth(lines):
     return "unchanged"
 
 
-def update_workflow(root, path):
+def add_id_token_permission(lines):
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r'"?permissions"?[ \t]*:[ \t]*(#.*)?', line):
+            continue
+        end = block_end(lines, index, 0)
+        child = next(
+            (
+                lines[row][: indentation(lines[row])]
+                for row in range(index + 1, end)
+                if lines[row].strip()
+            ),
+            "  ",
+        )
+        lines.insert(end, f"{child}id-token: write")
+        return True
+    return False
+
+
+def secret_scope(environment):
+    return f"environments/{environment}/" if environment else "actions/"
+
+
+def secret_names(repo, environment):
+    names, page = [], 1
+    while True:
+        listed = (
+            api(
+                repo,
+                f"{secret_scope(environment)}secrets?per_page={SECRETS_PER_PAGE}&page={page}",
+            )
+            or {}
+        )
+        batch = [secret["name"] for secret in listed.get("secrets", [])]
+        names.extend(batch)
+        if len(batch) < SECRETS_PER_PAGE:
+            return names
+        page += 1
+
+
+def leftover_key_secrets(repo, environment):
+    return [
+        {"name": name, "environment": scope}
+        for scope in dict.fromkeys([None, environment])
+        for name in secret_names(repo, scope)
+        if name.startswith(LEFTOVER_KEY_SECRET_PREFIX)
+    ]
+
+
+def delete_secret(repo, secret):
+    try:
+        api(
+            repo,
+            f"{secret_scope(secret['environment'])}secrets/{secret['name']}",
+            method="DELETE",
+        )
+    except CommandError as error:
+        if error.http_status != 404:
+            return False
+    return True
+
+
+def leftover_key_secret_report(root, text, remove):
+    try:
+        repo = repository(root)
+    except ValueError:
+        return {}, []
+    configured = ENVIRONMENT_SETTING.search(text)
+    environment = configured[1] if configured else None
+    pages = " and ".join(
+        dict.fromkeys(secrets_page(repo, scope) for scope in (None, environment))
+    )
+    try:
+        found = leftover_key_secrets(repo, environment)
+    except (ValueError, RuntimeError):
+        return {}, [
+            f"Could not list the repository's secrets to look for {LEFTOVER_KEY_SECRET_PREFIX}* secrets an older SDK left behind, each a copy of someone's Bitfab API key; delete any at {pages}"
+        ]
+    if not found:
+        return {}, []
+    if not remove:
+        return {"oldKeySecrets": [secret["name"] for secret in found]}, [
+            f"Delete {len(found)} {LEFTOVER_KEY_SECRET_PREFIX}* secret{'s' if len(found) != 1 else ''} an older SDK left behind when a replay could not remove {'them' if len(found) != 1 else 'it'}. Each holds a copy of the Bitfab API key of the person who started that replay, and nothing reads them now. Run bitfab-replay --cloud-update --remove-old-key-secrets, or delete them at {pages}"
+        ]
+    removed = [secret for secret in found if delete_secret(repo, secret)]
+    failed = [secret["name"] for secret in found if secret not in removed]
+    report = {"removedOldKeySecrets": [secret["name"] for secret in removed]}
+    if not failed:
+        return report, []
+    return {**report, "oldKeySecrets": failed}, [
+        f"Could not delete {', '.join(failed)}, which needs permission to manage the repository's Actions secrets; delete them at {pages}"
+    ]
+
+
+def update_workflow(root, path, *, remove_old_key_secrets=False):
     target = within(root, path)
     text = target.read_text()
     lines = text.split("\n")
@@ -2816,13 +3044,19 @@ def update_workflow(root, path):
     if not re.search(r'^"?run-name"?[ \t]*:', text, re.MULTILINE):
         add_run_name(lines)
         updated.append("Named each run after its execution")
-    if API_KEY_ENV not in text:
-        if add_key_env(lines):
-            updated.append(f"Added {API_KEY_ENV} to the replay step's env")
+    if not grants_id_token(text):
+        if add_id_token_permission(lines):
+            updated.append(
+                "Granted id-token: write, so a run can prove to Bitfab which run it is and get the key of the person who started it"
+            )
         else:
             by_hand.append(
-                f'{API_KEY_ENV}: "{KEY_SECRET_REFERENCE}" in the replay step\'s env'
+                "id-token: write under the workflow's top-level permissions block"
             )
+    if remove_legacy_key_env(lines):
+        updated.append(
+            f"Removed the {API_KEY_ENV} line, which read a secret by a name built from the run's inputs and so gave the runner every secret in the repository; the runner now gets the key from Bitfab"
+        )
     depth = add_checkout_depth(lines)
     if depth == "updated":
         updated.append(
@@ -2848,18 +3082,22 @@ def update_workflow(root, path):
         steps.append(
             "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment"
         )
+    leftovers, leftover_steps = leftover_key_secret_report(
+        root, text, remove_old_key_secrets
+    )
     return {
         "files": [path] if updated else [],
         "workflow": path,
         "updated": updated,
-        "next": steps,
+        **leftovers,
+        "next": [*steps, *leftover_steps],
     }
 
 
 def initialize(argv, name="--cloud-init"):
     parser = argparse.ArgumentParser(
         prog=f"bitfab-replay {name}",
-        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the run name, and BITFAB_REPLAY_BITFAB_API_KEY) and lists what it changed; edit it directly for anything else.",
+        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the run name, and the id-token: write permission), removes the BITFAB_REPLAY_BITFAB_API_KEY line older SDKs wrote, lists what it changed, and lists the BITFAB_REPLAY_KEY_* secrets older SDKs left in the repository; edit it directly for anything else.",
     )
     parser.add_argument(
         "--secret",
@@ -2883,6 +3121,11 @@ def initialize(argv, name="--cloud-init"):
     )
     parser.add_argument("--runs-on", default="ubuntu-24.04", help="Runner label")
     parser.add_argument(
+        "--remove-old-key-secrets",
+        action="store_true",
+        help=f"On an existing workflow, also delete the {LEFTOVER_KEY_SECRET_PREFIX}* GitHub secrets an older SDK left behind, each a copy of the Bitfab API key of the person who started a replay",
+    )
+    parser.add_argument(
         "--check",
         help='Command the runner also runs on a --cloud --dry-run, such as "node scripts/checkBucket.js"',
     )
@@ -2891,7 +3134,11 @@ def initialize(argv, name="--cloud-init"):
     refuse_old_setup(root)
     existing = find_workflow(root)
     if existing is not None:
-        return update_workflow(root, f"{WORKFLOW_DIRECTORY}/{existing}")
+        return update_workflow(
+            root,
+            f"{WORKFLOW_DIRECTORY}/{existing}",
+            remove_old_key_secrets=args.remove_old_key_secrets,
+        )
     prefix = args.secret_prefix
     if prefix and not re.fullmatch(r"[A-Z][A-Z0-9_]*_", prefix):
         raise ValueError(
@@ -2910,7 +3157,6 @@ def initialize(argv, name="--cloud-init"):
             'Pass --run with the command that starts your registry program on the runner, such as --run "go run ./cmd/registry"'
         )
     env = {name: "${{ secrets." + prefix + name + " }}" for name in names}
-    env[API_KEY_ENV] = KEY_SECRET_REFERENCE
     if args.check:
         env[CHECK_COMMAND_ENV] = args.check
     path = f"{WORKFLOW_DIRECTORY}/{WORKFLOW}"

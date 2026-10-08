@@ -616,8 +616,10 @@ func printRegistryAPIKey(registry *ReplayRegistry, pipeline string, stdout io.Wr
 		return err
 	}
 	var payload struct {
-		APIKey *string `json:"apiKey"`
+		APIKey     *string `json:"apiKey"`
+		ServiceURL string  `json:"serviceUrl"`
 	}
+	payload.ServiceURL = entry.Client.serviceURL
 	if key := entry.Client.probeAPIKey(); key != "" {
 		payload.APIKey = &key
 	}
