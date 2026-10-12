@@ -89,6 +89,47 @@ func (data ScenarioData) MarshalJSON() ([]byte, error) {
 	return json.Marshal(wire(data))
 }
 
+// ScenarioAction is one thing a run did, such as a tool call, as the caller
+// recorded it. Details holds the action's arguments and a nil map is sent as
+// an empty object. Result is nil when the action returned nothing to show,
+// Failed reports whether it failed, and At is when it happened, nil if unknown.
+type ScenarioAction struct {
+	Name    string         `json:"name"`
+	Details map[string]any `json:"details"`
+	Result  *string        `json:"result"`
+	Failed  bool           `json:"failed"`
+	At      *string        `json:"at"`
+}
+
+// MarshalJSON sends a nil Details as an empty object.
+func (action ScenarioAction) MarshalJSON() ([]byte, error) {
+	type wire ScenarioAction
+	if action.Details == nil {
+		action.Details = map[string]any{}
+	}
+	return json.Marshal(wire(action))
+}
+
+// ScenarioActualOutcome is what one run of the scenario actually did, never
+// what it should have done. Bitfab never fills it in. The caller sends it with
+// SaveScenario. Summary describes the outcome in words, Actions lists what the
+// run did in order (a nil slice is sent as empty), and Source names the span
+// the outcome was read from, or is nil when there is none.
+type ScenarioActualOutcome struct {
+	Summary string           `json:"summary"`
+	Actions []ScenarioAction `json:"actions"`
+	Source  *ScenarioSource  `json:"source,omitempty"`
+}
+
+// MarshalJSON sends a nil Actions as an empty list.
+func (outcome ScenarioActualOutcome) MarshalJSON() ([]byte, error) {
+	type wire ScenarioActualOutcome
+	if outcome.Actions == nil {
+		outcome.Actions = []ScenarioAction{}
+	}
+	return json.Marshal(wire(outcome))
+}
+
 type ScenarioDataAppend struct {
 	History []ScenarioHistoryEntry `json:"history,omitempty"`
 	Missing []string               `json:"missing,omitempty"`
@@ -106,8 +147,11 @@ type Scenario struct {
 	Description     string          `json:"description"`
 	Trigger         ScenarioTrigger `json:"trigger"`
 	Data            ScenarioData    `json:"data"`
-	TriggerSummary  string          `json:"triggerSummary"`
-	DataSummary     string          `json:"dataSummary"`
+	// ActualOutcome is what the run actually did, as last saved by a caller.
+	// It is nil when nothing has been saved or it was cleared.
+	ActualOutcome  *ScenarioActualOutcome `json:"actualOutcome"`
+	TriggerSummary string                 `json:"triggerSummary"`
+	DataSummary    string                 `json:"dataSummary"`
 }
 
 type SaveScenarioParams struct {
@@ -117,6 +161,12 @@ type SaveScenarioParams struct {
 	Trigger     *ScenarioTrigger    `json:"trigger,omitempty"`
 	Data        *ScenarioData       `json:"data,omitempty"`
 	AppendData  *ScenarioDataAppend `json:"appendData,omitempty"`
+	// ActualOutcome replaces the saved actual outcome whole. Nil leaves the
+	// saved one untouched.
+	ActualOutcome *ScenarioActualOutcome `json:"actualOutcome,omitempty"`
+	// ClearActualOutcome removes the saved actual outcome by sending null.
+	// Setting it together with ActualOutcome is refused.
+	ClearActualOutcome bool `json:"-"`
 }
 
 func (update SaveScenarioParams) payload() (map[string]any, error) {
@@ -126,8 +176,12 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 	if update.AppendData != nil && len(update.AppendData.History)+len(update.AppendData.Missing) == 0 {
 		return nil, errors.New("bitfab: a scenario data append must name at least one history entry or missing item")
 	}
-	if update.Name == nil && update.Description == nil && update.Trigger == nil && update.Data == nil && update.AppendData == nil {
-		return nil, errors.New("bitfab: a scenario update must set at least one field")
+	if update.ActualOutcome != nil && update.ClearActualOutcome {
+		return nil, errors.New("bitfab: cannot set and clear a scenario actual outcome together")
+	}
+	if update.Name == nil && update.Description == nil && update.Trigger == nil && update.Data == nil &&
+		update.AppendData == nil && update.ActualOutcome == nil && !update.ClearActualOutcome {
+		return nil, errors.New("bitfab: a scenario update must set at least one of name, description, trigger, data, appendData, or actualOutcome")
 	}
 	encoded, err := json.Marshal(update)
 	if err != nil {
@@ -136,6 +190,9 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		return nil, err
+	}
+	if update.ClearActualOutcome {
+		payload["actualOutcome"] = nil
 	}
 	return payload, nil
 }
