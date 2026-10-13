@@ -67,7 +67,7 @@ func newDatasetsServer(t *testing.T, respond func(r datasetRequest) any) *datase
 			t.Errorf("Authorization = %q, want Bearer test-key", r.Header.Get("Authorization"))
 		}
 		rec := datasetRequest{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery}
-		if r.Method == http.MethodPost {
+		if r.Method == http.MethodPost || r.Method == http.MethodPatch {
 			_ = json.NewDecoder(r.Body).Decode(&rec.body)
 		}
 		s.mu.Lock()
@@ -142,6 +142,81 @@ func TestDatasets_SaveClearsDescriptionExplicitly(t *testing.T) {
 	})
 	if err == nil || len(server.recorded()) != 1 {
 		t.Fatalf("conflicting description accepted: %v", err)
+	}
+}
+
+func TestDatasets_UpdateSendsOnlyGivenFields(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		dataset := testDataset()
+		if name, ok := r.body["name"].(string); ok {
+			dataset["name"] = name
+		}
+		if description, ok := r.body["description"]; ok {
+			dataset["description"] = description
+		}
+		return map[string]any{"dataset": dataset}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	renamed, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{Name: "Refund regressions"})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if renamed.ID != testDatasetID || renamed.Name != "Refund regressions" {
+		t.Errorf("dataset = %+v", renamed)
+	}
+	req := server.recorded()[0]
+	if req.method != http.MethodPatch || req.path != "/api/sdk/datasets/"+testDatasetID {
+		t.Errorf("request = %s %s", req.method, req.path)
+	}
+	if len(req.body) != 1 || req.body["name"] != "Refund regressions" {
+		t.Errorf("body = %v", req.body)
+	}
+
+	described, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{Description: "Refunds the agent got wrong"})
+	if err != nil || described.Description == nil || *described.Description != "Refunds the agent got wrong" {
+		t.Fatalf("Update = %+v, %v", described, err)
+	}
+	if body := server.recorded()[1].body; len(body) != 1 || body["description"] != "Refunds the agent got wrong" {
+		t.Errorf("body = %v", body)
+	}
+}
+
+func TestDatasets_UpdateClearsDescriptionExplicitly(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		dataset := testDataset()
+		dataset["description"] = ""
+		return map[string]any{"dataset": dataset}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	updated, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{ClearDescription: true})
+	if err != nil || updated.Description == nil || *updated.Description != "" {
+		t.Fatalf("Update = %+v, %v", updated, err)
+	}
+	body := server.recorded()[0].body
+	if value, present := body["description"]; !present || value != "" {
+		t.Fatalf("description = %v, present = %t", value, present)
+	}
+	if _, present := body["name"]; present {
+		t.Errorf("name must be omitted, body = %v", body)
+	}
+}
+
+func TestDatasets_UpdateRejectsWithoutRequest(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"dataset": testDataset()}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	_, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{})
+	if err == nil || !strings.Contains(err.Error(), "provide Name and/or Description") {
+		t.Fatalf("empty params error = %v", err)
+	}
+	_, err = client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{Description: "new", ClearDescription: true})
+	if err == nil {
+		t.Fatal("conflicting description accepted")
+	}
+	if got := len(server.recorded()); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
 	}
 }
 

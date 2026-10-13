@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"time"
 )
@@ -33,6 +34,17 @@ type Dataset struct {
 // Description together with ClearDescription is rejected.
 type SaveDatasetParams struct {
 	TraceFunctionKey string
+	Name             string
+	Description      string
+	ClearDescription bool
+}
+
+// UpdateDatasetParams changes an existing dataset in place. An empty Name
+// leaves the name untouched. An empty Description leaves the description
+// untouched unless ClearDescription is true, which sends an explicit empty
+// description. Setting a nonempty Description together with ClearDescription
+// is rejected, as is leaving every field at its zero value.
+type UpdateDatasetParams struct {
 	Name             string
 	Description      string
 	ClearDescription bool
@@ -256,6 +268,33 @@ func (d *DatasetsClient) Get(ctx context.Context, datasetID string) (*Dataset, e
 		Dataset Dataset `json:"dataset"`
 	}
 	if err := d.httpClient.get(ctx, datasetPath(datasetID, ""), &response); err != nil {
+		return nil, err
+	}
+	return &response.Dataset, nil
+}
+
+// Update renames a dataset or changes its description, keeping its id, traces,
+// and graders. A blank name, or a name already used by another dataset on the
+// same trace function, fails with a 400. A dataset outside this organization
+// fails with a 404.
+func (d *DatasetsClient) Update(ctx context.Context, datasetID string, params UpdateDatasetParams) (*Dataset, error) {
+	if params.ClearDescription && params.Description != "" {
+		return nil, fmt.Errorf("bitfab: cannot set Description and ClearDescription together")
+	}
+	payload := map[string]any{}
+	if params.Name != "" {
+		payload["name"] = params.Name
+	}
+	if params.Description != "" || params.ClearDescription {
+		payload["description"] = params.Description
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("bitfab: provide Name and/or Description to update")
+	}
+	var response struct {
+		Dataset Dataset `json:"dataset"`
+	}
+	if err := d.httpClient.requestMethodInto(ctx, http.MethodPatch, datasetPath(datasetID, ""), payload, &response); err != nil {
 		return nil, err
 	}
 	return &response.Dataset, nil
