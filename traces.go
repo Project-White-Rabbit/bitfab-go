@@ -7,9 +7,11 @@ import (
 )
 
 type TraceSearchParams struct {
-	CallerMetadata   map[string]string
-	Name             string
-	NameContains     string
+	CallerMetadata map[string]string
+	Name           string
+	NameContains   string
+	// ExperimentID limits results to the replay traces this experiment produced.
+	ExperimentID     string
 	TraceFunctionKey string
 	Cursor           string
 	Limit            int
@@ -22,6 +24,12 @@ type TraceSearchEntry struct {
 	Status           string            `json:"status"`
 	CreatedAt        string            `json:"createdAt"`
 	CallerMetadata   map[string]string `json:"callerMetadata"`
+	// ExperimentID is the experiment that produced this trace, or nil for a captured trace.
+	ExperimentID *string `json:"experimentId"`
+	// DurationMs is the trace's wall-clock time, or nil when it has no end time.
+	DurationMs *int64 `json:"durationMs"`
+	// Tokens is the token usage summed across the trace, or nil when none was recorded.
+	Tokens *TokenUsage `json:"tokens"`
 }
 
 type TraceSearchResult struct {
@@ -44,6 +52,9 @@ func (t *TracesClient) Search(ctx context.Context, params TraceSearchParams) (*T
 	}
 	if params.NameContains != "" {
 		payload["nameContains"] = params.NameContains
+	}
+	if params.ExperimentID != "" {
+		payload["experimentId"] = params.ExperimentID
 	}
 	if params.TraceFunctionKey != "" {
 		payload["traceFunctionKey"] = params.TraceFunctionKey

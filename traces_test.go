@@ -65,3 +65,49 @@ func TestTraces_SearchPostsNameFilters(t *testing.T) {
 		t.Errorf("callerMetadata should be omitted, body = %+v", req.body)
 	}
 }
+
+func TestTraces_SearchPostsExperimentFilterAndDecodesDurationAndTokens(t *testing.T) {
+	server := newDatasetsServer(t, func(request datasetRequest) any {
+		return map[string]any{
+			"traces": []any{map[string]any{
+				"id":               "trace-1",
+				"traceFunctionKey": "support-agent",
+				"name":             nil,
+				"status":           "completed",
+				"createdAt":        "2026-10-13T00:00:00.000Z",
+				"callerMetadata":   map[string]any{},
+				"experimentId":     "experiment-1",
+				"durationMs":       1250,
+				"tokens":           map[string]any{"input": 200, "output": 75, "cached": 40, "total": 275},
+			}},
+			"nextCursor": nil,
+			"hasMore":    false,
+		}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+
+	result, err := client.Traces.Search(context.Background(), TraceSearchParams{
+		ExperimentID: "experiment-1",
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	req := server.recorded()[0]
+	if req.body["experimentId"] != "experiment-1" {
+		t.Errorf("body = %+v", req.body)
+	}
+	if len(result.Traces) != 1 {
+		t.Fatalf("traces = %+v", result.Traces)
+	}
+	entry := result.Traces[0]
+	if entry.ExperimentID == nil || *entry.ExperimentID != "experiment-1" {
+		t.Errorf("experimentId = %v", entry.ExperimentID)
+	}
+	if entry.DurationMs == nil || *entry.DurationMs != 1250 {
+		t.Errorf("durationMs = %v", entry.DurationMs)
+	}
+	if entry.Tokens == nil || entry.Tokens.Total == nil || *entry.Tokens.Total != 275 ||
+		entry.Tokens.Cached == nil || *entry.Tokens.Cached != 40 {
+		t.Errorf("tokens = %+v", entry.Tokens)
+	}
+}
