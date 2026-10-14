@@ -88,13 +88,13 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, codeChange, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                                      int
-	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, noCodeChange, run                                      bool
-	parameters                                                                                                                        []string
-	metadata                                                                                                                          map[string]string
-	visited                                                                                                                           map[string]bool
-	flags                                                                                                                             map[string]any
+	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                                           int
+	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, noCodeChange, run                                                           bool
+	parameters                                                                                                                                             []string
+	metadata                                                                                                                                               map[string]string
+	visited                                                                                                                                                map[string]bool
+	flags                                                                                                                                                  map[string]any
 }
 
 type registryParameters []string
@@ -122,6 +122,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.notes, "notes", "", "Run conditions Bitfab cannot see on its own, such as an environment override or a forced feature flag. Kept on the experiment next to its name.")
 	fs.StringVar(&out.mock, "mock", "", "marked, all, or none")
 	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "experiment group ID")
+	fs.StringVar(&out.experimentGroupName, "experiment-group-name", "", "Name for the experiment group, applied when this run creates the group or the group has no name yet. A group that already has a name keeps it. Requires --experiment-group-id.")
 	fs.StringVar(&out.codeChange, "code-change", "", "code change JSON file")
 	fs.StringVar(&out.params, "params", "", "parameters JSON file")
 	fs.StringVar(&out.seed, "seed", "", "seed cases JSON or JSONL file")
@@ -487,6 +488,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	}
 	if parsed.visited["experiment-group-id"] {
 		options.ExperimentGroupID = parsed.experimentGroupID
+	}
+	if parsed.visited["experiment-group-name"] {
+		options.ExperimentGroupName = parsed.experimentGroupName
 	}
 	if parsed.visited["grader-ids"] {
 		options.GraderIDs, err = registryIDs(parsed.graderIDs)

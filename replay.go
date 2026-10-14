@@ -218,16 +218,21 @@ type ReplayOptions struct {
 	MockOverrides            []MockOverride
 	DBBranch                 *DBBranchOptions
 	ExperimentGroupID        string
-	DatasetID                string
-	DatasetIDs               []string
-	GraderIDs                []string
-	AdaptInputs              ReplayInputAdapter
-	OnItemStart              func(ReplayItemStartProgress)
-	OnItemFinish             func(ReplayItemFinishProgress)
-	OnExperimentStart        func(ReplayExperimentStart)
-	dbBranchSettings         map[string]any
-	cliFlags                 map[string]any
-	invocation               map[string]any
+	// ExperimentGroupName names the experiment group when this replay creates
+	// it, or when the group exists but has no name yet. A group that already
+	// has a name keeps it. Requires ExperimentGroupID; setting it without one
+	// is refused before any request is sent.
+	ExperimentGroupName string
+	DatasetID           string
+	DatasetIDs          []string
+	GraderIDs           []string
+	AdaptInputs         ReplayInputAdapter
+	OnItemStart         func(ReplayItemStartProgress)
+	OnItemFinish        func(ReplayItemFinishProgress)
+	OnExperimentStart   func(ReplayExperimentStart)
+	dbBranchSettings    map[string]any
+	cliFlags            map[string]any
+	invocation          map[string]any
 }
 
 // ReportReplayProgress writes a replay lifecycle event using the Bitfab plugin wire protocol.
@@ -705,6 +710,9 @@ func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 	if resolved.MaxConcurrency < 1 {
 		return ReplayOptions{}, fmt.Errorf("bitfab: replay max concurrency must be at least 1")
 	}
+	if resolved.ExperimentGroupName != "" && resolved.ExperimentGroupID == "" {
+		return ReplayOptions{}, fmt.Errorf("bitfab: replay ExperimentGroupName requires ExperimentGroupID")
+	}
 	mockStrategy, err := normalizeMockStrategy(resolved.Mock)
 	if err != nil {
 		return ReplayOptions{}, err
@@ -832,6 +840,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.ExperimentGroupID != "" {
 		payload["experimentGroupId"] = options.ExperimentGroupID
+	}
+	if options.ExperimentGroupName != "" {
+		payload["experimentGroupName"] = options.ExperimentGroupName
 	}
 	if len(options.DatasetIDs) == 1 {
 		payload["datasetId"] = options.DatasetIDs[0]

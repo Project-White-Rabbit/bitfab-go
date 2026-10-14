@@ -569,6 +569,48 @@ func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
 	}
 }
 
+func TestReplayOmitsExperimentGroupNameWhenUnset(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: "group-1", DisableCodeChangeCapture: true}
+	if _, err := client.Replay(context.Background(), "group-workflow", func() {}, options); err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.startBody["experimentGroupId"] != "group-1" {
+		t.Errorf("start body experimentGroupId = %#v", state.startBody["experimentGroupId"])
+	}
+	if _, present := state.startBody["experimentGroupName"]; present {
+		t.Errorf("start body should omit experimentGroupName: %#v", state.startBody)
+	}
+}
+
+func TestReplayRefusesExperimentGroupNameWithoutID(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupName: "Prompt sweep", DisableCodeChangeCapture: true}
+	_, err := client.Replay(context.Background(), "group-workflow", func() {}, options)
+	if err == nil || !strings.Contains(err.Error(), "ExperimentGroupName requires ExperimentGroupID") {
+		t.Fatalf("Replay error = %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests sent = %d, want 0", got)
+	}
+}
+
 func TestNormalizeReplayOptions(t *testing.T) {
 	resolved, err := normalizeReplayOptions(nil)
 	if err != nil {
@@ -751,9 +793,10 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 				Before: "old",
 				After:  "new",
 			}},
-			ExperimentGroupID: "group-1",
-			DatasetID:         "dataset-1",
-			GraderIDs:         []string{"grader-1"},
+			ExperimentGroupID:   "group-1",
+			ExperimentGroupName: "Prompt sweep",
+			DatasetID:           "dataset-1",
+			GraderIDs:           []string{"grader-1"},
 		},
 	)
 	if err != nil {
@@ -769,6 +812,7 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 		"notes":                 "forced the new-checkout flag on",
 		"codeChangeDescription": "try the new prompt",
 		"experimentGroupId":     "group-1",
+		"experimentGroupName":   "Prompt sweep",
 		"datasetId":             "dataset-1",
 	} {
 		if state.startBody[key] != want {

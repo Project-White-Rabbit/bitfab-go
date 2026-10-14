@@ -173,6 +173,50 @@ func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
 	}
 }
 
+func TestReplayRegistryCLIExperimentGroupNameFlag(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{
+		Client:   client,
+		Function: BindReplayFunction("registry", func(string, int) {}),
+		Options:  ReplayOptions{TraceIDs: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"pipeline", "--dry-run", "--experiment-group-id", "group-1", "--experiment-group-name", "Prompt sweep"}
+	if _, err := RunReplayCLI(context.Background(), registry, args, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	body := state.startBody
+	state.startBody = nil
+	state.mu.Unlock()
+	if body["experimentGroupId"] != "group-1" || body["experimentGroupName"] != "Prompt sweep" {
+		t.Fatalf("start body = %+v", body)
+	}
+	invocation, _ := body["invocation"].(map[string]any)
+	flags, _ := invocation["flags"].(map[string]any)
+	if flags["experiment-group-id"] != "group-1" || flags["experiment-group-name"] != "Prompt sweep" {
+		t.Fatalf("invocation flags = %#v", flags)
+	}
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--experiment-group-name", "Prompt sweep"}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "ExperimentGroupName requires ExperimentGroupID") {
+		t.Fatalf("name without id error = %v", err)
+	}
+	state.mu.Lock()
+	body = state.startBody
+	state.mu.Unlock()
+	if body != nil {
+		t.Fatalf("name without id still started a replay: %+v", body)
+	}
+}
+
 func TestReplayRegistryBoundExplicitOrderingInheritedAndErrors(t *testing.T) {
 	reads := []string{}
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
