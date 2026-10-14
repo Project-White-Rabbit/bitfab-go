@@ -116,6 +116,41 @@ func TestLabels_SkipCarriesItsReason(t *testing.T) {
 	}
 }
 
+func TestLabels_AbstainCarriesItsReasonAndCountsAsItsOwnAction(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"labels": []any{map[string]any{
+			"key": "one", "traceId": "replayed", "action": "abstained",
+		}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	outcome, err := client.Labels.Save(context.Background(), LabelUpdate{
+		LabelTarget: LabelTarget{OriginalTraceID: "one", AssertionID: "assertion"},
+		Abstain:     true,
+		Annotation:  "No message to the exec appears in the evidence.",
+	}, WithLabelExperimentID("run"))
+	if err != nil || outcome.Action != LabelActionAbstained {
+		t.Fatalf("Save = %+v, %v", outcome, err)
+	}
+	want := map[string]any{"experimentId": "run", "testRunId": "run", "labels": []any{map[string]any{
+		"originalTraceId": "one", "assertionId": "assertion", "abstain": true, "annotation": "No message to the exec appears in the evidence.",
+	}}}
+	if !reflect.DeepEqual(server.recorded()[0].body, want) {
+		t.Fatalf("request = %#v, want %#v", server.recorded()[0].body, want)
+	}
+	if _, err := client.Labels.Abstain(context.Background(), LabelTarget{TraceID: "direct", AssertionID: "assertion"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.recorded()[1].body["labels"].([]any)[0].(map[string]any)["abstain"]; got != true {
+		t.Fatalf("Abstain sent %#v", server.recorded()[1].body)
+	}
+	if _, err := client.Labels.Abstain(context.Background(), LabelTarget{TraceID: "direct"}); err == nil || !strings.Contains(err.Error(), "must name an assertion") {
+		t.Fatalf("Abstain without an assertion = %v", err)
+	}
+	if _, err := client.Labels.Save(context.Background(), LabelUpdate{LabelTarget: LabelTarget{TraceID: "direct", AssertionID: "assertion"}, Abstain: true, Skip: true}); err == nil || !strings.Contains(err.Error(), "only do one of") {
+		t.Fatalf("Abstain plus Skip = %v", err)
+	}
+}
+
 func TestLabels_MixedBatchAndTargetedSkipArchive(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		labels := r.body["labels"].([]any)
@@ -240,7 +275,7 @@ func TestLabels_ReadsPreserveNullsAndAssertionVerdicts(t *testing.T) {
 			"approved": false, "passed": 0, "failed": 1,
 			"assertions": []any{map[string]any{
 				"assertionId": "assertion", "assertion": "arrives on time", "labelStatus": "labeled", "label": false,
-				"annotation": "arrived late", "confidence": "High", "labelSource": "human", "approved": true,
+				"verdict": "abstained", "annotation": "arrived late", "confidence": "High", "labelSource": "agent", "approved": true,
 			}},
 		}}}
 	})
@@ -251,7 +286,7 @@ func TestLabels_ReadsPreserveNullsAndAssertionVerdicts(t *testing.T) {
 		t.Fatalf("GetAll = %+v, %v", labels, err)
 	}
 	verdict := labels[0].Assertions[0]
-	if verdict.Label == nil || *verdict.Label || !verdict.Approved || verdict.LabelSource != LabelSourceHuman {
+	if verdict.Label == nil || *verdict.Label || verdict.Verdict == nil || *verdict.Verdict != VerdictAbstained || !verdict.Approved || verdict.LabelSource != LabelSourceAgent {
 		t.Fatalf("assertion = %+v", verdict)
 	}
 	missing, err := client.Labels.Get(ctx, "missing")

@@ -26,6 +26,7 @@ const (
 	LabelActionArchived      LabelAction = "archived"
 	LabelActionNoActiveLabel LabelAction = "no-active-label"
 	LabelActionSkipped       LabelAction = "skipped"
+	LabelActionAbstained     LabelAction = "abstained"
 )
 
 // LabelStatus distinguishes a verdict from an explicit skip or an absent label.
@@ -35,6 +36,16 @@ const (
 	LabelStatusLabeled   LabelStatus = "labeled"
 	LabelStatusSkipped   LabelStatus = "skipped"
 	LabelStatusUnlabeled LabelStatus = "unlabeled"
+)
+
+// Verdict is an assertion verdict. VerdictAbstained means the judge could not
+// find the evidence the assertion needs; it counts as a fail.
+type Verdict string
+
+const (
+	VerdictPass      Verdict = "pass"
+	VerdictFail      Verdict = "fail"
+	VerdictAbstained Verdict = "abstained"
 )
 
 // LabelSource identifies the author of a saved verdict.
@@ -87,10 +98,14 @@ func (target LabelTarget) target() string {
 	return target.OriginalTraceID
 }
 
-// LabelUpdate sets a pass/fail verdict, skips a check, or archives its previous
-// verdict. With neither Skip nor Archive set, Label and Annotation are sent.
-// A false Label is a failing verdict and is never omitted. With Skip set,
-// Annotation records why the verdict was withheld.
+// LabelUpdate sets a pass/fail verdict, skips a check, abstains on it, or
+// archives its previous verdict. With none of Skip, Abstain, or Archive set,
+// Label and Annotation are sent. A false Label is a failing verdict and is
+// never omitted. With Skip set, Annotation records why the verdict was
+// withheld. With Abstain set, the evidence did not show the part of the run
+// the assertion checks, so there was nothing to judge: it counts as a fail in
+// every pass rate but is read back as an abstention, and Annotation says what
+// the evidence would have had to show.
 type LabelUpdate struct {
 	LabelTarget
 	Label      bool
@@ -98,6 +113,7 @@ type LabelUpdate struct {
 	Confidence LabelConfidence
 	Evidence   *Justification
 	Skip       bool
+	Abstain    bool
 	Archive    bool
 }
 
@@ -106,15 +122,20 @@ func (update LabelUpdate) payload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if update.Skip && update.Archive {
-		return nil, fmt.Errorf("bitfab: a label update cannot both skip and archive")
+	if (update.Skip && update.Archive) || (update.Abstain && update.Archive) || (update.Skip && update.Abstain) {
+		return nil, fmt.Errorf("bitfab: a label update can only do one of skip, abstain, and archive")
 	}
 	if !update.Archive && update.AssertionID == "" {
-		return nil, fmt.Errorf("bitfab: agent verdicts must name an assertion: %s. Set AssertionID to the assertion each verdict scores on Save, SaveAll, and Skip. Only Archive may omit it, to clear an old whole-trace verdict", update.target())
+		return nil, fmt.Errorf("bitfab: agent verdicts must name an assertion: %s. Set AssertionID to the assertion each verdict scores on Save, SaveAll, Skip, and Abstain. Only Archive may omit it, to clear an old whole-trace verdict", update.target())
 	}
 	switch {
 	case update.Skip:
 		payload["skip"] = true
+		if update.Annotation != "" {
+			payload["annotation"] = update.Annotation
+		}
+	case update.Abstain:
+		payload["abstain"] = true
 		if update.Annotation != "" {
 			payload["annotation"] = update.Annotation
 		}
@@ -159,10 +180,13 @@ type HumanLabelOutcome struct {
 
 // AssertionVerdict is one assertion's effective saved verdict and author.
 type AssertionVerdict struct {
-	AssertionID string           `json:"assertionId"`
-	Assertion   *string          `json:"assertion"`
-	LabelStatus LabelStatus      `json:"labelStatus"`
-	Label       *bool            `json:"label"`
+	AssertionID string      `json:"assertionId"`
+	Assertion   *string     `json:"assertion"`
+	LabelStatus LabelStatus `json:"labelStatus"`
+	Label       *bool       `json:"label"`
+	// Verdict is nil when there is none. Label carries the same verdict as a
+	// bool, false for both fail and abstained.
+	Verdict     *Verdict         `json:"verdict"`
 	Annotation  *string          `json:"annotation"`
 	Evidence    *Justification   `json:"evidence"`
 	Confidence  *LabelConfidence `json:"confidence"`
@@ -180,6 +204,7 @@ type TraceLabels struct {
 	Approved    bool               `json:"approved"`
 	Passed      int                `json:"passed"`
 	Failed      int                `json:"failed"`
+	Abstained   int                `json:"abstained"`
 	Assertions  []AssertionVerdict `json:"assertions"`
 }
 
@@ -268,6 +293,14 @@ func (l *LabelsClient) SaveAll(ctx context.Context, updates []LabelUpdate, optio
 // Skip withholds a verdict for a trace, replay attempt, or assertion whose check did not run.
 func (l *LabelsClient) Skip(ctx context.Context, target LabelTarget, options ...LabelWriteOption) (*LabelOutcome, error) {
 	return l.Save(ctx, LabelUpdate{LabelTarget: target, Skip: true}, options...)
+}
+
+// Abstain records that the evidence does not show the part of the run the
+// assertion checks, so there was nothing to judge. It counts as a fail in every
+// pass rate but is read back as an abstention. An abstention that carries a
+// reason goes through Save with Abstain: true and Annotation set.
+func (l *LabelsClient) Abstain(ctx context.Context, target LabelTarget, options ...LabelWriteOption) (*LabelOutcome, error) {
+	return l.Save(ctx, LabelUpdate{LabelTarget: target, Abstain: true}, options...)
 }
 
 // Archive clears a previous verdict for a trace, replay attempt, or assertion.

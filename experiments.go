@@ -119,6 +119,7 @@ type ExperimentTally struct {
 	Classified        int `json:"classified"`
 	Passing           int `json:"passing"`
 	Failing           int `json:"failing"`
+	Abstained         int `json:"abstained"`
 }
 
 // ExperimentCategoryTally tallies the assertions in one category.
