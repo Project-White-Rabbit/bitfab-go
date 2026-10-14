@@ -1896,7 +1896,7 @@ def check_out_snapshot_base(root, commit, branch):
         base = git(root, "rev-parse", "--verify", "-q", f"{commit}^")
     except CommandError:
         print(
-            "This checkout does not include the commit the snapshot was taken on, so the experiment records no code change; set fetch-depth: 2 on the workflow's actions/checkout step, or run bitfab-replay --cloud-update",
+            "This checkout does not include the commit the snapshot was taken on, so the experiment records no code change and the snapshot commit instead of your branch; set fetch-depth: 2 on the workflow's checkout step, or run bitfab-replay --cloud-update",
             flush=True,
         )
         return None
@@ -2900,7 +2900,7 @@ def raise_checkout_depth(lines, start, end):
 def add_checkout_depth(lines):
     for index, line in enumerate(lines):
         match = re.match(
-            r'([ \t]*)(- +)?"?uses"?[ \t]*:[ \t]*"?actions/checkout@',
+            r'([ \t]*)(- +)?"?uses"?[ \t]*:[ \t]*"?[\w.-]+/checkout@',
             without_yaml_comment(line),
         )
         if not match:
@@ -3063,9 +3063,7 @@ def update_workflow(root, path, *, remove_old_key_secrets=False):
             "Checked out the commit each snapshot is taken on, so experiments record the code change"
         )
     elif depth == "by hand":
-        by_hand.append(
-            f"fetch-depth: {CHECKOUT_DEPTH} in the actions/checkout step's with"
-        )
+        by_hand.append(f"fetch-depth: {CHECKOUT_DEPTH} in the checkout step's with")
     if updated:
         target.write_text("\n".join(lines))
     steps = []
