@@ -208,7 +208,7 @@ func TestDatasets_UpdateRejectsWithoutRequest(t *testing.T) {
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	_, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{})
-	if err == nil || !strings.Contains(err.Error(), "provide Name and/or Description") {
+	if err == nil || !strings.Contains(err.Error(), "provide Name, Description, and/or Golden") {
 		t.Fatalf("empty params error = %v", err)
 	}
 	_, err = client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{Description: "new", ClearDescription: true})
@@ -217,6 +217,83 @@ func TestDatasets_UpdateRejectsWithoutRequest(t *testing.T) {
 	}
 	if got := len(server.recorded()); got != 0 {
 		t.Fatalf("requests = %d, want 0", got)
+	}
+}
+
+func TestDatasets_UpdateSendsGoldenAlone(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		dataset := testDataset()
+		dataset["golden"] = r.body["golden"]
+		return map[string]any{"dataset": dataset}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	golden := true
+	updated, err := client.Datasets.Update(context.Background(), testDatasetID, UpdateDatasetParams{Golden: &golden})
+	if err != nil || !updated.Golden {
+		t.Fatalf("Update = %+v, %v", updated, err)
+	}
+	if body := server.recorded()[0].body; len(body) != 1 || body["golden"] != true {
+		t.Errorf("body = %v", body)
+	}
+}
+
+func TestDatasets_SaveSendsGoldenOnlyWhenSet(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		dataset := testDataset()
+		if golden, ok := r.body["golden"].(bool); ok {
+			dataset["golden"] = golden
+		}
+		return map[string]any{"dataset": dataset, "created": false}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	mark, unmark := true, false
+	cases := []struct {
+		name    string
+		golden  *bool
+		present bool
+		want    bool
+	}{
+		{"nil omits golden", nil, false, false},
+		{"true marks golden", &mark, true, true},
+		{"false unmarks golden", &unmark, true, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := client.Datasets.Save(context.Background(), SaveDatasetParams{
+				TraceFunctionKey: "checkout-agent", Name: "Refund failures", Golden: tc.golden,
+			})
+			if err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			value, present := server.recorded()[i].body["golden"]
+			if present != tc.present {
+				t.Fatalf("golden present = %t, want %t, body = %v", present, tc.present, server.recorded()[i].body)
+			}
+			if present && value != tc.want {
+				t.Errorf("golden = %v, want %t", value, tc.want)
+			}
+			if result.Dataset.Golden != tc.want {
+				t.Errorf("Dataset.Golden = %t, want %t", result.Dataset.Golden, tc.want)
+			}
+		})
+	}
+}
+
+func TestDatasets_GoldenDecodesAndDefaultsToFalse(t *testing.T) {
+	var decoded struct {
+		Datasets []Dataset `json:"datasets"`
+	}
+	golden := testDataset()
+	golden["golden"] = true
+	encoded, err := json.Marshal(map[string]any{"datasets": []any{golden, testDataset()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Datasets[0].Golden || decoded.Datasets[1].Golden {
+		t.Errorf("Golden = %t, %t, want true, false", decoded.Datasets[0].Golden, decoded.Datasets[1].Golden)
 	}
 }
 

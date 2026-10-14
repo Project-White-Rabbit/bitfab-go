@@ -26,6 +26,10 @@ type Dataset struct {
 	Graders          []DatasetGraderRef `json:"graders"`
 	CreatedAt        string             `json:"createdAt"`
 	UpdatedAt        string             `json:"updatedAt"`
+	// Golden is true when the dataset is marked golden for the whole
+	// organization as a trusted reference set, which lists it first in the
+	// Bitfab app, and false otherwise.
+	Golden bool `json:"golden"`
 }
 
 // SaveDatasetParams names the dataset to create or update. An empty
@@ -37,6 +41,10 @@ type SaveDatasetParams struct {
 	Name             string
 	Description      string
 	ClearDescription bool
+	// Golden marks the dataset as golden for the whole organization when it
+	// points to true and unmarks it when it points to false. Nil leaves it as
+	// it is.
+	Golden *bool
 }
 
 // UpdateDatasetParams changes an existing dataset in place. An empty Name
@@ -48,6 +56,10 @@ type UpdateDatasetParams struct {
 	Name             string
 	Description      string
 	ClearDescription bool
+	// Golden marks the dataset as golden for the whole organization when it
+	// points to true and unmarks it when it points to false. Nil leaves it as
+	// it is.
+	Golden *bool
 }
 
 // SaveDatasetResult reports whether Save created the dataset or updated an
@@ -230,6 +242,9 @@ func (d *DatasetsClient) Save(ctx context.Context, params SaveDatasetParams) (*S
 	if params.Description != "" || params.ClearDescription {
 		payload["description"] = params.Description
 	}
+	if params.Golden != nil {
+		payload["golden"] = *params.Golden
+	}
 	var result SaveDatasetResult
 	if err := d.post(ctx, "/api/sdk/datasets", payload, &result); err != nil {
 		return nil, err
@@ -288,8 +303,11 @@ func (d *DatasetsClient) Update(ctx context.Context, datasetID string, params Up
 	if params.Description != "" || params.ClearDescription {
 		payload["description"] = params.Description
 	}
+	if params.Golden != nil {
+		payload["golden"] = *params.Golden
+	}
 	if len(payload) == 0 {
-		return nil, fmt.Errorf("bitfab: provide Name and/or Description to update")
+		return nil, fmt.Errorf("bitfab: provide Name, Description, and/or Golden to update")
 	}
 	var response struct {
 		Dataset Dataset `json:"dataset"`

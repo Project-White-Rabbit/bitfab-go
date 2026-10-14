@@ -116,6 +116,8 @@ PUSH_TRIGGER = re.compile(
     r"^[ \t]*\"?(?:on\"?[ \t]*:.*\bpush\b|push\"?[ \t]*:)", re.MULTILINE
 )
 DISPATCH_INPUTS = ("execution_id", "request", KEY_INPUT)
+PUSH_SUBJECT = "Bitfab replay started on push"
+PUSH_CONDITION = f"github.event_name != 'push' || !startsWith(github.ref_name, '{PREFIX}') || startsWith(github.event.head_commit.message, '{PUSH_SUBJECT}')"
 BRANCH_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 RESERVED_ENV_PREFIXES = ("GITHUB_", "RUNNER_", "ACTIONS_", "BITFAB_REPLAY_")
@@ -254,7 +256,8 @@ Set up once:
                [--runs-on LABEL] [--secret-prefix PREFIX] [--check COMMAND]
       Writes .github/workflows/bitfab-replay.yml, the only file cloud replay keeps
       in the repository, and lists what is left to do. On an existing workflow it
-      adds only the lines a newer SDK needs and lists what it changed.
+      adds only the lines a newer SDK needs, such as the push trigger that lets a
+      replay run without GitHub access, and lists what it changed.
   --cloud-update [same options] [--remove-old-key-secrets]
       The same command as --cloud-init, for bringing an existing setup up to date.
       It also lists BITFAB_REPLAY_KEY_* secrets an older SDK left in the
@@ -266,6 +269,16 @@ Set up once:
 GitHub access comes from the GitHub CLI when it is logged in, otherwise from GH_TOKEN
 or GITHUB_TOKEN, otherwise from the github.com credential git already stores. Without
 the GitHub CLI, --cloud-secrets lists the secrets to create by hand and where.
+
+Without GitHub access, or with access that cannot read or push to the repository, a
+replay still runs when git can push the snapshot branch and the workflow also starts
+on a push to a bitfab-replay/ branch, as one written or updated by --cloud-init does.
+This command then warns, prints where to watch the run, and returns once the branch
+is pushed, with no updates and exit code 0. The run uses the workflow's BITFAB_API_KEY
+secret, and --cloud-full-output and --cloud-allow-file are refused, since only GitHub
+access can confirm the repository is private. Delete the snapshot branch once the run
+finishes. With access, a replay starts through the GitHub API as before, and its
+snapshot commit asks GitHub not to start any workflow on the push.
 """
 
 
@@ -279,6 +292,10 @@ class DispatchRejected(ValueError):
     def __init__(self, message, record):
         super().__init__(message)
         self.record = record
+
+
+class GithubUnreachable(ValueError):
+    pass
 
 
 class KeepRedirect(urllib.request.HTTPRedirectHandler):
@@ -939,7 +956,15 @@ def sensitive(path):
     )
 
 
-def snapshot(root, workflow, files, request, *, preview=False, allowed=()):
+def snapshot_subject(execution_id, on_push):
+    if on_push:
+        return f"{PUSH_SUBJECT} {execution_id}"
+    return f"Bitfab replay {execution_id} [skip actions]"
+
+
+def snapshot(
+    root, workflow, files, request, *, preview=False, allowed=(), on_push=False
+):
     if git(root, "ls-files", "-u"):
         raise ValueError("Resolve merge conflicts before snapshotting")
     head = git(root, "rev-parse", "HEAD")
@@ -1014,7 +1039,7 @@ def snapshot(root, workflow, files, request, *, preview=False, allowed=()):
             tree,
             "-p",
             head,
-            input=f"Bitfab replay {request['id']}\n\n{json.dumps(request)}\n",
+            input=f"{snapshot_subject(request['id'], on_push)}\n\n{json.dumps(request)}\n",
         )
         return {**summary, "sha": sha}
 
@@ -1050,9 +1075,8 @@ def execution_lock(directory, execution_id):
 def find_run(record):
     if record.get("snapshot") is False:
         return find_branch_run(record)
-    query = urlencode(
-        {"event": "workflow_dispatch", "branch": record["branch"], "per_page": 100}
-    )
+    event = "push" if record.get("startedOnPush") else "workflow_dispatch"
+    query = urlencode({"event": event, "branch": record["branch"], "per_page": 100})
     runs = api(
         record["repository"], f"actions/workflows/{record['workflow']}/runs?{query}"
     )
@@ -1274,15 +1298,19 @@ def http_status(error):
 
 
 def preflight(repo, workflow, *, pushes=True, full_output=False, allows_files=False):
-    access = github_access()
+    try:
+        access = github_access()
+    except ValueError as error:
+        raise GithubUnreachable(str(error)) from error
     try:
         details = api(repo, "")
     except RuntimeError as error:
-        raise ValueError(
+        refused = getattr(error, "http_status", None) in (401, 403, 404)
+        raise (GithubUnreachable if refused else ValueError)(
             f"GitHub access from {access['source']} cannot read {repo}{http_status(error)}; use an account or token with write access to it"
         ) from error
     if pushes and (details or {}).get("permissions", {}).get("push") is False:
-        raise ValueError(
+        raise GithubUnreachable(
             f"GitHub access from {access['source']} cannot push to {repo}; use an account or token with write access to it"
         )
     if full_output and (details or {}).get("private") is False:
@@ -1344,6 +1372,12 @@ def submit(root, repo, workflow, parsed, path):
         record = json.loads(path.read_text())
         if record["request"] != request or record["repository"].lower() != repo.lower():
             raise ValueError("Execution ID already belongs to a different request")
+        if record.get("startedOnPush") and record["state"] != "prepared":
+            try:
+                github_access()
+            except ValueError as error:
+                record["unfollowed"] = str(error)
+                return record
         status(record, fetch_result=False)
         if record["state"] == "prepared":
             raise ValueError(
@@ -1351,17 +1385,24 @@ def submit(root, repo, workflow, parsed, path):
             )
         refuse_rejected(record)
         return record
-    preflight(
-        repo,
-        workflow,
-        full_output=request.get("fullOutput") is True,
-        allows_files=bool(allowed),
-    )
+    unfollowed = None
+    try:
+        preflight(
+            repo,
+            workflow,
+            full_output=request.get("fullOutput") is True,
+            allows_files=bool(allowed),
+        )
+    except GithubUnreachable as error:
+        unfollowed = str(error)
+        refuse_unfollowed(root, repo, workflow, request, allowed, unfollowed)
     if dry_run(request["args"]):
         progress(
             "--dry-run dispatches a GitHub run that checks secrets and resolves the traces without replaying; it receives the workflow's secrets"
         )
-    source = snapshot(root, workflow, files, request, allowed=allowed)
+    source = snapshot(
+        root, workflow, files, request, allowed=allowed, on_push=bool(unfollowed)
+    )
     describe_snapshot(source)
     record = {
         "id": execution_id,
@@ -1370,6 +1411,7 @@ def submit(root, repo, workflow, parsed, path):
         "branch": PREFIX + execution_id,
         "request": request,
         "state": "prepared",
+        **({"startedOnPush": True} if unfollowed else {}),
         **source,
     }
     save(path, record)
@@ -1389,6 +1431,9 @@ def submit(root, repo, workflow, parsed, path):
         ) from error
     record["state"] = "dispatch_unknown"
     save(path, record)
+    if unfollowed:
+        record["unfollowed"] = unfollowed
+        return record
     text = within(root, f"{WORKFLOW_DIRECTORY}/{workflow}").read_text()
     declared = declared_inputs(text)
     key_inputs = issue_key_token(root, record, text)
@@ -1397,6 +1442,62 @@ def submit(root, repo, workflow, parsed, path):
         record,
         {"execution_id": execution_id, "request": "-", **key_inputs},
         declared,
+    )
+
+
+def push_trigger(lines):
+    for index, line in enumerate(lines):
+        if re.fullmatch(r'"?on"?[ \t]*:[ \t]*(#.*)?', line):
+            end = block_end(lines, index, 0)
+            step = child_indent(lines, index, end, "  ")
+            row = next(
+                (
+                    row
+                    for row in range(index + 1, end)
+                    if re.fullmatch(rf'{step}"?push"?[ \t]*:.*', lines[row])
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            return lines[row : block_end(lines, row, len(step))]
+        if re.match(r'"?on"?[ \t]*:', line):
+            return [line] if re.search(r"\bpush\b", line) else None
+    return None
+
+
+def starts_on_push(text):
+    trigger = push_trigger(text.splitlines()) or []
+    return any(PREFIX in line for line in trigger) and not any(
+        "branches-ignore" in line for line in trigger
+    )
+
+
+def refuse_unfollowed(root, repo, workflow, request, allowed, reason):
+    path = f"{WORKFLOW_DIRECTORY}/{workflow}"
+    if not starts_on_push(within(root, path).read_text()):
+        raise ValueError(
+            f"{reason}. Without it a replay can still run, with no updates here, once {path} also starts on a push to a {PREFIX} branch: run bitfab-replay --cloud-update and commit the workflow it updates"
+        )
+    if request.get("fullOutput") is True:
+        raise ValueError(
+            f"--cloud-full-output writes every trace's input and output into the Actions job log, so it needs GitHub access that confirms {repo} is private: {reason}"
+        )
+    if allowed:
+        raise ValueError(
+            f"{ALLOW_FLAG} uploads a credential-like file to a snapshot branch, so it needs GitHub access that confirms {repo} is private: {reason}"
+        )
+
+
+def report_unfollowed(record, reason):
+    progress(
+        f"Warning: the replay started on GitHub, but this command gets no updates on it: {reason}"
+    )
+    progress(
+        f"It runs with the workflow's BITFAB_API_KEY secret, since replaying as you needs GitHub access. Watch it at https://github.com/{record['repository']}/actions/workflows/{record['workflow']}; its experiment appears in Bitfab when it finishes"
+    )
+    progress(
+        f"Once it finishes, delete its snapshot branch with git push origin --delete {record['branch']}, or with --cloud-cleanup {record['id']} from a machine with GitHub access"
     )
 
 
@@ -1735,6 +1836,11 @@ def run_cli(argv):
                 save(path, error.record)
                 raise
             if record.get("preview"):
+                return record, None
+            reason = record.pop("unfollowed", None)
+            if reason:
+                report_unfollowed(record, reason)
+                save(path, record)
                 return record, None
         else:
             if not path.exists():
@@ -2791,7 +2897,7 @@ def push_triggers(root, workflow):
 
 
 def workflow_document(steps, run, directory, env, *, runs_on, environment):
-    job = {"runs-on": runs_on}
+    job = {"if": PUSH_CONDITION, "runs-on": runs_on}
     if environment:
         job["environment"] = environment
     job["steps"] = [
@@ -2816,7 +2922,8 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
                     "request": {"type": "string", "required": False},
                     KEY_INPUT: {"type": "string", "required": False},
                 }
-            }
+            },
+            "push": {"branches": [PREFIX + "**"]},
         },
         "permissions": {"contents": "read", "id-token": "write"},
         "jobs": {"replay": job},
@@ -2830,10 +2937,18 @@ def indentation(line):
 def block_end(lines, start, indent):
     end = start + 1
     while end < len(lines) and (
-        not lines[end].strip() or indentation(lines[end]) > indent
+        not lines[end].strip()
+        or lines[end].lstrip().startswith("#")
+        or indentation(lines[end]) > indent
     ):
         end += 1
-    while end > start + 1 and not lines[end - 1].strip():
+    while end > start + 1 and (
+        not lines[end - 1].strip()
+        or (
+            lines[end - 1].lstrip().startswith("#")
+            and indentation(lines[end - 1]) <= indent
+        )
+    ):
         end -= 1
     return end
 
@@ -2938,17 +3053,65 @@ def add_id_token_permission(lines):
         if not re.fullmatch(r'"?permissions"?[ \t]*:[ \t]*(#.*)?', line):
             continue
         end = block_end(lines, index, 0)
-        child = next(
-            (
-                lines[row][: indentation(lines[row])]
-                for row in range(index + 1, end)
-                if lines[row].strip()
-            ),
-            "  ",
-        )
-        lines.insert(end, f"{child}id-token: write")
+        lines.insert(end, f"{child_indent(lines, index, end, '  ')}id-token: write")
         return True
     return False
+
+
+def holds_yaml(line):
+    return bool(line.strip()) and not line.lstrip().startswith("#")
+
+
+def child_indent(lines, index, end, fallback):
+    return next(
+        (
+            lines[row][: indentation(lines[row])]
+            for row in range(index + 1, end)
+            if holds_yaml(lines[row])
+        ),
+        fallback,
+    )
+
+
+def add_push_trigger(lines):
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r'"?on"?[ \t]*:[ \t]*(#.*)?', line):
+            continue
+        end = block_end(lines, index, 0)
+        step = child_indent(lines, index, end, "  ")
+        lines[end:end] = [
+            f"{step}push:",
+            f"{step * 2}branches:",
+            f"{step * 3}- {PREFIX}**",
+        ]
+        return True
+    return False
+
+
+def add_push_condition(lines):
+    jobs = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.fullmatch(r'"?jobs"?[ \t]*:[ \t]*(#.*)?', line)
+        ),
+        None,
+    )
+    if jobs is None:
+        return False
+    end = block_end(lines, jobs, 0)
+    job = next((row for row in range(jobs + 1, end) if holds_yaml(lines[row])), None)
+    if job is None or not lines[job].rstrip().endswith(":"):
+        return False
+    job_end = block_end(lines, job, indentation(lines[job]))
+    step = child_indent(lines, job, job_end, " " * (indentation(lines[job]) + 2))
+    if any(
+        re.fullmatch(rf'{step}"?if"?[ \t]*:.*', lines[row])
+        for row in range(job + 1, job_end)
+    ):
+        return False
+    lines.insert(job + 1, f"{step}if: {json.dumps(PUSH_CONDITION)}")
+    return True
 
 
 def secret_scope(environment):
@@ -3041,6 +3204,20 @@ def update_workflow(root, path, *, remove_old_key_secrets=False):
             by_hand.append(
                 f"{name} (type: string, required: false) under on.workflow_dispatch.inputs"
             )
+    if not starts_on_push(text):
+        if push_trigger(lines) is None and add_push_trigger(lines):
+            updated.append(
+                f"Started the workflow on a push to a {PREFIX} branch too, so a replay runs without GitHub access, with no updates on it"
+            )
+        else:
+            by_hand.append(f"{PREFIX}** in on.push.branches")
+    if push_trigger(lines) is not None and PUSH_SUBJECT not in text:
+        if add_push_condition(lines):
+            updated.append(
+                "Skipped the push run of a replay started through the GitHub API, so each replay runs once"
+            )
+        else:
+            by_hand.append(f"if: {json.dumps(PUSH_CONDITION)} on the replay job")
     if not re.search(r'^"?run-name"?[ \t]*:', text, re.MULTILINE):
         add_run_name(lines)
         updated.append("Named each run after its execution")
@@ -3095,7 +3272,7 @@ def update_workflow(root, path, *, remove_old_key_secrets=False):
 def initialize(argv, name="--cloud-init"):
     parser = argparse.ArgumentParser(
         prog=f"bitfab-replay {name}",
-        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the run name, and the id-token: write permission), removes the BITFAB_REPLAY_BITFAB_API_KEY line older SDKs wrote, lists what it changed, and lists the BITFAB_REPLAY_KEY_* secrets older SDKs left in the repository; edit it directly for anything else.",
+        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the push trigger and the condition that skips a duplicate push run, the run name, and the id-token: write permission), removes the BITFAB_REPLAY_BITFAB_API_KEY line older SDKs wrote, lists what it changed, and lists the BITFAB_REPLAY_KEY_* secrets older SDKs left in the repository; edit it directly for anything else.",
     )
     parser.add_argument(
         "--secret",
