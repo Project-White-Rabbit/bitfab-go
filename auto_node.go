@@ -48,6 +48,11 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		return nil
 	}
 	if scope.explicit {
+		if scope.skipName != "" && normalizeAutoSymbol(symbol) == scope.skipName {
+			next := *scope
+			next.skipName = ""
+			return &AutoNode{ctx: ctx, restore: pushAutoScope(&next), outputs: outputs}
+		}
 		if _, configured := scope.client.nodeOptions(symbol); configured {
 			panic(&MixedTracingError{Entered: "node", Active: "span"})
 		}
@@ -62,7 +67,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 	if normalizeAutoSymbol(symbol) == scope.skipName {
 		next := *scope
 		next.skipName = ""
-		return &AutoNode{ctx: ctx, restore: pushAutoScope(&next), outputs: outputs}
+		return &AutoNode{ctx: context.WithValue(ctx, autoScopeContextKey{}, &next), restore: pushAutoScope(&next), outputs: outputs}
 	}
 	var records []*autoRecord
 	var finalize SpanFinalizer

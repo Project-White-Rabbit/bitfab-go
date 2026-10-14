@@ -4,9 +4,13 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -929,4 +933,263 @@ func BenchmarkSubtree_DroppedCallPastMaxDepth(b *testing.B) {
 		}
 		return nil, nil
 	}, TraceOptions{MaxDepth: &limit})
+}
+
+type skipProbeDepthKey struct{}
+
+func enterSkipProbe(ctx context.Context, symbol string, outputs []any) (context.Context, *AutoNode) {
+	node := EnterAutoNode(ctx, symbol, symbol[strings.LastIndex(symbol, ".")+1:], nil, outputs)
+	if node == nil {
+		return ctx, nil
+	}
+	return node.Context(), node
+}
+
+func skipProbeAsyncRoot(ctx context.Context) (result any, err error) {
+	ctx, node := enterSkipProbe(ctx, AutoFunctionSymbol("skipProbeAsyncRoot"), []any{&result, &err})
+	if node != nil {
+		defer func() {
+			p := recover()
+			node.End(p)
+			if p != nil {
+				panic(p)
+			}
+		}()
+	}
+	if ctx.Value(skipProbeDepthKey{}) != nil {
+		return 1, nil
+	}
+	done := make(chan struct{})
+	inner := context.WithValue(ctx, skipProbeDepthKey{}, 1)
+	time.AfterFunc(0, func() { _, _ = skipProbeAsyncRoot(inner); close(done) })
+	<-done
+	return 0, nil
+}
+
+func skipProbeRecursive(ctx context.Context) (result any, err error) {
+	ctx, node := enterSkipProbe(ctx, AutoFunctionSymbol("skipProbeRecursive"), []any{&result, &err})
+	if node != nil {
+		defer func() {
+			p := recover()
+			node.End(p)
+			if p != nil {
+				panic(p)
+			}
+		}()
+	}
+	depth, _ := ctx.Value(skipProbeDepthKey{}).(int)
+	if depth < 2 {
+		return skipProbeRecursive(context.WithValue(ctx, skipProbeDepthKey{}, depth+1))
+	}
+	return depth, nil
+}
+
+func skipProbeAgent(ctx context.Context) (result any, err error) {
+	_, node := enterSkipProbe(ctx, AutoFunctionSymbol("skipProbeAgent"), []any{&result, &err})
+	if node != nil {
+		defer func() {
+			p := recover()
+			node.End(p)
+			if p != nil {
+				panic(p)
+			}
+		}()
+	}
+	return 7, nil
+}
+
+func flushedRawSpans(t *testing.T, c *Client, requests func() []map[string]any) []map[string]any {
+	t.Helper()
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	var spans []map[string]any
+	for _, request := range requests() {
+		if raw, ok := request["rawSpan"].(map[string]any); ok {
+			spans = append(spans, raw)
+		}
+	}
+	return spans
+}
+
+func rawSpanNames(spans []map[string]any) []string {
+	var names []string
+	for _, span := range spans {
+		names = append(names, span["span_data"].(map[string]any)["name"].(string))
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestSubtree_RootCalledAgainOnUninstrumentedGoroutineIsRecorded(t *testing.T) {
+	c, requests := subtreeClient(t)
+	if _, err := c.Trace(context.Background(), "async-root", skipProbeAsyncRoot, TraceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	spans := flushedRawSpans(t, c, requests)
+	if got := rawSpanNames(spans); !reflect.DeepEqual(got, []string{"skipProbeAsyncRoot", "skipProbeAsyncRoot"}) {
+		t.Fatalf("names = %v", got)
+	}
+	var root map[string]any
+	for _, span := range spans {
+		if span["parent_id"] == nil || span["parent_id"] == "" {
+			root = span
+		}
+	}
+	for _, span := range spans {
+		if span["parent_id"] != nil && span["parent_id"] != "" && span["parent_id"] != root["id"] {
+			t.Fatalf("goroutine call was not parented under the root: %#v", spans)
+		}
+	}
+}
+
+func TestSubtree_PlainRootRecordsOnce(t *testing.T) {
+	c, requests := subtreeClient(t)
+	if _, err := c.Trace(context.Background(), "agent-root", skipProbeAgent, TraceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rawSpanNames(flushedRawSpans(t, c, requests)); !reflect.DeepEqual(got, []string{"skipProbeAgent"}) {
+		t.Fatalf("names = %v", got)
+	}
+}
+
+func TestSubtree_RootRecursionIsRecorded(t *testing.T) {
+	c, requests := subtreeClient(t)
+	if _, err := c.Trace(context.Background(), "recursive-root", skipProbeRecursive, TraceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := rawSpanNames(flushedRawSpans(t, c, requests)); !reflect.DeepEqual(got, []string{"skipProbeRecursive", "skipProbeRecursive", "skipProbeRecursive"}) {
+		t.Fatalf("names = %v", got)
+	}
+}
+
+func TestSubtree_SpanOverConfiguredNodeRecordsOnceAndNodeAppliesUnderTrace(t *testing.T) {
+	c, requests := subtreeClient(t)
+	if err := c.Node(skipProbeAgent, NodeOptions{Name: "AgentNode", Type: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.Span(context.Background(), "explicit-agent", skipProbeAgent)
+	if err != nil || result != 7 {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	if got := rawSpanNames(flushedRawSpans(t, c, requests)); !reflect.DeepEqual(got, []string{"explicit-agent"}) {
+		t.Fatalf("span names = %v", got)
+	}
+	_, err = c.Trace(context.Background(), "outer", func(ctx context.Context) (any, error) { return skipProbeAgent(ctx) }, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rawSpanNames(flushedRawSpans(t, c, requests)); !reflect.DeepEqual(got, []string{"AgentNode", "explicit-agent", "outer"}) {
+		t.Fatalf("trace names = %v", got)
+	}
+}
+
+func skipProbeNodeRoot(ctx context.Context) (result any, err error) {
+	ctx, node := enterSkipProbe(ctx, AutoFunctionSymbol("skipProbeNodeRoot"), []any{&result, &err})
+	if node != nil {
+		defer func() {
+			p := recover()
+			node.End(p)
+			if p != nil {
+				panic(p)
+			}
+		}()
+	}
+	return autoTestCall(ctx, "leaf", func() int { return 3 }), nil
+}
+
+func nodeRootClient(t *testing.T) (*Client, func() []map[string]any) {
+	t.Helper()
+	c, requests := subtreeClient(t)
+	if err := c.Node(skipProbeNodeRoot, NodeOptions{Name: "NodeName", Type: "guardrail"}); err != nil {
+		t.Fatal(err)
+	}
+	return c, requests
+}
+
+func spanTreeLines(spans []map[string]any) []string {
+	names := map[any]string{}
+	for _, span := range spans {
+		names[span["id"]] = span["span_data"].(map[string]any)["name"].(string)
+	}
+	var lines []string
+	for _, span := range spans {
+		data := span["span_data"].(map[string]any)
+		parent := "<root>"
+		if id := span["parent_id"]; id != nil && id != "" {
+			parent = names[id]
+		}
+		lines = append(lines, fmt.Sprintf("%s:%s <- %s", data["name"], data["type"], parent))
+	}
+	sort.Strings(lines)
+	return lines
+}
+
+func spansByTrace(spans []map[string]any) map[any][]map[string]any {
+	traces := map[any][]map[string]any{}
+	for _, span := range spans {
+		traces[span["trace_id"]] = append(traces[span["trace_id"]], span)
+	}
+	return traces
+}
+
+var nodeRootTraceOptions = TraceOptions{Name: "RootName", Type: "agent"}
+
+func TestSubtree_RootWithNodeSettingsRecordsOneRootSpan(t *testing.T) {
+	c, requests := nodeRootClient(t)
+	if _, err := c.Trace(context.Background(), "root-key", skipProbeNodeRoot, nodeRootTraceOptions); err != nil {
+		t.Fatal(err)
+	}
+	got := spanTreeLines(flushedRawSpans(t, c, requests))
+	want := []string{"RootName:agent <- <root>", "leaf:function <- RootName"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tree = %v", got)
+	}
+}
+
+func TestSubtree_RootWithNodeSettingsNestedInAnotherRootRecordsOneLinkedCopy(t *testing.T) {
+	c, requests := nodeRootClient(t)
+	_, err := c.Trace(context.Background(), "outer", func(ctx context.Context) (any, error) {
+		return c.Trace(ctx, "root-key", skipProbeNodeRoot, nodeRootTraceOptions)
+	}, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces := spansByTrace(flushedRawSpans(t, c, requests))
+	if len(traces) != 2 {
+		t.Fatalf("traces = %v", traces)
+	}
+	var outer, nested []map[string]any
+	for _, spans := range traces {
+		if len(spans) == 3 {
+			outer = spans
+		} else {
+			nested = spans
+		}
+	}
+	if got := spanTreeLines(outer); !reflect.DeepEqual(got, []string{"RootName:function <- outer", "leaf:function <- RootName", "outer:custom <- <root>"}) {
+		t.Fatalf("outer tree = %v", got)
+	}
+	if got := spanTreeLines(nested); !reflect.DeepEqual(got, []string{"RootName:agent <- <root>", "leaf:function <- RootName"}) {
+		t.Fatalf("nested tree = %v", got)
+	}
+	for _, span := range outer {
+		data := span["span_data"].(map[string]any)
+		if data["name"] == "RootName" && data["nested_trace_id"] != nested[0]["trace_id"] {
+			t.Fatalf("copy is not linked to the nested trace: %#v", data)
+		}
+	}
+}
+
+func TestSubtree_NodeSettingsApplyWhenCalledDirectlyBeneathAnotherRoot(t *testing.T) {
+	c, requests := nodeRootClient(t)
+	_, err := c.Trace(context.Background(), "outer", func(ctx context.Context) (any, error) { return skipProbeNodeRoot(ctx) }, TraceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := spanTreeLines(flushedRawSpans(t, c, requests))
+	want := []string{"NodeName:guardrail <- outer", "leaf:function <- NodeName", "outer:custom <- <root>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tree = %v", got)
+	}
 }

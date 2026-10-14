@@ -563,7 +563,8 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	var fnPanic any
 	if !intercepted {
 		func() {
-			defer c.beginExplicitAutoScope(ctx)()
+			symbol, _ := autoSymbol(fn)
+			defer c.beginExplicitAutoScope(ctx, symbol)()
 			defer func() { fnPanic = recover() }()
 			result, fnErr = fn(childCtx)
 		}()
@@ -818,7 +819,7 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 			state.mu.Unlock()
 		}
 	}
-	span.autoRestore = c.beginExplicitAutoScope(ctx)
+	span.autoRestore = c.beginExplicitAutoScope(ctx, "")
 	return childCtx, span
 }
 

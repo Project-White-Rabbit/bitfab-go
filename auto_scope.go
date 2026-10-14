@@ -135,12 +135,12 @@ func RunAutoContext(snapshot AutoContextSnapshot, fn func()) {
 	fn()
 }
 
-func (c *Client) beginExplicitAutoScope(ctx context.Context) func() {
+func (c *Client) beginExplicitAutoScope(ctx context.Context, skipName string) func() {
 	if managed, _ := ctx.Value(managedTraceRootKey{}).(*managedTraceRoot); managed != nil && currentSpan(ctx) == nil {
 		return func() {}
 	}
 	autoActiveExplicit.Add(1)
-	restore := pushAutoScope(&autoScope{explicit: true, client: c})
+	restore := pushAutoScope(&autoScope{explicit: true, client: c, skipName: skipName})
 	return func() {
 		restore()
 		autoActiveExplicit.Add(-1)
