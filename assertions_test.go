@@ -12,7 +12,7 @@ func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		return map[string]any{"assertions": []any{
 			map[string]any{"id": "assertion-1", "traceId": "trace-1", "assertion": "lands before 9am", "source": "human",
-				"category_assertion_id": "category-1", "category": map[string]any{"id": "category-1", "title": "Timing", "description": "Arrival requirements"},
+				"category_id": "category-1", "category_assertion_id": "category-1", "category": map[string]any{"id": "category-1", "title": "Timing", "description": "Arrival requirements"},
 				"targetOnEvaluatedTrace": map[string]any{"kind": "span", "name": "book", "occurrence": 0}},
 			map[string]any{"id": "assertion-2", "traceId": "trace-2", "assertion": "arrives on time", "source": "human"},
 		}}
@@ -24,12 +24,12 @@ func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
 		Source: TraceAssertionHuman,
 		Updates: []TraceAssertionsUpdate{
 			{TraceID: "trace-1", Assertions: []SaveAssertion{{
-				ID: "assertion-1", Assertion: "lands before 9am", PassCriteria: &pass, CategoryAssertionID: &categoryID,
+				ID: "assertion-1", Assertion: "lands before 9am", PassCriteria: &pass, CategoryID: &categoryID,
 				ClearFailCriteria:      true,
 				TargetOnEvaluatedTrace: &TraceTarget{Kind: TraceTargetSpan, Name: "book", Occurrence: SpanOccurrenceAt(0)},
 			}}},
 			{TraceID: "trace-2", Assertions: []SaveAssertion{{
-				Assertion: "arrives on time", ClearTargetOnEvaluatedTrace: true, ClearCategoryAssertionID: true,
+				Assertion: "arrives on time", ClearTargetOnEvaluatedTrace: true, ClearCategoryID: true,
 			}}},
 		},
 	})
@@ -39,7 +39,7 @@ func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
 	if result[0].TargetOnEvaluatedTrace.Occurrence != SpanOccurrenceAt(0) || result[1].TargetOnEvaluatedTrace != nil {
 		t.Fatalf("decoded targets = %+v", result)
 	}
-	if result[0].CategoryAssertionID == nil || *result[0].CategoryAssertionID != categoryID || result[0].Category == nil || result[0].Category.Title != "Timing" {
+	if result[0].CategoryID == nil || *result[0].CategoryID != categoryID || result[0].Category == nil || result[0].Category.Title != "Timing" {
 		t.Fatalf("decoded category = %+v", result[0])
 	}
 	requests := server.recorded()
@@ -51,11 +51,11 @@ func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
 		"updates": []any{
 			map[string]any{"traceId": "trace-1", "assertions": []any{map[string]any{
 				"id": "assertion-1", "assertion": "lands before 9am", "passCriteria": pass, "failCriteria": nil,
-				"category_assertion_id":  "category-1",
+				"category_id":            "category-1",
 				"targetOnEvaluatedTrace": map[string]any{"kind": "span", "name": "book", "occurrence": float64(0)},
 			}}},
 			map[string]any{"traceId": "trace-2", "assertions": []any{map[string]any{
-				"assertion": "arrives on time", "targetOnEvaluatedTrace": nil, "category_assertion_id": nil,
+				"assertion": "arrives on time", "targetOnEvaluatedTrace": nil, "category_id": nil,
 			}}},
 		},
 	}
@@ -139,11 +139,66 @@ func TestAssertions_CategoryAssignmentRejectsSetAndClear(t *testing.T) {
 	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
 		TraceID: "trace",
 		Assertions: []SaveAssertion{{
-			Assertion: "works", CategoryAssertionID: &categoryID, ClearCategoryAssertionID: true,
+			Assertion: "works", CategoryID: &categoryID, ClearCategoryID: true,
 		}},
 	})
 	if err == nil {
 		t.Fatal("setting and clearing a category was accepted")
+	}
+}
+
+func TestAssertions_DeprecatedCategoryAssertionIDMapsToCategoryID(t *testing.T) {
+	legacyID := "legacy"
+	newID := "new"
+	cases := []struct {
+		name      string
+		assertion SaveAssertion
+		want      map[string]any
+		wantError bool
+	}{
+		{name: "legacy set", assertion: SaveAssertion{Assertion: "a", CategoryAssertionID: &legacyID}, want: map[string]any{"assertion": "a", "category_id": "legacy"}},
+		{name: "legacy clear", assertion: SaveAssertion{Assertion: "a", ClearCategoryAssertionID: true}, want: map[string]any{"assertion": "a", "category_id": nil}},
+		{name: "new wins over legacy set", assertion: SaveAssertion{Assertion: "a", CategoryID: &newID, CategoryAssertionID: &legacyID}, want: map[string]any{"assertion": "a", "category_id": "new"}},
+		{name: "new set wins over legacy clear", assertion: SaveAssertion{Assertion: "a", CategoryID: &newID, ClearCategoryAssertionID: true}, want: map[string]any{"assertion": "a", "category_id": "new"}},
+		{name: "new clear wins over legacy set", assertion: SaveAssertion{Assertion: "a", ClearCategoryID: true, CategoryAssertionID: &legacyID}, want: map[string]any{"assertion": "a", "category_id": nil}},
+		{name: "legacy set and clear", assertion: SaveAssertion{Assertion: "a", CategoryAssertionID: &legacyID, ClearCategoryAssertionID: true}, wantError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := tc.assertion.payload()
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("payload = %+v, want error", payload)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(payload, tc.want) {
+				t.Fatalf("payload = %#v, %v, want %#v", payload, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssertions_ReadFillsCategoryIDAndDeprecatedAlias(t *testing.T) {
+	for _, body := range []string{
+		`{"id":"a","category_id":"c1","category_assertion_id":"c1"}`,
+		`{"id":"a","category_id":"c1"}`,
+		`{"id":"a","category_assertion_id":"c1"}`,
+	} {
+		var assertion TraceAssertion
+		if err := json.Unmarshal([]byte(body), &assertion); err != nil {
+			t.Fatal(err)
+		}
+		if assertion.CategoryID == nil || *assertion.CategoryID != "c1" || assertion.CategoryAssertionID == nil || *assertion.CategoryAssertionID != "c1" {
+			t.Fatalf("%s decoded to %+v", body, assertion)
+		}
+	}
+	var uncategorized TraceAssertion
+	if err := json.Unmarshal([]byte(`{"id":"a","category_id":null}`), &uncategorized); err != nil {
+		t.Fatal(err)
+	}
+	if uncategorized.CategoryID != nil || uncategorized.CategoryAssertionID != nil {
+		t.Fatalf("uncategorized decoded to %+v", uncategorized)
 	}
 }
 

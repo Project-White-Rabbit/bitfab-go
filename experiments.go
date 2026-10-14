@@ -124,8 +124,8 @@ type ExperimentTally struct {
 
 // ExperimentCategoryTally tallies the assertions in one category.
 type ExperimentCategoryTally struct {
-	Category AssertionCategorySummary `json:"category"`
-	Labels   ExperimentTally          `json:"labels"`
+	Category CategorySummary `json:"category"`
+	Labels   ExperimentTally `json:"labels"`
 }
 
 // ExperimentJitter counts attempts whose own verdict disagreed with their

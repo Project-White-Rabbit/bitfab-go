@@ -143,8 +143,12 @@ type Client struct {
 
 	// Datasets creates, reads, and modifies the organization's datasets.
 	Datasets *DatasetsClient
-	// AssertionCategories manages organization-scoped assertion groupings.
-	AssertionCategories *AssertionCategoriesClient
+	// Categories manages organization-scoped groupings for assertions and scenarios.
+	Categories *CategoriesClient
+	// AssertionCategories is the same client as Categories.
+	//
+	// Deprecated: Use Categories instead.
+	AssertionCategories *CategoriesClient
 	// OrganizationMembers reads the people in the API key's organization.
 	OrganizationMembers *OrganizationMembersClient
 	// Traces searches traces and reads or writes their assertions.
@@ -263,7 +267,8 @@ func NewClient(apiKey string, opts ...Option) *Client {
 		c.httpClient.client.Timeout = c.requestTimeout
 	}
 	c.Datasets = &DatasetsClient{httpClient: c.httpClient}
-	c.AssertionCategories = &AssertionCategoriesClient{httpClient: c.httpClient}
+	c.Categories = &CategoriesClient{httpClient: c.httpClient}
+	c.AssertionCategories = c.Categories
 	c.OrganizationMembers = &OrganizationMembersClient{httpClient: c.httpClient}
 	c.Traces = &TracesClient{httpClient: c.httpClient}
 	c.Spans = &SpansClient{httpClient: c.httpClient}

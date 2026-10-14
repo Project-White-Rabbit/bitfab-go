@@ -38,6 +38,10 @@ func testScenarioResponse() map[string]any {
 			"source": map[string]any{"spanId": "span-2", "sourceField": "output", "text": "Rebooked onto UA 14"},
 		},
 		"triggerSummary": "Kind: request", "dataSummary": "About: travel",
+		"categories": []any{
+			map[string]any{"id": "category-1", "title": "Rebooking", "description": "Flight changes"},
+			map[string]any{"id": "category-2", "title": "Travel", "description": ""},
+		},
 	}}
 }
 
@@ -174,6 +178,7 @@ func TestScenarios_SaveRejectsInvalidUpdatesBeforeWriting(t *testing.T) {
 		"setAndClearActualOutcome": {
 			ActualOutcome: &ScenarioActualOutcome{Summary: "done"}, ClearActualOutcome: true,
 		},
+		"setAndClearCategoryIDs": {CategoryIDs: []string{"category-1"}, ClearCategoryIDs: true},
 	}
 	for name, update := range updates {
 		if _, err := client.Traces.SaveScenario(context.Background(), update); err == nil {
@@ -263,5 +268,66 @@ func TestScenarios_SaveLeavesOutActualOutcomeWhenOmitted(t *testing.T) {
 	}
 	if body := server.recorded()[0].body; !reflect.DeepEqual(body, map[string]any{"name": "Late flight"}) {
 		t.Fatalf("body = %#v, want only name", body)
+	}
+}
+
+func TestScenarios_GetDecodesCategories(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	scenario, err := client.Traces.GetScenario(context.Background(), "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CategorySummary{
+		{ID: "category-1", Title: "Rebooking", Description: "Flight changes"},
+		{ID: "category-2", Title: "Travel"},
+	}
+	if !reflect.DeepEqual(scenario.Categories, want) {
+		t.Fatalf("categories = %+v, want %+v", scenario.Categories, want)
+	}
+}
+
+func TestScenarios_SaveCategoryIDs(t *testing.T) {
+	cases := map[string]struct {
+		params SaveScenarioParams
+		want   map[string]any
+	}{
+		"replace": {
+			params: SaveScenarioParams{CategoryIDs: []string{"category-1", "category-2"}},
+			want:   map[string]any{"categoryIds": []any{"category-1", "category-2"}},
+		},
+		"clear": {
+			params: SaveScenarioParams{ClearCategoryIDs: true},
+			want:   map[string]any{"categoryIds": []any{}},
+		},
+		"emptyNonNilSlice": {
+			params: SaveScenarioParams{CategoryIDs: []string{}},
+			want:   map[string]any{"categoryIds": []any{}},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+			client := NewClient("test-key", WithServiceURL(server.URL))
+			tc.params.TraceID = "trace-1"
+			if _, err := client.Traces.SaveScenario(context.Background(), tc.params); err != nil {
+				t.Fatal(err)
+			}
+			if body := server.recorded()[0].body; !reflect.DeepEqual(body, tc.want) {
+				t.Fatalf("body = %#v, want %#v", body, tc.want)
+			}
+		})
+	}
+}
+
+func TestScenarios_SaveLeavesOutCategoryIDsWhenOmitted(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	name := "Late flight"
+	if _, err := client.Traces.SaveScenario(context.Background(), SaveScenarioParams{TraceID: "trace-1", Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := server.recorded()[0].body["categoryIds"]; present {
+		t.Fatalf("body = %#v, want no categoryIds", server.recorded()[0].body)
 	}
 }

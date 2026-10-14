@@ -99,21 +99,38 @@ const (
 // TraceAssertion describes what should happen when a trace is replayed.
 type TraceAssertion struct {
 	ApprovalFields
-	ID                     string                    `json:"id"`
-	TraceID                string                    `json:"traceId"`
-	Assertion              string                    `json:"assertion"`
-	PassCriteria           *string                   `json:"passCriteria"`
-	FailCriteria           *string                   `json:"failCriteria"`
-	TargetOnEvaluatedTrace *TraceTarget              `json:"targetOnEvaluatedTrace"`
-	Source                 TraceAssertionSource      `json:"source"`
-	HumanNote              *string                   `json:"humanNote"`
-	CategoryAssertionID    *string                   `json:"category_assertion_id"`
-	Category               *AssertionCategorySummary `json:"category"`
-	Justification          Justification             `json:"justification"`
-	CategoryJustification  Justification             `json:"categoryJustification"`
-	Assignee               *Assignee                 `json:"assignee"`
-	CreatedAt              string                    `json:"createdAt"`
-	UpdatedAt              string                    `json:"updatedAt"`
+	ID                     string               `json:"id"`
+	TraceID                string               `json:"traceId"`
+	Assertion              string               `json:"assertion"`
+	PassCriteria           *string              `json:"passCriteria"`
+	FailCriteria           *string              `json:"failCriteria"`
+	TargetOnEvaluatedTrace *TraceTarget         `json:"targetOnEvaluatedTrace"`
+	Source                 TraceAssertionSource `json:"source"`
+	HumanNote              *string              `json:"humanNote"`
+	CategoryID             *string              `json:"category_id"`
+	Category               *CategorySummary     `json:"category"`
+	Justification          Justification        `json:"justification"`
+	CategoryJustification  Justification        `json:"categoryJustification"`
+	Assignee               *Assignee            `json:"assignee"`
+	CreatedAt              string               `json:"createdAt"`
+	UpdatedAt              string               `json:"updatedAt"`
+	// Deprecated: Use CategoryID instead.
+	CategoryAssertionID *string `json:"category_assertion_id"`
+}
+
+// UnmarshalJSON fills CategoryID and CategoryAssertionID from whichever key the server sent.
+func (assertion *TraceAssertion) UnmarshalJSON(data []byte) error {
+	type traceAssertionFields TraceAssertion
+	var decoded traceAssertionFields
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.CategoryID == nil {
+		decoded.CategoryID = decoded.CategoryAssertionID
+	}
+	decoded.CategoryAssertionID = decoded.CategoryID
+	*assertion = TraceAssertion(decoded)
+	return nil
 }
 
 // AssertionEvidenceParameter describes one argument by name and runtime type,
@@ -145,7 +162,7 @@ type SaveAssertion struct {
 	PassCriteria                *string
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
-	CategoryAssertionID         *string
+	CategoryID                  *string
 	Justification               *Justification
 	CategoryJustification       *Justification
 	AssigneeEmail               *string
@@ -153,8 +170,19 @@ type SaveAssertion struct {
 	ClearPassCriteria           bool
 	ClearFailCriteria           bool
 	ClearTargetOnEvaluatedTrace bool
-	ClearCategoryAssertionID    bool
+	ClearCategoryID             bool
 	ClearAssigneeEmail          bool
+	// Deprecated: Use CategoryID instead. CategoryID and ClearCategoryID take precedence when either is set.
+	CategoryAssertionID *string
+	// Deprecated: Use ClearCategoryID instead. CategoryID and ClearCategoryID take precedence when either is set.
+	ClearCategoryAssertionID bool
+}
+
+func (assertion SaveAssertion) category() (*string, bool) {
+	if assertion.CategoryID != nil || assertion.ClearCategoryID {
+		return assertion.CategoryID, assertion.ClearCategoryID
+	}
+	return assertion.CategoryAssertionID, assertion.ClearCategoryAssertionID
 }
 
 func (assertion SaveAssertion) payload() (map[string]any, error) {
@@ -198,13 +226,13 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 		}
 		payload["targetOnEvaluatedTrace"] = target
 	}
-	if assertion.ClearCategoryAssertionID {
-		if assertion.CategoryAssertionID != nil {
-			return nil, fmt.Errorf("bitfab: cannot set and clear an assertion category together")
+	if categoryID, clearCategory := assertion.category(); clearCategory {
+		if categoryID != nil {
+			return nil, fmt.Errorf("bitfab: cannot set and clear a category together")
 		}
-		payload["category_assertion_id"] = nil
-	} else if assertion.CategoryAssertionID != nil {
-		payload["category_assertion_id"] = *assertion.CategoryAssertionID
+		payload["category_id"] = nil
+	} else if categoryID != nil {
+		payload["category_id"] = *categoryID
 	}
 	if assertion.ClearAssigneeEmail {
 		if assertion.AssigneeEmail != nil {

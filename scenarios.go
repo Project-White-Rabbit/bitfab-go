@@ -152,6 +152,9 @@ type Scenario struct {
 	ActualOutcome  *ScenarioActualOutcome `json:"actualOutcome"`
 	TriggerSummary string                 `json:"triggerSummary"`
 	DataSummary    string                 `json:"dataSummary"`
+	// Categories are the categories the scenario is filed under, sorted by title.
+	// It is empty when the scenario is filed under none.
+	Categories []CategorySummary `json:"categories"`
 }
 
 type SaveScenarioParams struct {
@@ -167,6 +170,13 @@ type SaveScenarioParams struct {
 	// ClearActualOutcome removes the saved actual outcome by sending null.
 	// Setting it together with ActualOutcome is refused.
 	ClearActualOutcome bool `json:"-"`
+	// CategoryIDs replaces the whole set of categories the scenario is filed
+	// under. Nil leaves the saved set untouched. Use ClearCategoryIDs to empty it.
+	// An id outside the organization fails the save.
+	CategoryIDs []string `json:"-"`
+	// ClearCategoryIDs files the scenario under no categories by sending an
+	// empty list. Setting it together with CategoryIDs is refused.
+	ClearCategoryIDs bool `json:"-"`
 }
 
 func (update SaveScenarioParams) payload() (map[string]any, error) {
@@ -179,9 +189,13 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 	if update.ActualOutcome != nil && update.ClearActualOutcome {
 		return nil, errors.New("bitfab: cannot set and clear a scenario actual outcome together")
 	}
+	if update.CategoryIDs != nil && update.ClearCategoryIDs {
+		return nil, errors.New("bitfab: cannot set and clear scenario categories together")
+	}
 	if update.Name == nil && update.Description == nil && update.Trigger == nil && update.Data == nil &&
-		update.AppendData == nil && update.ActualOutcome == nil && !update.ClearActualOutcome {
-		return nil, errors.New("bitfab: a scenario update must set at least one of name, description, trigger, data, appendData, or actualOutcome")
+		update.AppendData == nil && update.ActualOutcome == nil && !update.ClearActualOutcome &&
+		update.CategoryIDs == nil && !update.ClearCategoryIDs {
+		return nil, errors.New("bitfab: a scenario update must set at least one of name, description, trigger, data, appendData, actualOutcome, or categoryIds")
 	}
 	encoded, err := json.Marshal(update)
 	if err != nil {
@@ -193,6 +207,11 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 	}
 	if update.ClearActualOutcome {
 		payload["actualOutcome"] = nil
+	}
+	if update.ClearCategoryIDs {
+		payload["categoryIds"] = []string{}
+	} else if update.CategoryIDs != nil {
+		payload["categoryIds"] = update.CategoryIDs
 	}
 	return payload, nil
 }
