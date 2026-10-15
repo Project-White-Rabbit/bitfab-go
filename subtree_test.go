@@ -1193,3 +1193,95 @@ func TestSubtree_NodeSettingsApplyWhenCalledDirectlyBeneathAnotherRoot(t *testin
 		t.Fatalf("tree = %v", got)
 	}
 }
+
+func callJevNode(ctx context.Context) (result string) {
+	node := EnterAutoNode(ctx, "callJev", "callJev", nil, []any{&result})
+	if node != nil {
+		defer node.End(nil)
+		ctx = node.Context()
+	}
+	GetCurrentSpan(ctx).AddContext(map[string]any{"model": "jev-1.13.0", "inputTokens": 1000})
+	GetCurrentSpan(ctx).SetPrompt("jev prompt")
+	return "kept"
+}
+
+func runNestedLlmShape(t *testing.T) map[string]map[string]map[string]any {
+	t.Helper()
+	c, requests := subtreeClient(t)
+	if err := c.Node("callJev", NodeOptions{Name: "JevCall", Type: "llm"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Trace(context.Background(), "outer-judge", func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).AddContext(map[string]any{"model": "gemini", "inputTokens": 5})
+		return c.Trace(ctx, "inner-screen", func(ctx context.Context) (any, error) {
+			GetCurrentSpan(ctx).AddContext(map[string]any{"model": "screen-model", "inputTokens": 7})
+			return callJevNode(ctx), nil
+		}, TraceOptions{Name: "Screen", Type: "agent"})
+	}, TraceOptions{Name: "Judge", Type: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.FlushTraces(time.Second) {
+		t.Fatal("flush")
+	}
+	var spans []map[string]any
+	for _, request := range requests() {
+		if raw, ok := request["rawSpan"].(map[string]any); ok {
+			spans = append(spans, raw)
+		}
+	}
+	var outerTraceID any
+	for _, span := range spans {
+		if span["span_data"].(map[string]any)["name"] == "Judge" {
+			outerTraceID = span["trace_id"]
+		}
+	}
+	byTrace := map[string]map[string]map[string]any{"outer": {}, "inner": {}}
+	for _, span := range spans {
+		data := span["span_data"].(map[string]any)
+		side := "inner"
+		if span["trace_id"] == outerTraceID {
+			side = "outer"
+		}
+		byTrace[side][data["name"].(string)] = data
+	}
+	return byTrace
+}
+
+func TestSubtree_NestedCopyKeepsContextsAndPrompt(t *testing.T) {
+	spans := runNestedLlmShape(t)
+	innerCall, outerCopy := spans["inner"]["JevCall"], spans["outer"]["JevCall"]
+	if innerCall == nil || outerCopy == nil {
+		t.Fatalf("missing JevCall spans: %#v", spans)
+	}
+	if fmt.Sprint(innerCall["contexts"]) != "[map[inputTokens:1000 model:jev-1.13.0]]" {
+		t.Fatalf("inner contexts = %#v", innerCall["contexts"])
+	}
+	if !reflect.DeepEqual(outerCopy["contexts"], innerCall["contexts"]) {
+		t.Fatalf("outer copy contexts = %#v, inner = %#v", outerCopy["contexts"], innerCall["contexts"])
+	}
+	if outerCopy["prompt"] != "jev prompt" || innerCall["prompt"] != "jev prompt" {
+		t.Fatalf("prompts = %#v / %#v", outerCopy["prompt"], innerCall["prompt"])
+	}
+	innerRoot, outerLink := spans["inner"]["Screen"], spans["outer"]["Screen"]
+	if outerLink == nil || outerLink["nested_trace_id"] == nil {
+		t.Fatalf("missing link span: %#v", outerLink)
+	}
+	if fmt.Sprint(innerRoot["contexts"]) != "[map[inputTokens:7 model:screen-model]]" {
+		t.Fatalf("inner root contexts = %#v", innerRoot["contexts"])
+	}
+	if !reflect.DeepEqual(outerLink["contexts"], innerRoot["contexts"]) {
+		t.Fatalf("link contexts = %#v, inner root = %#v", outerLink["contexts"], innerRoot["contexts"])
+	}
+}
+
+func TestSubtree_NestedCopyLeavesOuterRootContexts(t *testing.T) {
+	spans := runNestedLlmShape(t)
+	outerRoot := spans["outer"]["Judge"]
+	if fmt.Sprint(outerRoot["contexts"]) != "[map[inputTokens:5 model:gemini]]" {
+		t.Fatalf("outer root contexts = %#v", outerRoot["contexts"])
+	}
+	if outerRoot["prompt"] != nil {
+		t.Fatalf("outer root prompt = %#v", outerRoot["prompt"])
+	}
+}
