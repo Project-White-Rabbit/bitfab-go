@@ -889,3 +889,89 @@ func TestSimulationPlan_UnreadablePlanWithholdsChildPrompt(t *testing.T) {
 	assertPromptKept(t, byName, "unreadable")
 	assertPromptKept(t, byName, "optin-root")
 }
+
+func simPlanRequestCounter(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/sdk/sim-plan" {
+			requests.Add(1)
+		}
+		_, _ = w.Write([]byte(`{"nodes":[]}`))
+	}))
+	t.Cleanup(server.Close)
+	return server, &requests
+}
+
+func TestSimulationPlan_SourceThatCannotReadIsNeverRead(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	resetWarnOnce()
+	defer resetWarnOnce()
+	plan := newSimulationPlan(func() (map[string]any, error) {
+		t.Error("plan was read while its source could not read")
+		return nil, errors.New("offline")
+	}, true)
+	plan.canRead = func(context.Context) bool { return false }
+	plan.refreshFor(context.Background())
+	plan.awaitFirstRead(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	plan.mu.Lock()
+	reading, unavailable := plan.reading, plan.unavailable
+	plan.mu.Unlock()
+	if reading != nil || unavailable {
+		t.Fatalf("reading=%v unavailable=%v, want no read and no unavailable state", reading != nil, unavailable)
+	}
+	if _, warned := warnedKeys.Load("sim-plan-unavailable"); warned {
+		t.Fatal("warned that the simulation plan was unavailable")
+	}
+}
+
+func TestSimulationPlan_NoAPIKeyNeverReads(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	t.Setenv("BITFAB_API_KEY", "")
+	t.Setenv(replayAPIKeyEnv, "")
+	resetWarnOnce()
+	defer resetWarnOnce()
+	server, requests := simPlanRequestCounter(t)
+	c := NewClient("", WithServiceURL(server.URL))
+	defer c.Close(time.Second)
+	c.GetFunction("root")
+	time.Sleep(100 * time.Millisecond)
+	plan := c.httpClient.simulationPlan
+	plan.mu.Lock()
+	unavailable := plan.unavailable
+	plan.mu.Unlock()
+	if requests.Load() != 0 || unavailable {
+		t.Fatalf("requests=%d unavailable=%v, want no read", requests.Load(), unavailable)
+	}
+	if _, warned := warnedKeys.Load("sim-plan-unavailable"); warned {
+		t.Fatal("warned that the simulation plan was unavailable")
+	}
+}
+
+func TestSimulationPlan_CaptureOffNeverReads(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	server, requests := simPlanRequestCounter(t)
+	c := NewClient("key", WithServiceURL(server.URL), WithCaptureEnabled(false))
+	defer c.Close(time.Second)
+	c.GetFunction("root")
+	time.Sleep(100 * time.Millisecond)
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests=%d, want no simulation plan read while capture is off", got)
+	}
+}
+
+func TestSimulationPlan_CaptureOffReadsDuringReplay(t *testing.T) {
+	t.Setenv("BITFAB_DISABLE_SIM_PLAN", "")
+	server, requests := simPlanRequestCounter(t)
+	c := NewClient("key", WithServiceURL(server.URL), WithCaptureEnabled(false))
+	defer c.Close(time.Second)
+	c.httpClient.simulationPlan.refreshFor(withReplayContext(context.Background(), &replayContext{experimentID: "replay-run"}))
+	deadline := time.Now().Add(2 * time.Second)
+	for requests.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if requests.Load() == 0 {
+		t.Fatal("replay did not read the simulation plan while capture is off")
+	}
+}

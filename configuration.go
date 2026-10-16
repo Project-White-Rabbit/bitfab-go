@@ -82,6 +82,13 @@ func (c *Client) shouldRecord(ctx context.Context) bool {
 	return c.resolveAPIKey() != ""
 }
 
+func (c *Client) canReadSimulationPlan(ctx context.Context) bool {
+	if (!c.enabled || c.captureDisabled) && currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
+		return false
+	}
+	return c.probeAPIKey() != ""
+}
+
 func (h *httpClient) resolveAPIKey() string {
 	if h.apiKeyFunc != nil {
 		return h.apiKeyFunc()

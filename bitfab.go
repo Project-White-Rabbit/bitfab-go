@@ -260,8 +260,9 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.httpClient = newHTTPClient(c.apiKey, c.serviceURL)
 	c.httpClient.apiKeyFunc = c.resolveAPIKey
 	c.httpClient.simulationPlan = newSimulationPlan(c.httpClient.getSimulationPlan, !c.simulationPlanDisabled)
-	if replayAPIKeyOverride() != "" || (c.apiKeyFunc == nil && (strings.TrimSpace(c.apiKey) != "" || strings.TrimSpace(os.Getenv("BITFAB_API_KEY")) != "")) {
-		c.httpClient.simulationPlan.refresh()
+	c.httpClient.simulationPlan.canRead = c.canReadSimulationPlan
+	if replayAPIKeyOverride() != "" || c.apiKeyFunc == nil {
+		c.httpClient.simulationPlan.refreshFor(context.Background())
 	}
 	if c.requestTimeout > 0 {
 		c.httpClient.client.Timeout = c.requestTimeout
@@ -875,7 +876,7 @@ func (c *Client) Close(timeout time.Duration) bool {
 // GetFunction returns a Function bound to the given traceFunctionKey.
 // This provides a fluent API for creating multiple spans under the same key.
 func (c *Client) GetFunction(traceFunctionKey string) *Function {
-	c.httpClient.simulationPlan.refresh()
+	c.httpClient.simulationPlan.refreshFor(context.Background())
 	return &Function{
 		client:           c,
 		traceFunctionKey: traceFunctionKey,

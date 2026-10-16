@@ -35,6 +35,7 @@ type heldPlanRecord struct {
 type simulationPlan struct {
 	mu           sync.Mutex
 	read         func() (map[string]any, error)
+	canRead      func(context.Context) bool
 	disabled     bool
 	contentOff   map[string]map[string]bool
 	unavailable  bool
@@ -85,6 +86,13 @@ func (p *simulationPlan) awaitFirstRead(ctx context.Context) {
 
 func (p *simulationPlan) isDisabled() bool {
 	return p.disabled || strings.TrimSpace(os.Getenv("BITFAB_DISABLE_SIM_PLAN")) != ""
+}
+
+func (p *simulationPlan) refreshFor(ctx context.Context) {
+	if p == nil || (p.canRead != nil && !p.canRead(ctx)) {
+		return
+	}
+	p.refresh()
 }
 
 func (p *simulationPlan) refresh() {
