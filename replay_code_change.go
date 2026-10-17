@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ const (
 	maxCodeChangeFiles     = 60
 	maxCodeChangeFileBytes = 500_000
 	maxCodeChangeTotal     = 2_000_000
+	maxBranchWalk          = 1000
 )
 
 type resolvedCodeChange struct {
@@ -84,30 +86,12 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, label string) *re
 	if !ok {
 		return nil
 	}
-	tracked, _ := runReplayGit(
-		ctx,
-		root,
-		"diff",
-		"--name-status",
-		"--find-renames",
-		"-z",
-		base,
-		"--",
-		":!.bitfab",
-	)
-	untracked, _ := runReplayGit(
-		ctx,
-		root,
-		"ls-files",
-		"--others",
-		"--exclude-standard",
-		"-z",
-		"--",
-		":!.bitfab",
-	)
-	entries := parseGitNameStatus(tracked)
-	for _, path := range splitNUL(untracked) {
-		entries = append(entries, gitCodeChange{status: 'A', beforePath: path, path: path})
+	entries := listCodeChanges(ctx, root, base)
+	if len(entries) == 0 && base == "HEAD" {
+		if branchBase, branchAgainst, found := resolveBranchPoint(ctx, root); found {
+			base, against = branchBase, branchAgainst
+			entries = listCodeChanges(ctx, root, base)
+		}
 	}
 	if len(entries) == 0 {
 		return nil
@@ -173,9 +157,146 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, label string) *re
 	return &resolvedCodeChange{Description: &description, Files: files}
 }
 
+func listCodeChanges(ctx context.Context, root string, base string) []gitCodeChange {
+	tracked, _ := runReplayGit(
+		ctx,
+		root,
+		"diff",
+		"--name-status",
+		"--find-renames",
+		"-z",
+		base,
+		"--",
+		":!.bitfab",
+	)
+	untracked, _ := runReplayGit(
+		ctx,
+		root,
+		"ls-files",
+		"--others",
+		"--exclude-standard",
+		"-z",
+		"--",
+		":!.bitfab",
+	)
+	entries := parseGitNameStatus(tracked)
+	for _, path := range splitNUL(untracked) {
+		entries = append(entries, gitCodeChange{status: 'A', beforePath: path, path: path})
+	}
+	return entries
+}
+
+func defaultBranchCandidates(ctx context.Context, root string) []string {
+	candidates := []string{}
+	if originHead, ok := runReplayGit(ctx, root, "rev-parse", "--abbrev-ref", "origin/HEAD"); ok {
+		if trimmed := strings.TrimSpace(originHead); trimmed != "" && trimmed != "origin/HEAD" {
+			candidates = append(candidates, trimmed)
+		}
+	}
+	for _, ref := range []string{"origin/main", "origin/master", "main", "master"} {
+		if !slices.Contains(candidates, ref) {
+			candidates = append(candidates, ref)
+		}
+	}
+	return candidates
+}
+
+func resolveDefaultBranch(ctx context.Context, root string) string {
+	for _, ref := range defaultBranchCandidates(ctx, root) {
+		if replayGitRefExists(ctx, root, ref) {
+			return ref
+		}
+	}
+	return ""
+}
+
+func currentBranchRefs(ctx context.Context, root string) map[string]bool {
+	refs := map[string]bool{}
+	branch, _ := runReplayGit(ctx, root, "symbolic-ref", "--short", "-q", "HEAD")
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return refs
+	}
+	refs["refs/heads/"+branch] = true
+	remotes, _ := runReplayGit(ctx, root, "remote")
+	for _, remote := range strings.Fields(remotes) {
+		refs["refs/remotes/"+remote+"/"+branch] = true
+	}
+	return refs
+}
+
+func ownBranchRefs(ctx context.Context, root string) map[string]bool {
+	own := currentBranchRefs(ctx, root)
+	if upstream, ok := runReplayGit(ctx, root, "rev-parse", "--symbolic-full-name", "@{upstream}"); ok && strings.TrimSpace(upstream) != "" {
+		own[strings.TrimSpace(upstream)] = true
+	}
+	return own
+}
+
+func isOnDefaultBranch(ctx context.Context, root, defaultBranch string) bool {
+	fullName, _ := runReplayGit(ctx, root, "rev-parse", "--symbolic-full-name", defaultBranch)
+	fullName = strings.TrimSpace(fullName)
+	return fullName != "" && currentBranchRefs(ctx, root)[fullName]
+}
+
+func branchTips(ctx context.Context, root string) map[string]string {
+	own := ownBranchRefs(ctx, root)
+	listing, _ := runReplayGit(ctx, root, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/remotes")
+	tips := map[string]string{}
+	for _, line := range strings.Split(listing, "\n") {
+		sha, ref, found := strings.Cut(strings.TrimSpace(line), " ")
+		if !found || own[ref] || strings.HasSuffix(ref, "/HEAD") {
+			continue
+		}
+		if _, seen := tips[sha]; seen {
+			continue
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(ref, "refs/heads/"), "refs/remotes/")
+		tips[sha] = name
+	}
+	return tips
+}
+
+func resolveBranchPoint(ctx context.Context, root string) (string, string, bool) {
+	head, ok := runReplayGit(ctx, root, "rev-parse", "HEAD")
+	head = strings.TrimSpace(head)
+	if !ok || head == "" {
+		return "", "", false
+	}
+	defaultBranch := resolveDefaultBranch(ctx, root)
+	if defaultBranch != "" && isOnDefaultBranch(ctx, root, defaultBranch) {
+		return "", "", false
+	}
+	defaultBase := ""
+	if defaultBranch != "" {
+		output, _ := runReplayGit(ctx, root, "merge-base", "HEAD", defaultBranch)
+		defaultBase = strings.TrimSpace(output)
+	}
+	walk := []string{"rev-list", "--first-parent", "--max-count=" + strconv.Itoa(maxBranchWalk), "HEAD"}
+	if defaultBase != "" {
+		walk = append(walk, "^"+defaultBase)
+	}
+	tips := branchTips(ctx, root)
+	history, _ := runReplayGit(ctx, root, walk...)
+	commits := strings.Fields(history)
+	if len(commits) > 0 {
+		commits = commits[1:]
+	}
+	for _, sha := range commits {
+		if name, found := tips[sha]; found {
+			return sha, "vs " + name, true
+		}
+	}
+	if defaultBase != "" && defaultBase != head {
+		return defaultBase, "vs " + defaultBranch, true
+	}
+	return "", "", false
+}
+
 // resolveCodeChangeBase returns the base to diff the working tree against and
 // the label for it. HEAD by default, so only uncommitted edits show;
-// BITFAB_CODE_CHANGE_BASE moves the base to the merge-base with that ref.
+// BITFAB_CODE_CHANGE_BASE moves the base to the merge-base with that ref. A
+// clean working tree falls back to resolveBranchPoint.
 func resolveCodeChangeBase(ctx context.Context, root string) (string, string, bool) {
 	if forced := os.Getenv("BITFAB_CODE_CHANGE_BASE"); forced != "" && replayGitRefExists(ctx, root, forced) {
 		if base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", forced); ok && strings.TrimSpace(base) != "" {

@@ -154,6 +154,7 @@ CODE_CHANGE_PATH_ENV = "BITFAB_CODE_CHANGE_PATH"
 CODE_CHANGE_MAX_FILES = 60
 CODE_CHANGE_MAX_FILE_BYTES = 500_000
 CODE_CHANGE_MAX_TOTAL_BYTES = 2_000_000
+BRANCH_WALK_LIMIT = 1000
 CHECK_ARGUMENTS_SECONDS = 300
 CHECK_ARGUMENTS_FLAG = "--check-arguments"
 REPLAY_ARGUMENTS_FLAG = "--replay-arguments"
@@ -933,6 +934,98 @@ def current_branch(root):
         return None
 
 
+def quiet_git(root, *args):
+    try:
+        return git(root, *args)
+    except CommandError:
+        return ""
+
+
+def default_branch(root):
+    origin_head = quiet_git(root, "rev-parse", "--abbrev-ref", "origin/HEAD")
+    candidates = [
+        origin_head if origin_head and origin_head != "origin/HEAD" else None,
+        "origin/main",
+        "origin/master",
+        "main",
+        "master",
+    ]
+    return next(
+        (
+            ref
+            for ref in dict.fromkeys(filter(None, candidates))
+            if quiet_git(root, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
+        ),
+        None,
+    )
+
+
+def current_branch_refs(root):
+    branch = current_branch(root)
+    if not branch:
+        return set()
+    return {f"refs/heads/{branch}"} | {
+        f"refs/remotes/{remote}/{branch}"
+        for remote in quiet_git(root, "remote").split()
+    }
+
+
+def own_branch_refs(root):
+    upstream = quiet_git(root, "rev-parse", "--symbolic-full-name", "@{upstream}")
+    own = current_branch_refs(root)
+    if upstream:
+        own.add(upstream)
+    return own
+
+
+def on_default_branch(root, default):
+    full_name = quiet_git(root, "rev-parse", "--symbolic-full-name", default)
+    return bool(full_name) and full_name in current_branch_refs(root)
+
+
+def branch_tips(root):
+    own = own_branch_refs(root)
+    listing = quiet_git(
+        root,
+        "for-each-ref",
+        "--format=%(objectname) %(refname)",
+        "refs/heads",
+        "refs/remotes",
+    )
+    tips = {}
+    for line in listing.splitlines():
+        sha, _, ref = line.partition(" ")
+        if ref and ref not in own and not ref.endswith("/HEAD"):
+            tips.setdefault(
+                sha, ref.removeprefix("refs/heads/").removeprefix("refs/remotes/")
+            )
+    return tips
+
+
+def branch_point(root):
+    head = quiet_git(root, "rev-parse", "HEAD")
+    if not head:
+        return None
+    default = default_branch(root)
+    if default and on_default_branch(root, default):
+        return None
+    default_base = quiet_git(root, "merge-base", "HEAD", default) if default else ""
+    walk = ["rev-list", "--first-parent", f"--max-count={BRANCH_WALK_LIMIT}", "HEAD"]
+    if default_base:
+        walk.append(f"^{default_base}")
+    tips = branch_tips(root)
+    for sha in quiet_git(root, *walk).split()[1:]:
+        if sha in tips:
+            return {"sha": sha, "ref": tips[sha]}
+    if default_base and default_base != head:
+        return {"sha": default_base, "ref": default}
+    return None
+
+
+def replay_artifact(path):
+    return path == ".bitfab" or path.startswith(".bitfab/")
+
+
 def sensitive(path):
     parts = Path(path).parts
     name = Path(path).name.lower()
@@ -1033,12 +1126,20 @@ def snapshot(
         }
         if preview:
             return summary
+        code_change_base = request.get("codeChangeBase") or {}
+        extra_parent = (
+            ["-p", code_change_base["sha"]]
+            if not any(not replay_artifact(path) for _, path in changes)
+            and SHA.fullmatch(str(code_change_base.get("sha", "")))
+            else []
+        )
         sha = git(
             root,
             "commit-tree",
             tree,
             "-p",
             head,
+            *extra_parent,
             input=f"{snapshot_subject(request['id'], on_push)}\n\n{json.dumps(request)}\n",
         )
         return {**summary, "sha": sha}
@@ -1360,6 +1461,9 @@ def submit(root, repo, workflow, parsed, path):
     branch = current_branch(root)
     if branch:
         request["branch"] = branch
+    code_change_base = branch_point(root)
+    if code_change_base:
+        request["codeChangeBase"] = code_change_base
     check_arguments(parsed["replay"])
     allowed = allowed_files(root, parsed)
     if "--cloud-preview" in parsed["switches"]:
@@ -2067,7 +2171,9 @@ def changed_paths(root, base, commit):
         yield status, before_path, path
 
 
-def snapshot_code_change(root, base, commit, name):
+def snapshot_code_change(
+    root, base, commit, name, against="uncommitted (vs HEAD)", subject_ref=None
+):
     files, total = [], 0
     for status, before_path, path in changed_paths(root, base, commit):
         if len(files) >= CODE_CHANGE_MAX_FILES:
@@ -2083,12 +2189,32 @@ def snapshot_code_change(root, base, commit, name):
         files.append({"path": path, "before": before, "after": after})
     if not files:
         return None
-    head = (name or "").strip() or git(root, "log", "-1", "--format=%s", base)
+    head = (name or "").strip() or git(
+        root, "log", "-1", "--format=%s", subject_ref or base
+    )
     word = "file" if len(files) == 1 else "files"
     return {
-        "description": f"{head or 'Working-tree change'} ({len(files)} {word} changed uncommitted (vs HEAD))",
+        "description": f"{head or 'Working-tree change'} ({len(files)} {word} changed {against})",
         "files": files,
     }
+
+
+def branch_code_change(root, base, commit, request):
+    code_change_base = request.get("codeChangeBase")
+    if not isinstance(code_change_base, dict):
+        return None
+    sha, ref = code_change_base.get("sha"), code_change_base.get("ref")
+    if not (
+        isinstance(sha, str)
+        and SHA.fullmatch(sha)
+        and isinstance(ref, str)
+        and BRANCH_NAME.fullmatch(ref)
+        and quiet_git(root, "rev-parse", "--verify", "-q", f"{commit}^2") == sha
+    ):
+        return None
+    return snapshot_code_change(
+        root, sha, commit, replay_name(request["args"]), f"vs {ref}", base
+    )
 
 
 def write_code_change(change):
@@ -2127,6 +2253,7 @@ def execute():
         None
         if explicit_change or base is None
         else snapshot_code_change(root, base, commit, replay_name(request["args"]))
+        or branch_code_change(root, base, commit, request)
     )
     run_environment = dict(environment)
     if change:

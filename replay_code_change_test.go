@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -207,6 +208,88 @@ func TestCaptureCodeChangeFromGitReturnsNilOutsideRepoAndForCleanTree(t *testing
 	root := initReplayGitRepo(t, "main")
 	if change := captureCodeChangeFromGit(context.Background(), root, "clean"); change != nil {
 		t.Fatalf("clean-tree change = %#v", change)
+	}
+}
+
+func TestCaptureCodeChangeFromGitDiffsCleanBranchAgainstDefaultBranch(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	ctx := context.Background()
+	if output, ok := runReplayGit(ctx, root, "checkout", "-b", "feature"); !ok {
+		t.Fatalf("git checkout failed: %s", output)
+	}
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("committed\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if output, ok := runReplayGit(ctx, root, "commit", "-am", "committed experiment"); !ok {
+		t.Fatalf("git commit failed: %s", output)
+	}
+
+	change := captureCodeChangeFromGit(ctx, root, "clean")
+	if change == nil {
+		t.Fatal("change = nil")
+	}
+	want := []CodeChangeFile{{Path: "base.txt", Before: "base\n", After: "committed\n"}}
+	if !reflect.DeepEqual(change.Files, want) {
+		t.Fatalf("files = %#v", change.Files)
+	}
+	if change.Description == nil || !strings.Contains(*change.Description, "vs main") {
+		t.Fatalf("description = %v", change.Description)
+	}
+}
+
+func TestCaptureCodeChangeFromGitIgnoresUnpushedCommitsOnDefaultBranch(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	remote := t.TempDir()
+	ctx := context.Background()
+	steps := [][]string{
+		{"init", "-q", "--bare", remote},
+		{"-C", root, "remote", "add", "origin", remote},
+		{"-C", root, "push", "-q", "-u", "origin", "main"},
+	}
+	for _, args := range steps {
+		if output, ok := runReplayGit(ctx, root, args...); !ok {
+			t.Fatalf("git %v failed: %s", args, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("local\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if output, ok := runReplayGit(ctx, root, "commit", "-am", "unpushed"); !ok {
+		t.Fatalf("git commit failed: %s", output)
+	}
+
+	if change := captureCodeChangeFromGit(ctx, root, "clean"); change != nil {
+		t.Fatalf("change = %#v, want nil", change)
+	}
+}
+
+func TestCaptureCodeChangeFromGitDiffsCleanStackedBranchAgainstParentBranch(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	ctx := context.Background()
+	commit := func(branch string, content string) {
+		if output, ok := runReplayGit(ctx, root, "checkout", "-b", branch); !ok {
+			t.Fatalf("git checkout failed: %s", output)
+		}
+		if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte(content), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		if output, ok := runReplayGit(ctx, root, "commit", "-am", branch); !ok {
+			t.Fatalf("git commit failed: %s", output)
+		}
+	}
+	commit("parent", "parent\n")
+	commit("child", "child\n")
+
+	change := captureCodeChangeFromGit(ctx, root, "clean")
+	if change == nil {
+		t.Fatal("change = nil")
+	}
+	want := []CodeChangeFile{{Path: "base.txt", Before: "parent\n", After: "child\n"}}
+	if !reflect.DeepEqual(change.Files, want) {
+		t.Fatalf("files = %#v", change.Files)
+	}
+	if change.Description == nil || !strings.Contains(*change.Description, "vs parent") {
+		t.Fatalf("description = %v", change.Description)
 	}
 }
 
