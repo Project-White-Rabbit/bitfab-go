@@ -47,7 +47,8 @@ func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
 		t.Fatalf("requests = %+v", requests)
 	}
 	want := map[string]any{
-		"source": "human",
+		"source":        "human",
+		"guidedRewrite": true,
 		"updates": []any{
 			map[string]any{"traceId": "trace-1", "assertions": []any{map[string]any{
 				"id": "assertion-1", "assertion": "lands before 9am", "passCriteria": pass, "failCriteria": nil,
@@ -73,7 +74,7 @@ func TestAssertions_SingularUsesBatchAndDefaultsToAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"source": "agent", "updates": []any{
+	want := map[string]any{"source": "agent", "guidedRewrite": true, "updates": []any{
 		map[string]any{"traceId": "trace", "assertions": []any{map[string]any{"assertion": "works"}}},
 	}}
 	request := server.recorded()[0]
@@ -83,6 +84,138 @@ func TestAssertions_SingularUsesBatchAndDefaultsToAgent(t *testing.T) {
 	empty, err := client.Traces.SaveAssertionsAll(context.Background(), SaveAssertionsAllParams{})
 	if err != nil || len(empty) != 0 || empty == nil || len(server.recorded()) != 1 {
 		t.Fatalf("empty batch = %+v, %v", empty, err)
+	}
+}
+
+func TestAssertions_SkipGuidedRewriteSendsFalse(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return map[string]any{"assertions": []any{}} })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	ctx := context.Background()
+	if _, err := client.Traces.SaveAssertionsAll(ctx, SaveAssertionsAllParams{
+		SkipGuidedRewrite: true,
+		Updates:           []TraceAssertionsUpdate{{TraceID: "trace", Assertions: []SaveAssertion{{Assertion: "works"}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Traces.SaveAssertions(ctx, SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{{Assertion: "works"}}, SkipGuidedRewrite: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Traces.SaveAssertions(ctx, SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{{Assertion: "works"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requests := server.recorded()
+	if len(requests) != 3 {
+		t.Fatalf("requests = %+v", requests)
+	}
+	for index, want := range []bool{false, false, true} {
+		if got, present := requests[index].body["guidedRewrite"]; !present || got != want {
+			t.Fatalf("request %d guidedRewrite = %#v (present %v), want %v", index, got, present, want)
+		}
+	}
+}
+
+func TestAssertions_SaveDecodesRewriteOntoEachAssertion(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "assertion-1", "traceId": "trace", "assertion": "Lands before 9am", "source": "agent",
+				"rewrite": map[string]any{
+					"status": "rewritten", "sentAssertion": "Lands early and is cheap",
+					"changes":            []any{"Split the price claim out because it is a second claim."},
+					"separateAssertions": []any{"Costs under $300"},
+					"unresolved":         []any{},
+					"error":              nil,
+				}},
+			map[string]any{"id": "assertion-2", "traceId": "trace", "assertion": "Arrives on time", "source": "agent",
+				"rewrite": map[string]any{
+					"status": "check_failed", "sentAssertion": "Arrives on time",
+					"changes": []any{}, "separateAssertions": []any{}, "unresolved": []any{},
+					"error": "model call timed out",
+				}},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	saved, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{{Assertion: "Lands early and is cheap"}, {Assertion: "Arrives on time"}},
+	})
+	if err != nil || len(saved) != 2 {
+		t.Fatalf("SaveAssertions = %+v, %v", saved, err)
+	}
+	sent := "Lands early and is cheap"
+	wantRewritten := &AssertionRewrite{
+		Status: AssertionRewriteRewritten, SentAssertion: &sent,
+		Changes:            []string{"Split the price claim out because it is a second claim."},
+		SeparateAssertions: []string{"Costs under $300"},
+		Unresolved:         []string{},
+	}
+	if !reflect.DeepEqual(saved[0].Rewrite, wantRewritten) {
+		t.Fatalf("first rewrite = %#v, want %#v", saved[0].Rewrite, wantRewritten)
+	}
+	failed := saved[1].Rewrite
+	if failed == nil || failed.Status != AssertionRewriteCheckFailed || failed.Error == nil || *failed.Error != "model call timed out" {
+		t.Fatalf("second rewrite = %#v", failed)
+	}
+}
+
+func rewriteRow(id, text, status string) map[string]any {
+	return map[string]any{"id": id, "traceId": "trace", "assertion": text, "source": "agent",
+		"category_assertion_id": "category-1",
+		"rewrite": map[string]any{
+			"status": status, "sentAssertion": "sent " + id,
+			"changes": []any{}, "separateAssertions": []any{}, "unresolved": []any{}, "error": nil,
+		}}
+}
+
+func TestAssertions_SaveReturnsPendingRowsWithoutReadingAgain(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			rewriteRow("a1", "sent a1", "pending"),
+			rewriteRow("a2", "sent a2", "not_checked"),
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	saved, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{{Assertion: "sent a1"}, {Assertion: "sent a2"}},
+	})
+	if err != nil || len(saved) != 2 {
+		t.Fatalf("SaveAssertions = %+v, %v", saved, err)
+	}
+	if saved[0].Rewrite == nil || saved[0].Rewrite.Status != AssertionRewritePending {
+		t.Fatalf("first = %+v", saved[0])
+	}
+	if saved[1].Rewrite == nil || saved[1].Rewrite.Status != AssertionRewriteNotChecked {
+		t.Fatalf("second = %+v", saved[1])
+	}
+	if requests := server.recorded(); len(requests) != 1 || requests[0].method != http.MethodPost {
+		t.Fatalf("requests = %+v", requests)
+	}
+}
+
+func TestAssertions_GetAssertionsDecodesRewrite(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		rewritten := rewriteRow("a1", "Lands before 9am", "rewritten")
+		rewritten["rewrite"].(map[string]any)["separateAssertions"] = []any{"Costs under $300"}
+		unchecked := map[string]any{"id": "a2", "traceId": "trace", "assertion": "Arrives on time", "source": "human", "rewrite": nil}
+		return map[string]any{"assertions": []any{rewritten, unchecked}, "inheritedFrom": nil}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	read, err := client.Traces.GetAssertions(context.Background(), "trace")
+	if err != nil || len(read.Assertions) != 2 {
+		t.Fatalf("GetAssertions = %+v, %v", read, err)
+	}
+	sent := "sent a1"
+	want := &AssertionRewrite{
+		Status: AssertionRewriteRewritten, SentAssertion: &sent,
+		Changes: []string{}, SeparateAssertions: []string{"Costs under $300"}, Unresolved: []string{},
+	}
+	if !reflect.DeepEqual(read.Assertions[0].Rewrite, want) {
+		t.Fatalf("first rewrite = %#v, want %#v", read.Assertions[0].Rewrite, want)
+	}
+	if read.Assertions[1].Rewrite != nil {
+		t.Fatalf("second rewrite = %#v, want nil", read.Assertions[1].Rewrite)
 	}
 }
 

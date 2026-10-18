@@ -114,8 +114,53 @@ type TraceAssertion struct {
 	Assignee               *Assignee            `json:"assignee"`
 	CreatedAt              string               `json:"createdAt"`
 	UpdatedAt              string               `json:"updatedAt"`
+	// Rewrite reports Bitfab's latest check of the text sent for this
+	// assertion, on saves and on GetAssertions reads alike. It is nil when no
+	// check ever ran on it.
+	Rewrite *AssertionRewrite `json:"rewrite,omitempty"`
 	// Deprecated: Use CategoryID instead.
 	CategoryAssertionID *string `json:"category_assertion_id"`
+}
+
+// AssertionRewriteStatus says where Bitfab's check of an assertion's sent text stands.
+type AssertionRewriteStatus string
+
+const (
+	// AssertionRewritePending means the check is still running. Bitfab rewrites
+	// the assertion in place when it finishes, usually within a minute, and
+	// GetAssertions then reports the result.
+	AssertionRewritePending AssertionRewriteStatus = "pending"
+	// AssertionRewriteRewritten means the sent text broke the writing rules and
+	// the rewritten text was saved in its place.
+	AssertionRewriteRewritten AssertionRewriteStatus = "rewritten"
+	// AssertionRewriteUnchanged means the sent text was checked and saved as sent.
+	AssertionRewriteUnchanged AssertionRewriteStatus = "unchanged"
+	// AssertionRewriteNotChecked means the check was skipped, because
+	// SkipGuidedRewrite was set or the entry sent no assertion text.
+	AssertionRewriteNotChecked AssertionRewriteStatus = "not_checked"
+	// AssertionRewriteCheckFailed means the check could not run, or had not
+	// finished 15 minutes after the save, so the text stays as sent. Error says why.
+	AssertionRewriteCheckFailed AssertionRewriteStatus = "check_failed"
+)
+
+// AssertionRewrite reports how Bitfab checked one saved assertion's text
+// against its trace and what it changed. The check runs in the background
+// after the save, so a save returns it as pending, and GetAssertions reads the
+// finished report.
+type AssertionRewrite struct {
+	// Status says whether the text was rewritten, kept, not checked, or could not be checked.
+	Status AssertionRewriteStatus `json:"status"`
+	// SentAssertion is the text the caller sent, or nil when the entry sent no text.
+	SentAssertion *string `json:"sentAssertion"`
+	// Changes holds one sentence per change, saying what changed and why.
+	Changes []string `json:"changes"`
+	// SeparateAssertions are other claims the sent text bundled together. The
+	// server did not save them. Save each one as its own assertion.
+	SeparateAssertions []string `json:"separateAssertions"`
+	// Unresolved lists problems rewording could not fix, and what to do about each.
+	Unresolved []string `json:"unresolved"`
+	// Error says why the check could not run. It is set only when Status is check_failed.
+	Error *string `json:"error"`
 }
 
 // UnmarshalJSON fills CategoryID and CategoryAssertionID from whichever key the server sent.
@@ -289,12 +334,24 @@ type SaveAssertionsParams struct {
 	TraceID    string
 	Assertions []SaveAssertion
 	Source     TraceAssertionSource
+	// SkipGuidedRewrite saves each assertion's text exactly as sent, with no
+	// check. By default Bitfab checks the text against its trace in the
+	// background after the save and, when it bundles two claims, hides a
+	// condition, points at a value instead of stating it, names an id from the
+	// recorded run, or cannot be measured, rewrites it in place.
+	SkipGuidedRewrite bool
 }
 
 // SaveAssertionsAllParams saves an atomic batch of assertions. Source defaults to agent.
 type SaveAssertionsAllParams struct {
 	Updates []TraceAssertionsUpdate
 	Source  TraceAssertionSource
+	// SkipGuidedRewrite saves each assertion's text exactly as sent, with no
+	// check. By default Bitfab checks the text against its trace in the
+	// background after the save and, when it bundles two claims, hides a
+	// condition, points at a value instead of stating it, names an id from the
+	// recorded run, or cannot be measured, rewrites it in place.
+	SkipGuidedRewrite bool
 }
 
 // ArchiveAssertionsParams retires assertions by ID without deleting them.
@@ -316,17 +373,26 @@ func (t *TracesClient) GetAssertions(ctx context.Context, traceID string) (*Trac
 	return &result, nil
 }
 
-// SaveAssertions upserts one original trace's assertions through the atomic batch endpoint.
+// SaveAssertions upserts one original trace's assertions through the atomic
+// batch endpoint, as SaveAssertionsAll describes.
 func (t *TracesClient) SaveAssertions(ctx context.Context, params SaveAssertionsParams) ([]TraceAssertion, error) {
 	return t.SaveAssertionsAll(ctx, SaveAssertionsAllParams{
-		Updates: []TraceAssertionsUpdate{{TraceID: params.TraceID, Assertions: params.Assertions}},
-		Source:  params.Source,
+		Updates:           []TraceAssertionsUpdate{{TraceID: params.TraceID, Assertions: params.Assertions}},
+		Source:            params.Source,
+		SkipGuidedRewrite: params.SkipGuidedRewrite,
 	})
 }
 
 // SaveAssertionsAll upserts at most 500 traces, 50 assertions per trace, and 1000
-// assertions in total. The server validates and saves the whole batch atomically.
-// An empty update list returns an empty slice without a request.
+// assertions in total. The server validates and saves the whole batch
+// atomically, with the text as sent, and the call returns once it is saved.
+// Unless SkipGuidedRewrite is set, each assertion that carries text comes back
+// with Rewrite.Status AssertionRewritePending, and Bitfab checks it against its
+// trace in the background and rewrites it in place, usually within a minute.
+// Read the result later with GetAssertions, whose rows carry Rewrite, and save
+// each of its SeparateAssertions as its own assertion. The assertions come back
+// in the order sent. An empty update list returns an empty slice without a
+// request.
 func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAssertionsAllParams) ([]TraceAssertion, error) {
 	if len(params.Updates) == 0 {
 		return []TraceAssertion{}, nil
@@ -351,7 +417,7 @@ func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAsserti
 		Assertions []TraceAssertion `json:"assertions"`
 	}
 	if err := t.httpClient.requestInto(ctx, "/api/sdk/traces/assertions", map[string]any{
-		"updates": updates, "source": source,
+		"updates": updates, "source": source, "guidedRewrite": !params.SkipGuidedRewrite,
 	}, &response); err != nil {
 		return nil, err
 	}
