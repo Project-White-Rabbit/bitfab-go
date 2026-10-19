@@ -67,11 +67,11 @@ func TestConfiguration_CallableKeyAndCaptureOff(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer key" {
 			t.Error("callable key missing")
 		}
-		json.NewEncoder(w).Encode(map[string]any{"labels": []any{}})
+		json.NewEncoder(w).Encode(map[string]any{"verdicts": []any{}})
 	}))
 	defer server.Close()
 	client.httpClient.serviceURL = server.URL
-	if _, err := client.Labels.GetAll(context.Background(), []string{"trace"}); err != nil {
+	if _, err := client.Verdicts.GetAll(context.Background(), []string{"trace"}); err != nil {
 		t.Fatal(err)
 	}
 	if resolved.Load() != 1 {
@@ -123,7 +123,7 @@ func TestConfiguration_ReplayAPIKeyOverrideSendsAuthorizationAndSatisfiesStrict(
 		if r.Header.Get("Authorization") != "Bearer override-key" {
 			t.Errorf("authorization: %q", r.Header.Get("Authorization"))
 		}
-		json.NewEncoder(w).Encode(map[string]any{"labels": []any{}})
+		json.NewEncoder(w).Encode(map[string]any{"verdicts": []any{}})
 	}))
 	defer server.Close()
 	client := NewClient("", WithServiceURL(server.URL), WithStrict(true))
@@ -131,7 +131,7 @@ func TestConfiguration_ReplayAPIKeyOverrideSendsAuthorizationAndSatisfiesStrict(
 	if !client.CaptureEnabled() {
 		t.Fatal("override did not enable capture")
 	}
-	if _, err := client.Labels.GetAll(context.Background(), []string{"trace"}); err != nil {
+	if _, err := client.Verdicts.GetAll(context.Background(), []string{"trace"}); err != nil {
 		t.Fatal(err)
 	}
 }

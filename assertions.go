@@ -185,9 +185,14 @@ type AssertionEvidenceParameter struct {
 	Type string `json:"type"`
 }
 
-// AssertionLabelEvidence is suggested assertion evidence enriched with the
+// AssertionLabelEvidence is suggested assertion evidence with its span context.
+//
+// Deprecated: Use AssertionVerdictEvidence instead.
+type AssertionLabelEvidence = AssertionVerdictEvidence
+
+// AssertionVerdictEvidence is suggested assertion evidence enriched with the
 // span context a judge needs to interpret it.
-type AssertionLabelEvidence struct {
+type AssertionVerdictEvidence struct {
 	SpanID      string                       `json:"spanId"`
 	Text        string                       `json:"text"`
 	SourceField string                       `json:"sourceField"`

@@ -112,7 +112,7 @@ func (c *Client) runSeed(ctx context.Context, key string, options SeedOptions, s
 }
 
 // ReseedTrace executes a stored case and adopts the successful fresh run under traceID.
-// The server preserves the case's dataset memberships and labels.
+// The server preserves the case's dataset memberships and verdicts.
 func (c *Client) ReseedTrace(ctx context.Context, key string, fn any, traceID string) (ReseedResult, error) {
 	endpoint := "/api/sdk/traces/" + url.PathEscape(traceID) + "/reseed"
 	var source struct {

@@ -154,8 +154,12 @@ type Client struct {
 	// Traces searches traces and reads or writes their assertions.
 	Traces *TracesClient
 	Spans  *SpansClient
-	// Labels reads and writes trace and assertion verdicts.
-	Labels *LabelsClient
+	// Verdicts reads and writes trace and assertion verdicts.
+	Verdicts *VerdictsClient
+	// Labels is the same client as Verdicts.
+	//
+	// Deprecated: Use Verdicts instead.
+	Labels *VerdictsClient
 	// Graders reads the individual verdicts recorded by automated graders.
 	Graders *GradersClient
 	// Experiments lists and reads replay runs and their rollups.
@@ -273,7 +277,8 @@ func NewClient(apiKey string, opts ...Option) *Client {
 	c.OrganizationMembers = &OrganizationMembersClient{httpClient: c.httpClient}
 	c.Traces = &TracesClient{httpClient: c.httpClient}
 	c.Spans = &SpansClient{httpClient: c.httpClient}
-	c.Labels = &LabelsClient{httpClient: c.httpClient}
+	c.Verdicts = &VerdictsClient{httpClient: c.httpClient}
+	c.Labels = c.Verdicts
 	c.Graders = &GradersClient{httpClient: c.httpClient}
 	c.Experiments = &ExperimentsClient{httpClient: c.httpClient}
 	startCommitRefResolution()

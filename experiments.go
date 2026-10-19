@@ -93,39 +93,45 @@ type ExperimentPage struct {
 // one replay per trace per attempt, Traces counts distinct traces, and Judging
 // counts traces, replays or originals, with an assertion verdict still being judged.
 type ExperimentTotals struct {
-	Total          int `json:"total"`
-	Traces         int `json:"traces"`
-	Succeeded      int `json:"succeeded"`
-	Failed         int `json:"failed"`
-	Pending        int `json:"pending"`
+	Total            int `json:"total"`
+	Traces           int `json:"traces"`
+	Succeeded        int `json:"succeeded"`
+	Failed           int `json:"failed"`
+	Pending          int `json:"pending"`
+	AwaitingVerdicts int `json:"awaitingVerdicts"`
+	Errored          int `json:"errored"`
+	WithErrors       int `json:"withErrors"`
+	Ungradable       int `json:"ungradable"`
+	Judging          int `json:"judging"`
+	Skipped          int `json:"skipped"`
+	// Deprecated: Use AwaitingVerdicts instead.
 	AwaitingLabels int `json:"awaitingLabels"`
-	Errored        int `json:"errored"`
-	WithErrors     int `json:"withErrors"`
-	Ungradable     int `json:"ungradable"`
-	Judging        int `json:"judging"`
-	Skipped        int `json:"skipped"`
 }
 
 // ExperimentTally counts verdicts against their originals. A trace or an
 // assertion passes when at least 75 percent of its attempts passed. Passing
 // and Failing count every verdict, so Passing / (Passing + Failing) is the pass rate.
 type ExperimentTally struct {
-	Fixed             int `json:"fixed"`
-	StillPassing      int `json:"stillPassing"`
-	Regressed         int `json:"regressed"`
-	StillFailing      int `json:"stillFailing"`
+	Fixed                  int `json:"fixed"`
+	StillPassing           int `json:"stillPassing"`
+	Regressed              int `json:"regressed"`
+	StillFailing           int `json:"stillFailing"`
+	OriginalWithoutVerdict int `json:"originalWithoutVerdict"`
+	Unpaired               int `json:"unpaired"`
+	Classified             int `json:"classified"`
+	Passing                int `json:"passing"`
+	Failing                int `json:"failing"`
+	Abstained              int `json:"abstained"`
+	// Deprecated: Use OriginalWithoutVerdict instead.
 	OriginalUnlabeled int `json:"originalUnlabeled"`
-	Unpaired          int `json:"unpaired"`
-	Classified        int `json:"classified"`
-	Passing           int `json:"passing"`
-	Failing           int `json:"failing"`
-	Abstained         int `json:"abstained"`
 }
 
 // ExperimentCategoryTally tallies the assertions in one category.
 type ExperimentCategoryTally struct {
 	Category CategorySummary `json:"category"`
-	Labels   ExperimentTally `json:"labels"`
+	Verdicts ExperimentTally `json:"verdicts"`
+	// Deprecated: Use Verdicts instead.
+	Labels ExperimentTally `json:"labels"`
 }
 
 // ExperimentJitter counts attempts whose own verdict disagreed with their
@@ -136,16 +142,18 @@ type ExperimentJitter struct {
 	Traces      int `json:"traces"`
 }
 
-// ExperimentRollup breaks a run down: Traces tallies replayed traces, Labels
+// ExperimentRollup breaks a run down: Traces tallies replayed traces, Verdicts
 // tallies scored assertions and graders, Checks tallies raw checks before the
 // pass threshold, and Categories tallies the assertions in each category.
 type ExperimentRollup struct {
 	Traces        ExperimentTally           `json:"traces"`
 	SkippedTraces int                       `json:"skippedTraces"`
-	Labels        ExperimentTally           `json:"labels"`
+	Verdicts      ExperimentTally           `json:"verdicts"`
 	Checks        ExperimentTally           `json:"checks"`
 	Categories    []ExperimentCategoryTally `json:"categories"`
 	Jitter        ExperimentJitter          `json:"jitter"`
+	// Deprecated: Use Verdicts instead.
+	Labels ExperimentTally `json:"labels"`
 }
 
 // ExperimentRollupResult is one run's totals and rollup.

@@ -25,19 +25,20 @@ func experimentJSON(id string) map[string]any {
 
 func experimentRollupJSON(id string) map[string]any {
 	tally := map[string]any{
-		"fixed": 1, "stillPassing": 2, "regressed": 3, "stillFailing": 4, "originalUnlabeled": 5,
+		"fixed": 1, "stillPassing": 2, "regressed": 3, "stillFailing": 4, "originalWithoutVerdict": 5, "originalUnlabeled": 5,
 		"unpaired": 6, "classified": 7, "passing": 8, "failing": 9,
 	}
 	return map[string]any{
 		"experimentId": id,
 		"totals": map[string]any{
-			"total": 12, "succeeded": 10, "failed": 1, "pending": 0, "awaitingLabels": 0,
+			"total": 12, "succeeded": 10, "failed": 1, "pending": 0, "awaitingVerdicts": 4, "awaitingLabels": 4,
 			"errored": 1, "withErrors": 1, "ungradable": 0, "judging": 2, "skipped": 0,
 		},
 		"rollup": map[string]any{
-			"traces": tally, "skippedTraces": 1, "labels": tally, "checks": tally,
+			"traces": tally, "skippedTraces": 1, "verdicts": tally, "labels": tally, "checks": tally,
 			"categories": []any{map[string]any{
 				"category": map[string]any{"id": "category-1", "title": "Safety", "description": "no invented ids"},
+				"verdicts": tally,
 				"labels":   tally,
 			}},
 			"jitter": map[string]any{"disagreeing": 2, "attempts": 30, "traces": 12},
@@ -144,9 +145,11 @@ func TestExperiments_GetRollup(t *testing.T) {
 	}
 	if rollup.ExperimentID != "experiment-1" || rollup.Totals.Total != 12 || rollup.Totals.Succeeded != 10 || rollup.Totals.Judging != 2 ||
 		rollup.Rollup.Traces.Passing != 8 || rollup.Rollup.Traces.Failing != 9 || rollup.Rollup.SkippedTraces != 1 ||
-		rollup.Rollup.Labels.Fixed != 1 || rollup.Rollup.Checks.OriginalUnlabeled != 5 ||
+		rollup.Totals.AwaitingVerdicts != 4 || rollup.Totals.AwaitingLabels != 4 ||
+		rollup.Rollup.Verdicts.Fixed != 1 || rollup.Rollup.Labels.Fixed != 1 ||
+		rollup.Rollup.Checks.OriginalWithoutVerdict != 5 || rollup.Rollup.Checks.OriginalUnlabeled != 5 ||
 		len(rollup.Rollup.Categories) != 1 || rollup.Rollup.Categories[0].Category.Title != "Safety" ||
-		rollup.Rollup.Categories[0].Labels.Regressed != 3 || rollup.Rollup.Jitter.Disagreeing != 2 ||
+		rollup.Rollup.Categories[0].Verdicts.Regressed != 3 || rollup.Rollup.Categories[0].Labels.Regressed != 3 || rollup.Rollup.Jitter.Disagreeing != 2 ||
 		rollup.Rollup.Jitter.Attempts != 30 || rollup.Rollup.Jitter.Traces != 12 {
 		t.Fatalf("rollup = %+v", rollup)
 	}
