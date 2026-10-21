@@ -189,6 +189,11 @@ func Transform(fset *token.FileSet, file *ast.File, importPath string, info *typ
 		})
 	}
 	replaceGo(file)
+	jevHelpers, err := rewriteJevCalls(fset, file, info, alias, fresh, fmt.Sprintf("__bitfabJev_%x", fileHash.Sum64()))
+	if err != nil {
+		return nil, err
+	}
+	helperDecls = append(helperDecls, jevHelpers...)
 	count := 0
 	contextAliases := map[string]bool{}
 	for _, imp := range file.Imports {
@@ -212,7 +217,7 @@ func Transform(fset *token.FileSet, file *ast.File, importPath string, info *typ
 				comments += comment.Text + "\n"
 			}
 		}
-		if strings.Contains(comments, "bitfab:ignore") || strings.Contains(comments, "go:nosplit") {
+		if strings.Contains(comments, "bitfab:ignore") || strings.Contains(comments, "go:nosplit") || isJevMethodDecl(fn, contextAliases) {
 			continue
 		}
 		name := fn.Name.Name

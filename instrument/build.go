@@ -127,7 +127,7 @@ func OverlayWithOptions(dir string, options ListOptions) (overlay string, cleanu
 		if len(files) == 0 {
 			continue
 		}
-		info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}}
+		info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
 		arch := os.Getenv("GOARCH")
 		if arch == "" {
 			arch = runtime.GOARCH
@@ -142,11 +142,16 @@ func OverlayWithOptions(dir string, options ListOptions) (overlay string, cleanu
 			return "", nil, fmt.Errorf("type-check %s: %w", pkg.ImportPath, err)
 		}
 		compiledGoCalls := map[string][]*ast.GoStmt{}
+		compiledJevCalls := map[string][]*ast.SelectorExpr{}
 		for _, file := range files {
 			ast.Inspect(file, func(n ast.Node) bool {
 				if call, ok := n.(*ast.GoStmt); ok {
 					name := canonicalSourcePath(fset.Position(call.Pos()).Filename)
 					compiledGoCalls[name] = append(compiledGoCalls[name], call)
+				}
+				if selector := jevCallSelector(n); selector != nil {
+					name := canonicalSourcePath(fset.Position(selector.Pos()).Filename)
+					compiledJevCalls[name] = append(compiledJevCalls[name], selector)
 				}
 				return true
 			})
@@ -162,7 +167,7 @@ func OverlayWithOptions(dir string, options ListOptions) (overlay string, cleanu
 			if ast.IsGenerated(file) {
 				continue
 			}
-			mappedInfo, err := mapCompiledCallTypes(file, compiledGoCalls[canonicalSourcePath(name)], info)
+			mappedInfo, err := mapCompiledCallTypes(file, compiledGoCalls[canonicalSourcePath(name)], compiledJevCalls[canonicalSourcePath(name)], info)
 			if err != nil {
 				return "", nil, fmt.Errorf("map compiler types for %s: %w", name, err)
 			}
@@ -200,15 +205,27 @@ func canonicalSourcePath(name string) string {
 // Cgo rewrites C expressions before Go type-checking. Match the unchanged Go
 // launch order back to the original source so we never fake C types or emit
 // compiler-generated cgo source into the user's files.
-func mapCompiledCallTypes(file *ast.File, compiled []*ast.GoStmt, info *types.Info) (*types.Info, error) {
-	mapped := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}}
+func mapCompiledCallTypes(file *ast.File, compiled []*ast.GoStmt, compiledJev []*ast.SelectorExpr, info *types.Info) (*types.Info, error) {
+	mapped := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
 	var calls []*ast.GoStmt
+	var jevCalls []*ast.SelectorExpr
 	ast.Inspect(file, func(n ast.Node) bool {
 		if call, ok := n.(*ast.GoStmt); ok {
 			calls = append(calls, call)
 		}
+		if selector := jevCallSelector(n); selector != nil {
+			jevCalls = append(jevCalls, selector)
+		}
 		return true
 	})
+	if len(jevCalls) != len(compiledJev) {
+		return nil, fmt.Errorf("source has %d %s calls, compiler has %d", len(jevCalls), jevMethodName, len(compiledJev))
+	}
+	for i, selector := range jevCalls {
+		if selection := info.Selections[compiledJev[i]]; selection != nil {
+			mapped.Selections[selector] = selection
+		}
+	}
 	if len(calls) != len(compiled) {
 		return nil, fmt.Errorf("source has %d goroutine launches, compiler has %d", len(calls), len(compiled))
 	}

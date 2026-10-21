@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // AutoFunctionSymbol resolves the actual compiled symbol for generated code.
@@ -31,11 +32,55 @@ type AutoNode struct {
 	value    any
 	err      error
 	once     sync.Once
+	llm      *autoLLMCall
+}
+
+type autoLLMCall struct {
+	startedAt  time.Time
+	claim      *jevClaim
+	inner      *jevClaim
+	enrichment *spanEnrichment
 }
 
 // EnterAutoNode is called by generated first-party function prologues. Application
 // code configures these functions with Client.Node and enters with Client.Trace.
 func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []any, wrapper ...bool) *AutoNode {
+	return enterAutoNode(ctx, symbol, name, inputs, outputs, len(wrapper) > 0 && wrapper[0], "function")
+}
+
+// EnterAutoLLMCall is called by generated helpers that bitfab-instrument puts
+// around a SystemOne method call. fn is the method value being called and ctx
+// its context argument. The call is recorded as one llm span, and a reply that
+// looks like Jev's adds the same context entry as WrapJev.
+func EnterAutoLLMCall(fn any, ctx any, name string, inputs, outputs []any) *AutoNode {
+	callCtx, _ := ctx.(context.Context)
+	startedAt := time.Now()
+	node := enterAutoNode(callCtx, autoCallSymbol(fn, name), name, inputs, outputs, false, "llm")
+	if node == nil {
+		return nil
+	}
+	if node.llm != nil {
+		node.llm.startedAt = startedAt
+		if callCtx != nil {
+			node.llm.claim, _ = callCtx.Value(jevClaimKey{}).(*jevClaim)
+		}
+		node.llm.inner = &jevClaim{}
+		node.ctx = context.WithValue(node.ctx, jevClaimKey{}, node.llm.inner)
+	}
+	return node
+}
+
+func autoCallSymbol(fn any, fallback string) string {
+	value := reflect.ValueOf(fn)
+	if value.Kind() == reflect.Func && !value.IsNil() {
+		if f := runtime.FuncForPC(value.Pointer()); f != nil {
+			return normalizeAutoSymbol(f.Name())
+		}
+	}
+	return normalizeAutoSymbol(fallback)
+}
+
+func enterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []any, wrapper bool, defaultKind string) *AutoNode {
 	if inputs == nil {
 		inputs = []any{}
 	}
@@ -78,7 +123,7 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		opts, configured := frame.root.client.nodeOptions(symbol)
 		replay := currentReplayContext(frame.root.ctx)
 		selective := replay != nil && replay.selective != nil
-		hiddenWrapper := len(wrapper) > 0 && wrapper[0] && !configured && !frame.root.opts.IncludeWrappers
+		hiddenWrapper := wrapper && !configured && !frame.root.opts.IncludeWrappers
 		hiddenNode := opts.Capture != nil && !*opts.Capture
 		if !selective && hiddenWrapper {
 			droppedByLimit = false
@@ -88,7 +133,10 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 			droppedByLimit = false
 			continue
 		}
-		nodeName, kind := name, "function"
+		nodeName, kind := name, defaultKind
+		if configured && defaultKind == "function" {
+			kind = "custom"
+		}
 		if opts.Name != "" {
 			nodeName = opts.Name
 		}
@@ -169,6 +217,9 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		node.ctx, enrichment = withSpanEnrichment(node.ctx, frame.parent.id)
 		for _, record := range node.records {
 			record.enrichment = enrichment
+		}
+		if defaultKind == "llm" {
+			node.llm = &autoLLMCall{enrichment: enrichment}
 		}
 	} else if frame.parent.enrichment != nil {
 		node.ctx = context.WithValue(node.ctx, spanEnrichmentKey{}, frame.parent.enrichment)
@@ -260,10 +311,34 @@ func (n *AutoNode) End(panicValue any) {
 		if panicValue != nil {
 			err = fmt.Errorf("panic: %v", panicValue)
 		}
+		if err == nil && n.llm != nil {
+			n.llm.record(output)
+		}
 		finalize := n.finalize
 		if n.mocked {
 			finalize = nil
 		}
 		finishAutoRecords(n.records, output, err, finalize)
 	})
+}
+
+func (call *autoLLMCall) record(reply any) {
+	defer func() { recover() }()
+	if call.inner != nil && call.inner.recorded.Load() {
+		call.markEnclosing()
+		return
+	}
+	fields := jevReplyFields(reply)
+	if !looksLikeJevReply(fields) {
+		return
+	}
+	entry := jevContextFromFields(fields, time.Since(call.startedAt).Milliseconds())
+	(&CurrentSpan{enrichment: call.enrichment}).AddContext(entry)
+	call.markEnclosing()
+}
+
+func (call *autoLLMCall) markEnclosing() {
+	if call.claim != nil {
+		call.claim.recorded.Store(true)
+	}
 }

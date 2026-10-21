@@ -110,9 +110,6 @@ func (c *Client) Node(fn any, opts NodeOptions) error {
 		return err
 	}
 	opts.ExperimentID, opts.TestRunID = experimentID, experimentID
-	if opts.Type == "" {
-		opts.Type = "custom"
-	}
 	symbol, err := autoSymbol(fn)
 	if err != nil {
 		return err
