@@ -144,7 +144,7 @@ const (
 )
 
 // AssertionRewrite reports how Bitfab checked one saved assertion's text
-// against its trace and what it changed. The check runs in the background
+// against the writing rules and what it changed. The check runs in the background
 // after the save, so a save returns it as pending, and GetAssertions reads the
 // finished report.
 type AssertionRewrite struct {
@@ -340,8 +340,8 @@ type SaveAssertionsParams struct {
 	Assertions []SaveAssertion
 	Source     TraceAssertionSource
 	// SkipGuidedRewrite saves each assertion's text exactly as sent, with no
-	// check. By default Bitfab checks the text against its trace in the
-	// background after the save and, when it bundles two claims, hides a
+	// check. By default Bitfab checks the text against the writing rules
+	// in the background after the save and, when it bundles two claims, hides a
 	// condition, points at a value instead of stating it, names an id from the
 	// recorded run, or cannot be measured, rewrites it in place.
 	SkipGuidedRewrite bool
@@ -352,8 +352,8 @@ type SaveAssertionsAllParams struct {
 	Updates []TraceAssertionsUpdate
 	Source  TraceAssertionSource
 	// SkipGuidedRewrite saves each assertion's text exactly as sent, with no
-	// check. By default Bitfab checks the text against its trace in the
-	// background after the save and, when it bundles two claims, hides a
+	// check. By default Bitfab checks the text against the writing rules
+	// in the background after the save and, when it bundles two claims, hides a
 	// condition, points at a value instead of stating it, names an id from the
 	// recorded run, or cannot be measured, rewrites it in place.
 	SkipGuidedRewrite bool
@@ -392,8 +392,9 @@ func (t *TracesClient) SaveAssertions(ctx context.Context, params SaveAssertions
 // assertions in total. The server validates and saves the whole batch
 // atomically, with the text as sent, and the call returns once it is saved.
 // Unless SkipGuidedRewrite is set, each assertion that carries text comes back
-// with Rewrite.Status AssertionRewritePending, and Bitfab checks it against its
-// trace in the background and rewrites it in place, usually within a minute.
+// with Rewrite.Status AssertionRewritePending, and Bitfab checks it against the
+// writing rules in the background and rewrites it in place when it breaks one,
+// usually within a minute.
 // Read the result later with GetAssertions, whose rows carry Rewrite, and save
 // each of its SeparateAssertions as its own assertion. The assertions come back
 // in the order sent. An empty update list returns an empty slice without a
