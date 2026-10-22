@@ -71,11 +71,133 @@ type ScenarioHistoryEntry struct {
 	Source        *ScenarioSource     `json:"source,omitempty"`
 }
 
+// ScenarioRecordInput is one record your own systems hold that relates to the
+// run, such as a message, a memory, or an order, as sent to SaveScenario.
+// Kind is any name for the kind of record, such as "memory" or "order", and Ref
+// is your own pointer to it, such as "Memory:812". At is when the record came
+// to exist as an ISO 8601 time, or nil. AsOf is "run" when the record is as it
+// was at the run, or "now" when no history is kept for it. Quote is the exact
+// text Bitfab looks for in the run's spans, or nil to look for Text instead.
+type ScenarioRecordInput struct {
+	Kind  string  `json:"kind"`
+	Ref   string  `json:"ref"`
+	At    *string `json:"at"`
+	AsOf  string  `json:"asOf"`
+	Title string  `json:"title"`
+	Text  string  `json:"text"`
+	Quote *string `json:"quote"`
+}
+
+// ScenarioRecord is a saved record. Source is the span Bitfab found it in, or
+// nil when it shows up in none of the run's spans.
+type ScenarioRecord struct {
+	ScenarioRecordInput
+	Source *ScenarioSource `json:"source"`
+}
+
+// ScenarioDataSources says where a scenario's records came from: when the run
+// started, when its data was captured, how many days each windowed kind
+// reaches, and how fully each kind of data was read.
+type ScenarioDataSources struct {
+	FrameAt    string                      `json:"frameAt"`
+	CapturedAt *string                     `json:"capturedAt"`
+	Windows    map[string]float64          `json:"windows"`
+	Coverage   ScenarioDataSourcesCoverage `json:"coverage"`
+}
+
+// MarshalJSON sends a nil Windows as an empty object.
+func (sources ScenarioDataSources) MarshalJSON() ([]byte, error) {
+	type wire ScenarioDataSources
+	if sources.Windows == nil {
+		sources.Windows = map[string]float64{}
+	}
+	return json.Marshal(wire(sources))
+}
+
+// ScenarioDataSourcesCoverage says how fully each kind of data was read.
+// CalendarExcludedCount is left out when nil. Extra carries any other keys,
+// sent and read beside the named ones.
+type ScenarioDataSourcesCoverage struct {
+	CalendarExcludedCount *int                  `json:"calendarExcludedCount,omitempty"`
+	FilledColumns         ScenarioFilledColumns `json:"filledColumns"`
+	Extra                 map[string]any        `json:"-"`
+}
+
+// MarshalJSON sends Extra's keys beside the named fields.
+func (coverage ScenarioDataSourcesCoverage) MarshalJSON() ([]byte, error) {
+	type wire ScenarioDataSourcesCoverage
+	named, err := json.Marshal(wire(coverage))
+	if err != nil {
+		return nil, err
+	}
+	if len(coverage.Extra) == 0 {
+		return named, nil
+	}
+	merged := map[string]any{}
+	for key, value := range coverage.Extra {
+		merged[key] = value
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(named, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range fields {
+		merged[key] = value
+	}
+	return json.Marshal(merged)
+}
+
+// UnmarshalJSON reads the named fields and keeps every other key in Extra.
+func (coverage *ScenarioDataSourcesCoverage) UnmarshalJSON(data []byte) error {
+	type wire ScenarioDataSourcesCoverage
+	var named wire
+	if err := json.Unmarshal(data, &named); err != nil {
+		return err
+	}
+	var extra map[string]any
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	delete(extra, "calendarExcludedCount")
+	delete(extra, "filledColumns")
+	*coverage = ScenarioDataSourcesCoverage(named)
+	if len(extra) > 0 {
+		coverage.Extra = extra
+	}
+	return nil
+}
+
+// ScenarioFilledColumns names the columns that were read with a filled-in
+// value: nullable columns that were absent, and non-nullable columns that fell
+// back to their default.
+type ScenarioFilledColumns struct {
+	AbsentNullable       []string `json:"absentNullable"`
+	DefaultedNonNullable []string `json:"defaultedNonNullable"`
+}
+
+// MarshalJSON sends nil lists as empty lists.
+func (columns ScenarioFilledColumns) MarshalJSON() ([]byte, error) {
+	type wire ScenarioFilledColumns
+	if columns.AbsentNullable == nil {
+		columns.AbsentNullable = []string{}
+	}
+	if columns.DefaultedNonNullable == nil {
+		columns.DefaultedNonNullable = []string{}
+	}
+	return json.Marshal(wire(columns))
+}
+
 type ScenarioData struct {
 	HasHistory bool                   `json:"hasHistory"`
 	Topic      string                 `json:"topic"`
 	History    []ScenarioHistoryEntry `json:"history"`
 	Missing    []string               `json:"missing"`
+	// Records are the scenario's saved records, nil when none have been saved.
+	// To save new records, send them with SaveScenarioParams.Records, which
+	// matches each record to the span it shows up in.
+	Records []ScenarioRecord `json:"records,omitempty"`
+	// Sources says where the records came from, nil when not saved.
+	Sources *ScenarioDataSources `json:"sources,omitempty"`
 }
 
 func (data ScenarioData) MarshalJSON() ([]byte, error) {
@@ -158,12 +280,16 @@ type Scenario struct {
 }
 
 type SaveScenarioParams struct {
-	TraceID     string              `json:"-"`
-	Name        *string             `json:"name,omitempty"`
-	Description *string             `json:"description,omitempty"`
-	Trigger     *ScenarioTrigger    `json:"trigger,omitempty"`
-	Data        *ScenarioData       `json:"data,omitempty"`
-	AppendData  *ScenarioDataAppend `json:"appendData,omitempty"`
+	TraceID     string           `json:"-"`
+	Name        *string          `json:"name,omitempty"`
+	Description *string          `json:"description,omitempty"`
+	Trigger     *ScenarioTrigger `json:"trigger,omitempty"`
+	// Data replaces the scenario's data whole, apart from its records. Its
+	// Records and Sources are left out of the request and the saved ones are
+	// kept, so data read back from GetScenario can be sent as it is. Use
+	// Records to replace the saved records.
+	Data       *ScenarioData       `json:"data,omitempty"`
+	AppendData *ScenarioDataAppend `json:"appendData,omitempty"`
 	// ActualOutcome replaces the saved actual outcome whole. Nil leaves the
 	// saved one untouched.
 	ActualOutcome *ScenarioActualOutcome `json:"actualOutcome,omitempty"`
@@ -177,9 +303,27 @@ type SaveScenarioParams struct {
 	// ClearCategoryIDs files the scenario under no categories by sending an
 	// empty list. Setting it together with CategoryIDs is refused.
 	ClearCategoryIDs bool `json:"-"`
+	// Records replaces the scenario's records whole. Bitfab looks for each
+	// record's Quote, or failing that its Text, in the run's spans and saves
+	// the span it shows up in. Nil leaves the saved records untouched, and a
+	// non-nil empty slice saves no records. Records are saved on their own,
+	// with only Sources beside them, so setting any other field with them is
+	// refused. A non-empty list is refused while the scenario's trigger is empty.
+	Records []ScenarioRecordInput `json:"-"`
+	// Sources says where the records came from and is sent only with Records.
+	// Leaving it nil while saving Records clears the saved sources.
+	Sources *ScenarioDataSources `json:"sources,omitempty"`
 }
 
 func (update SaveScenarioParams) payload() (map[string]any, error) {
+	if update.Sources != nil && update.Records == nil {
+		return nil, errors.New("bitfab: scenario sources can only be saved together with records")
+	}
+	if update.Records != nil && (update.Name != nil || update.Description != nil || update.Trigger != nil ||
+		update.Data != nil || update.AppendData != nil || update.ActualOutcome != nil || update.ClearActualOutcome ||
+		update.CategoryIDs != nil || update.ClearCategoryIDs) {
+		return nil, errors.New("bitfab: scenario records must be saved on their own, with only sources beside them")
+	}
 	if update.Data != nil && update.AppendData != nil {
 		return nil, errors.New("bitfab: a scenario update cannot replace and append data together")
 	}
@@ -194,8 +338,14 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 	}
 	if update.Name == nil && update.Description == nil && update.Trigger == nil && update.Data == nil &&
 		update.AppendData == nil && update.ActualOutcome == nil && !update.ClearActualOutcome &&
-		update.CategoryIDs == nil && !update.ClearCategoryIDs {
-		return nil, errors.New("bitfab: a scenario update must set at least one of name, description, trigger, data, appendData, actualOutcome, or categoryIds")
+		update.CategoryIDs == nil && !update.ClearCategoryIDs && update.Records == nil {
+		return nil, errors.New("bitfab: a scenario update must set at least one of name, description, trigger, data, appendData, actualOutcome, categoryIds, or records")
+	}
+	if update.Data != nil {
+		data := *update.Data
+		data.Records = nil
+		data.Sources = nil
+		update.Data = &data
 	}
 	encoded, err := json.Marshal(update)
 	if err != nil {
@@ -212,6 +362,9 @@ func (update SaveScenarioParams) payload() (map[string]any, error) {
 		payload["categoryIds"] = []string{}
 	} else if update.CategoryIDs != nil {
 		payload["categoryIds"] = update.CategoryIDs
+	}
+	if update.Records != nil {
+		payload["records"] = update.Records
 	}
 	return payload, nil
 }

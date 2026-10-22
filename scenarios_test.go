@@ -331,3 +331,142 @@ func TestScenarios_SaveLeavesOutCategoryIDsWhenOmitted(t *testing.T) {
 		t.Fatalf("body = %#v, want no categoryIds", server.recorded()[0].body)
 	}
 }
+
+func TestScenarios_SaveSendsRecordsAndSources(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	at := "2026-09-30T08:00:00.000Z"
+	quote := "prefers aisle seats"
+	captured := "2026-10-01T12:00:00.000Z"
+	excluded := 2
+	_, err := client.Traces.SaveScenario(context.Background(), SaveScenarioParams{
+		TraceID: "trace-1",
+		Records: []ScenarioRecordInput{
+			{Kind: "memory", Ref: "Memory:812", At: &at, AsOf: "run", Title: "Seat", Text: "Ann prefers aisle seats", Quote: &quote},
+			{Kind: "order", Ref: "Order:7", AsOf: "now", Title: "Booking", Text: "UA 12"},
+		},
+		Sources: &ScenarioDataSources{
+			FrameAt:    "2026-10-01T11:59:00.000Z",
+			CapturedAt: &captured,
+			Windows:    map[string]float64{"memory": 30},
+			Coverage: ScenarioDataSourcesCoverage{
+				CalendarExcludedCount: &excluded,
+				FilledColumns:         ScenarioFilledColumns{AbsentNullable: []string{"memory.note"}},
+				Extra:                 map[string]any{"orders": "full"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"records": []any{
+			map[string]any{
+				"kind": "memory", "ref": "Memory:812", "at": at, "asOf": "run", "title": "Seat",
+				"text": "Ann prefers aisle seats", "quote": quote,
+			},
+			map[string]any{
+				"kind": "order", "ref": "Order:7", "at": nil, "asOf": "now", "title": "Booking",
+				"text": "UA 12", "quote": nil,
+			},
+		},
+		"sources": map[string]any{
+			"frameAt": "2026-10-01T11:59:00.000Z", "capturedAt": captured,
+			"windows": map[string]any{"memory": float64(30)},
+			"coverage": map[string]any{
+				"calendarExcludedCount": float64(2),
+				"filledColumns":         map[string]any{"absentNullable": []any{"memory.note"}, "defaultedNonNullable": []any{}},
+				"orders":                "full",
+			},
+		},
+	}
+	if body := server.recorded()[0].body; !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
+func TestScenarios_SaveLeavesRecordsOutOfData(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Traces.SaveScenario(context.Background(), SaveScenarioParams{
+		TraceID: "trace-1",
+		Data: &ScenarioData{
+			Topic:   "travel",
+			Records: []ScenarioRecord{{ScenarioRecordInput: ScenarioRecordInput{Kind: "memory", Ref: "Memory:1"}}},
+			Sources: &ScenarioDataSources{FrameAt: "2026-10-01T12:00:00Z"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"hasHistory": false, "topic": "travel", "history": []any{}, "missing": []any{}}
+	if body := server.recorded()[0].body; !reflect.DeepEqual(body["data"], want) {
+		t.Fatalf("data = %#v, want %#v", body["data"], want)
+	}
+}
+
+func TestScenarios_SaveSendsEmptyRecords(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Traces.SaveScenario(context.Background(), SaveScenarioParams{
+		TraceID: "trace-1", Records: []ScenarioRecordInput{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"records": []any{}}
+	if body := server.recorded()[0].body; !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
+func TestScenarios_SaveRefusesRecordsMixedWithOtherFields(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any { return testScenarioResponse() })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	name := "Late flight"
+	updates := map[string]SaveScenarioParams{
+		"sourcesWithoutRecords": {Sources: &ScenarioDataSources{FrameAt: "2026-10-01T11:59:00.000Z"}},
+		"recordsWithName":       {Records: []ScenarioRecordInput{}, Name: &name},
+		"recordsWithData":       {Records: []ScenarioRecordInput{}, Data: &ScenarioData{Topic: "travel"}},
+		"recordsWithClearIDs":   {Records: []ScenarioRecordInput{}, ClearCategoryIDs: true},
+	}
+	for name, update := range updates {
+		update.TraceID = "trace-1"
+		if _, err := client.Traces.SaveScenario(context.Background(), update); err == nil {
+			t.Fatalf("%s: expected an error", name)
+		}
+	}
+	if len(server.recorded()) != 0 {
+		t.Fatalf("requests = %+v", server.recorded())
+	}
+}
+
+func TestScenarios_GetDecodesRecordsAndSources(t *testing.T) {
+	response := testScenarioResponse()
+	data := response["scenario"].(map[string]any)["data"].(map[string]any)
+	data["records"] = []any{map[string]any{
+		"kind": "memory", "ref": "Memory:812", "at": nil, "asOf": "now", "title": "Seat", "text": "aisle",
+		"quote": nil, "source": map[string]any{"spanId": "span-1", "sourceField": "input", "text": "aisle"},
+	}}
+	data["sources"] = map[string]any{
+		"frameAt": "2026-10-01T11:59:00.000Z", "capturedAt": nil, "windows": map[string]any{"memory": 30},
+		"coverage": map[string]any{
+			"filledColumns": map[string]any{"absentNullable": []any{}, "defaultedNonNullable": []any{"order.status"}},
+			"orders":        "full",
+		},
+	}
+	server := newDatasetsServer(t, func(datasetRequest) any { return response })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	scenario, err := client.Traces.GetScenario(context.Background(), "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := scenario.Data.Records
+	if len(records) != 1 || records[0].Ref != "Memory:812" || records[0].Source == nil || records[0].Source.SpanID != "span-1" {
+		t.Fatalf("records = %+v", records)
+	}
+	sources := scenario.Data.Sources
+	if sources == nil || sources.Windows["memory"] != 30 || sources.CapturedAt != nil ||
+		!reflect.DeepEqual(sources.Coverage.FilledColumns.DefaultedNonNullable, []string{"order.status"}) ||
+		!reflect.DeepEqual(sources.Coverage.Extra, map[string]any{"orders": "full"}) {
+		t.Fatalf("sources = %+v", sources)
+	}
+}
