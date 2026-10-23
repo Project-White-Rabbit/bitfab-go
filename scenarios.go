@@ -383,6 +383,43 @@ func (t *TracesClient) GetScenario(ctx context.Context, traceID string) (*Scenar
 	return &response.Scenario, nil
 }
 
+// ScenarioGenerationStatus says what GenerateScenario started.
+type ScenarioGenerationStatus string
+
+const (
+	// ScenarioGenerationStarted means Bitfab is building the scenario in the
+	// background. Read it later with GetScenario.
+	ScenarioGenerationStarted ScenarioGenerationStatus = "started"
+	// ScenarioGenerationAlreadyGenerated means the trace already has a
+	// scenario, so nothing was started and ScenarioID names it.
+	ScenarioGenerationAlreadyGenerated ScenarioGenerationStatus = "already_generated"
+)
+
+// ScenarioGeneration is what GenerateScenario returns. ScenarioID is nil while
+// the trace has no scenario yet.
+type ScenarioGeneration struct {
+	Status     ScenarioGenerationStatus `json:"status"`
+	TraceID    string                   `json:"traceId"`
+	ScenarioID *string                  `json:"scenarioId"`
+}
+
+// GenerateScenario starts building the scenario for one trace and returns at
+// once, without waiting for it. Read it later with GetScenario. A trace that
+// already has a scenario is left as it is. A replay, a trace outside the
+// organization, or a trace Bitfab cannot build a scenario for (not
+// noah-agent-turn and no scenario callback) returns an error. Adding a trace
+// to a dataset starts the same build only when the organization has a
+// scenario callback.
+func (t *TracesClient) GenerateScenario(ctx context.Context, traceID string) (*ScenarioGeneration, error) {
+	var response struct {
+		Generation ScenarioGeneration `json:"generation"`
+	}
+	if err := t.httpClient.requestInto(ctx, traceScenarioPath(traceID)+"/generate", map[string]any{}, &response); err != nil {
+		return nil, err
+	}
+	return &response.Generation, nil
+}
+
 func (t *TracesClient) SaveScenario(ctx context.Context, params SaveScenarioParams) (*Scenario, error) {
 	payload, err := params.payload()
 	if err != nil {

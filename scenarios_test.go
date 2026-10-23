@@ -100,6 +100,26 @@ func TestScenarios_GetDecodesMissingActualOutcomeAsNil(t *testing.T) {
 	}
 }
 
+func TestScenarios_GenerateStartsOnTheTracePathAndReturnsAtOnce(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"generation": map[string]any{
+			"status": "started", "traceId": "trace-1", "scenarioId": nil,
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	generation, err := client.Traces.GenerateScenario(context.Background(), "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := server.recorded()[0]
+	if request.method != http.MethodPost || request.path != "/api/sdk/traces/trace-1/scenario/generate" || len(request.body) != 0 {
+		t.Fatalf("request = %+v", request)
+	}
+	if generation.Status != ScenarioGenerationStarted || generation.TraceID != "trace-1" || generation.ScenarioID != nil {
+		t.Fatalf("generation = %+v", generation)
+	}
+}
+
 func TestScenarios_GetNotFoundIsAStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"Scenario not found"}`, http.StatusNotFound)
