@@ -26,9 +26,9 @@ func TestOverlay_RecordsSystemOneCallsAsLlmSpans(t *testing.T) {
 	}
 	client := filepath.Join(dir, "jevclient")
 	app := filepath.Join(dir, "app")
-	writeFixtureFile(t, filepath.Join(client, "go.mod"), "module example.com/jevclient\n\ngo 1.25.0\n")
+	writeFixtureFile(t, filepath.Join(client, "go.mod"), "module example.com/jevclient\n\ngo 1.26.0\n")
 	writeFixtureFile(t, filepath.Join(client, "client.go"), jevClientPackage)
-	module := "module example.com/jevapp\n\ngo 1.25.0\n\nrequire (\n\t" + SDKImport + " v0.0.0\n\texample.com/jevclient v0.0.0\n)\n\nreplace " + SDKImport + " => " + sdk + "\n\nreplace example.com/jevclient => " + client + "\n"
+	module := "module example.com/jevapp\n\ngo 1.26.0\n\nrequire (\n\t" + SDKImport + " v0.0.0\n\texample.com/jevclient v0.0.0\n)\n\nreplace " + SDKImport + " => " + sdk + "\n\nreplace example.com/jevclient => " + client + "\n"
 	writeFixtureFile(t, filepath.Join(app, "go.mod"), module)
 	writeFixtureFile(t, filepath.Join(app, "main.go"), jevApplication)
 	writeFixtureFile(t, filepath.Join(app, "main_test.go"), "package main\nimport \"testing\"\nfunc TestGenerated(t *testing.T) { main() }\n")

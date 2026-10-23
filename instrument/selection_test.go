@@ -16,7 +16,7 @@ func TestOverlaySelectsTaggedPackageWithoutUnrelatedTests(t *testing.T) {
 		t.Fatal(err)
 	}
 	sources := map[string]string{
-		"go.mod":                 "module example.com/selection\n\ngo 1.25.0\n\nrequire " + SDKImport + " v0.0.0\nreplace " + SDKImport + " => " + sdk + "\n",
+		"go.mod":                 "module example.com/selection\n\ngo 1.26.0\n\nrequire " + SDKImport + " v0.0.0\nreplace " + SDKImport + " => " + sdk + "\n",
 		"broken/unrelated.go":    "package broken\nthis is not Go\n",
 		"cmd/app/main.go":        "package main\nimport bitfab \"" + SDKImport + "\"\nfunc main(){ _=bitfab.Version; helper() }\n",
 		"cmd/app/default.go":     "//go:build !custom\n\npackage main\nfunc helper() int{return 1}\n",

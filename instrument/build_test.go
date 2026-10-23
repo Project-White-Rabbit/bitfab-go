@@ -15,7 +15,7 @@ func TestOverlay_CompilesAutomaticSubtreeAndPreservesGoSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module := "module example.com/automatic\n\ngo 1.25.0\n\nrequire " + SDKImport + " v0.0.0\n\nreplace " + SDKImport + " => " + sdk + "\n"
+	module := "module example.com/automatic\n\ngo 1.26.0\n\nrequire " + SDKImport + " v0.0.0\n\nreplace " + SDKImport + " => " + sdk + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}
