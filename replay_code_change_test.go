@@ -382,6 +382,9 @@ func TestReplaySkipSendsNoCodeChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
+	if body["codeChangeType"] != "skip" {
+		t.Fatalf("code change type = %#v", body["codeChangeType"])
+	}
 	if _, present := body["codeChangeFiles"]; present {
 		t.Fatalf("start body = %#v", body)
 	}
@@ -402,7 +405,7 @@ func TestReplayManualSendsCallerFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
-	if body["codeChangeDescription"] != "shorter prompt" {
+	if body["codeChangeType"] != "manual" || body["codeChangeDescription"] != "shorter prompt" {
 		t.Fatalf("start body = %#v", body)
 	}
 	files := body["codeChangeFiles"].([]any)
@@ -437,6 +440,9 @@ func TestReplayWorkingTreeSendsUncommittedChanges(t *testing.T) {
 	}
 	if body["codeChangeDescription"] != "candidate (1 file changed uncommitted (vs HEAD))" {
 		t.Fatalf("description = %#v", body["codeChangeDescription"])
+	}
+	if body["codeChangeType"] != "working-tree" {
+		t.Fatalf("code change type = %#v", body["codeChangeType"])
 	}
 }
 

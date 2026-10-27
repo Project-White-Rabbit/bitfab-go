@@ -840,6 +840,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if len(options.Metadata) > 0 {
 		payload["metadata"] = options.Metadata
 	}
+	if options.CodeChange != "" {
+		payload["codeChangeType"] = string(options.CodeChange)
+	}
 	if options.CodeChangeDescription != "" {
 		payload["codeChangeDescription"] = options.CodeChangeDescription
 	}

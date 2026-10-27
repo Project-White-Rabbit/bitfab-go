@@ -14,7 +14,7 @@ func experimentJSON(id string) map[string]any {
 	return map[string]any{
 		"id": id, "name": "candidate", "notes": nil, "status": "completed", "traceFunctionKey": "orders",
 		"createdAt": "2026-09-20T00:00:00.000Z", "completedAt": "2026-09-20T00:05:00.000Z",
-		"codeChangeDescription": nil, "codeChangeTotals": map[string]any{"files": 2, "added": 10, "removed": 3},
+		"codeChangeType": "default-branch", "codeChangeDescription": nil, "codeChangeTotals": map[string]any{"files": 2, "added": 10, "removed": 3},
 		"experimentGroupId": nil, "experimentGroupName": nil, "datasetId": "dataset-1", "datasetName": "Checkout",
 		"datasetIds": []string{"dataset-1"}, "datasetNames": []string{"Checkout"}, "attempts": 3, "plannedTraceCount": 12,
 		"runBy":       map[string]any{"id": "user-1", "fullName": "Ada", "email": nil, "imageUrl": nil},
@@ -85,6 +85,7 @@ func TestExperiments_ListEncodesEveryFilterAndDecodesThePage(t *testing.T) {
 	if experiment.ID != "experiment-1" || experiment.Notes != nil || *experiment.Name != "candidate" ||
 		experiment.Status != "completed" || *experiment.CompletedAt != "2026-09-20T00:05:00.000Z" ||
 		experiment.CodeChangeTotals == nil || experiment.CodeChangeTotals.Added != 10 ||
+		experiment.CodeChangeType == nil || *experiment.CodeChangeType != CodeChangeDefaultBranch ||
 		experiment.ExperimentGroupID != nil || *experiment.DatasetID != "dataset-1" ||
 		len(experiment.DatasetIDs) != 1 || experiment.Attempts != 3 || *experiment.PlannedTraceCount != 12 ||
 		experiment.RunBy == nil || *experiment.RunBy.FullName != "Ada" || experiment.RunBy.Email != nil ||

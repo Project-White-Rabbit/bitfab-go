@@ -62,6 +62,7 @@ type Experiment struct {
 	TraceFunctionKey      *string           `json:"traceFunctionKey"`
 	CreatedAt             string            `json:"createdAt"`
 	CompletedAt           *string           `json:"completedAt"`
+	CodeChangeType        *CodeChangeType   `json:"codeChangeType"`
 	CodeChangeDescription *string           `json:"codeChangeDescription"`
 	CodeChangeTotals      *CodeChangeTotals `json:"codeChangeTotals"`
 	ExperimentGroupID     *string           `json:"experimentGroupId"`
