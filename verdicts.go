@@ -109,12 +109,14 @@ const (
 	VerdictAbstained Verdict = "abstained"
 )
 
-// VerdictSource identifies the author of a saved verdict.
+// VerdictSource identifies the author of a saved verdict: a person, a coding
+// agent, or Bitfab's assertion judge.
 type VerdictSource string
 
 const (
-	VerdictSourceHuman VerdictSource = "human"
-	VerdictSourceAgent VerdictSource = "agent"
+	VerdictSourceHuman       VerdictSource = "human"
+	VerdictSourceAgent       VerdictSource = "agent"
+	VerdictSourceBitfabJudge VerdictSource = "bitfab_judge"
 )
 
 // LabelSource identifies the author of a saved verdict.
