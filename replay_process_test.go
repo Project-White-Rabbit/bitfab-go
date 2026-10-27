@@ -59,12 +59,12 @@ func TestReplayProcessesRunFreshWorkersWithOneExperiment(t *testing.T) {
 			})
 			defer server.Close()
 			hookFile := filepath.Join(t.TempDir(), "hooks.txt")
-			args := []string{"pipeline", "--db-branch"}
+			args := []string{"pipeline", "--code-change", "skip", "--db-branch"}
 			if mode == "dry-run" {
 				args = append(args, "--dry-run")
 			}
 			command := exec.Command(binary, args...)
-			command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_HOOK_FILE="+hookFile, "BITFAB_DISABLE_CODE_CHANGE_CAPTURE=1")
+			command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_HOOK_FILE="+hookFile)
 			switch mode {
 			case "function-error":
 				command.Env = append(command.Env, "BITFAB_TEST_FAIL=1")
@@ -199,8 +199,8 @@ func TestReplayChildDeliveryFailureReachesTheParent(t *testing.T) {
 		base(w, r)
 	}))
 	defer server.Close()
-	command := exec.Command(binary, "pipeline")
-	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_DISABLE_CODE_CHANGE_CAPTURE=1", "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200", "BITFAB_TEST_HOOK_SPAN=1")
+	command := exec.Command(binary, "pipeline", "--code-change", "skip")
+	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200", "BITFAB_TEST_HOOK_SPAN=1")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -234,8 +234,8 @@ func TestReplayChildUnconfirmedDeliveryWarnsWithoutFailingTheRun(t *testing.T) {
 		base(w, r)
 	}))
 	defer server.Close()
-	command := exec.Command(binary, "pipeline", "--fail-on-error")
-	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_DISABLE_CODE_CHANGE_CAPTURE=1", "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200")
+	command := exec.Command(binary, "pipeline", "--code-change", "skip", "--fail-on-error")
+	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

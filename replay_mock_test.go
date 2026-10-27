@@ -71,7 +71,6 @@ func recordedChildTree() []map[string]any {
 }
 
 func TestReplayMarkedMockUsesRecordedOutput(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -100,7 +99,7 @@ func TestReplayMarkedMockUsesRecordedOutput(t *testing.T) {
 			}
 			return value.(string), nil
 		},
-		nil,
+		&ReplayOptions{CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -115,7 +114,6 @@ func TestReplayMarkedMockUsesRecordedOutput(t *testing.T) {
 }
 
 func TestReplayOverridePrecedesRegisteredOverrideAndMemoizesOutput(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -145,7 +143,8 @@ func TestReplayOverridePrecedesRegisteredOverrideAndMemoizesOutput(t *testing.T)
 			return value.(string), nil
 		},
 		&ReplayOptions{
-			Mock: MockNone,
+			CodeChange: CodeChangeSkip,
+			Mock:       MockNone,
 			MockOverrides: []MockOverride{{
 				Match: matcher,
 				Resolve: func(ctx MockOverrideContext) (any, error) {
@@ -175,7 +174,6 @@ func TestReplayOverridePrecedesRegisteredOverrideAndMemoizesOutput(t *testing.T)
 }
 
 func TestReplayMockAllFailsClosedWhenOccurrenceIsMissing(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, nil, &lazyFetches))
@@ -194,7 +192,7 @@ func TestReplayMockAllFailsClosedWhenOccurrenceIsMissing(t *testing.T) {
 			}, WithName("Missing"))
 			return "", err
 		},
-		&ReplayOptions{Mock: MockAll},
+		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -209,7 +207,6 @@ func TestReplayMockAllFailsClosedWhenOccurrenceIsMissing(t *testing.T) {
 }
 
 func TestReplayMockOutputDecodesIntoConcreteType(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	children := recordedChildTree()
@@ -239,7 +236,7 @@ func TestReplayMockOutputDecodesIntoConcreteType(t *testing.T) {
 			}
 			return value.(output), nil
 		},
-		&ReplayOptions{Mock: MockAll},
+		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -250,7 +247,6 @@ func TestReplayMockOutputDecodesIntoConcreteType(t *testing.T) {
 }
 
 func TestReplayMocksRepeatedSpanOccurrencesInRecordedOrder(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	children := []map[string]any{
@@ -303,7 +299,7 @@ func TestReplayMocksRepeatedSpanOccurrencesInRecordedOrder(t *testing.T) {
 			}
 			return outputs, nil
 		},
-		&ReplayOptions{Mock: MockAll},
+		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -318,7 +314,6 @@ func TestReplayMocksRepeatedSpanOccurrencesInRecordedOrder(t *testing.T) {
 }
 
 func TestReplayRepeatedSpanFailsClosedAfterRecordedOccurrencesAreExhausted(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -348,7 +343,7 @@ func TestReplayRepeatedSpanFailsClosedAfterRecordedOccurrencesAreExhausted(t *te
 			}
 			return nil
 		},
-		nil,
+		&ReplayOptions{CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -363,7 +358,6 @@ func TestReplayRepeatedSpanFailsClosedAfterRecordedOccurrencesAreExhausted(t *te
 }
 
 func TestReplayMockMatcherPanicFailsItemClosed(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -383,7 +377,8 @@ func TestReplayMockMatcherPanicFailsItemClosed(t *testing.T) {
 			return spanErr
 		},
 		&ReplayOptions{
-			Mock: MockNone,
+			CodeChange: CodeChangeSkip,
+			Mock:       MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { panic("broken matcher") },
 			}},
@@ -402,7 +397,6 @@ func TestReplayMockMatcherPanicFailsItemClosed(t *testing.T) {
 }
 
 func TestReplayMockResolverPanicFailsItemClosed(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -422,7 +416,8 @@ func TestReplayMockResolverPanicFailsItemClosed(t *testing.T) {
 			return spanErr
 		},
 		&ReplayOptions{
-			Mock: MockNone,
+			CodeChange: CodeChangeSkip,
+			Mock:       MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Resolve: func(MockOverrideContext) (any, error) {
@@ -444,7 +439,6 @@ func TestReplayMockResolverPanicFailsItemClosed(t *testing.T) {
 }
 
 func TestReplayOverrideOriginalOutputFailsWithoutRecordedOccurrence(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, nil, &lazyFetches))
@@ -464,7 +458,8 @@ func TestReplayOverrideOriginalOutputFailsWithoutRecordedOccurrence(t *testing.T
 			return spanErr
 		},
 		&ReplayOptions{
-			Mock: MockNone,
+			CodeChange: CodeChangeSkip,
+			Mock:       MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Resolve: func(ctx MockOverrideContext) (any, error) {
@@ -486,7 +481,6 @@ func TestReplayOverrideOriginalOutputFailsWithoutRecordedOccurrence(t *testing.T
 }
 
 func TestReplayFlatNilOverrideIsAValidMockValue(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	server := newLegacyCarrierServer(t, replayMockHandler(t, state, recordedChildTree(), &lazyFetches))
@@ -506,7 +500,8 @@ func TestReplayFlatNilOverrideIsAValidMockValue(t *testing.T) {
 			return value == nil, spanErr
 		},
 		&ReplayOptions{
-			Mock: MockNone,
+			CodeChange: CodeChangeSkip,
+			Mock:       MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Value: nil,
@@ -523,7 +518,6 @@ func TestReplayFlatNilOverrideIsAValidMockValue(t *testing.T) {
 }
 
 func TestReplayMockNoneExecutesRealChildWithoutFetchingTree(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))
 	defer server.Close()
@@ -544,7 +538,7 @@ func TestReplayMockNoneExecutesRealChildWithoutFetchingTree(t *testing.T) {
 			}
 			return value.(string), nil
 		},
-		&ReplayOptions{Mock: MockNone},
+		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockNone},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -555,7 +549,6 @@ func TestReplayMockNoneExecutesRealChildWithoutFetchingTree(t *testing.T) {
 }
 
 func TestReplayConcurrentMocksShareOneLazyOutputFetch(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	var lazyFetches atomic.Int64
 	children := recordedChildTree()
@@ -602,7 +595,7 @@ func TestReplayConcurrentMocksShareOneLazyOutputFetch(t *testing.T) {
 			}
 			return outputs, nil
 		},
-		nil,
+		&ReplayOptions{CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)

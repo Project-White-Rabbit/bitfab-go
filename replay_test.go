@@ -162,7 +162,6 @@ func replayItems() []map[string]any {
 }
 
 func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -185,6 +184,7 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 			return fmt.Sprintf("%s:%d", name, count), nil
 		},
 		&ReplayOptions{
+			CodeChange:     CodeChangeSkip,
 			Limit:          2,
 			MaxConcurrency: 2,
 			OnItemStart: func(progress ReplayItemStartProgress) {
@@ -280,7 +280,6 @@ func (b *lockedLogBuffer) String() string {
 }
 
 func TestReplayCompletesWithOneWarningPerUnconfirmedReplay(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	base := replayTestHandler(t, state, replayItems())
 	legacy := newLegacyCarrierServer(t, base)
@@ -319,7 +318,7 @@ func TestReplayCompletesWithOneWarningPerUnconfirmedReplay(t *testing.T) {
 		func(ctx context.Context, name string, count int) (string, error) {
 			return fmt.Sprintf("%s:%d", name, count), nil
 		},
-		&ReplayOptions{Limit: 2, MaxConcurrency: 2},
+		&ReplayOptions{CodeChange: CodeChangeSkip, Limit: 2, MaxConcurrency: 2},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -348,7 +347,6 @@ func TestReplayCompletesWithOneWarningPerUnconfirmedReplay(t *testing.T) {
 }
 
 func TestReplayReadsExperimentIDAndFallsBackToLegacyKeys(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	cases := map[string]struct {
 		reply  map[string]any
 		wantID string
@@ -367,7 +365,7 @@ func TestReplayReadsExperimentIDAndFallsBackToLegacyKeys(t *testing.T) {
 			defer server.Close()
 			client := newTestClient(server.URL)
 			defer client.Close(5 * time.Second)
-			result, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{Limit: 1})
+			result, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{CodeChange: CodeChangeSkip, Limit: 1})
 			if err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -385,20 +383,18 @@ func TestReplayReadsExperimentIDAndFallsBackToLegacyKeys(t *testing.T) {
 }
 
 func TestReplayStartResponseWithoutExperimentIDFails(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{startReply: map[string]any{}}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))
 	defer server.Close()
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
-	_, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{Limit: 1})
+	_, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{CodeChange: CodeChangeSkip, Limit: 1})
 	if err == nil || !strings.Contains(err.Error(), "omitted the experiment ID") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestReplayOnExperimentStartFiresOnceBeforeFirstItem(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -412,6 +408,7 @@ func TestReplayOnExperimentStartFiresOnceBeforeFirstItem(t *testing.T) {
 		"typed-workflow",
 		func(name string, count int) string { return name },
 		&ReplayOptions{
+			CodeChange:     CodeChangeSkip,
 			Limit:          2,
 			MaxConcurrency: 2,
 			OnExperimentStart: func(event ReplayExperimentStart) {
@@ -439,7 +436,6 @@ func TestReplayOnExperimentStartFiresOnceBeforeFirstItem(t *testing.T) {
 }
 
 func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -447,7 +443,8 @@ func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
 	defer client.Close(time.Second)
 	calls := 0
 	result, err := client.Replay(context.Background(), "dry", func(string, int) {}, &ReplayOptions{
-		DryRun: true,
+		CodeChange: CodeChangeSkip,
+		DryRun:     true,
 		OnExperimentStart: func(event ReplayExperimentStart) {
 			calls++
 			if event.ExperimentID != "run-1" {
@@ -465,7 +462,6 @@ func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
 }
 
 func TestReplayDryRunAsksForNoExperimentAndNeverTouchesOne(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{startReply: map[string]any{
 		"experimentId":  nil,
 		"experimentUrl": nil,
@@ -478,6 +474,7 @@ func TestReplayDryRunAsksForNoExperimentAndNeverTouchesOne(t *testing.T) {
 	defer client.Close(time.Second)
 	started := false
 	result, err := client.Replay(context.Background(), "dry", func(string, int) { t.Error("dry run executed") }, &ReplayOptions{
+		CodeChange:        CodeChangeSkip,
 		DryRun:            true,
 		OnExperimentStart: func(ReplayExperimentStart) { started = true },
 	})
@@ -496,7 +493,6 @@ func TestReplayDryRunAsksForNoExperimentAndNeverTouchesOne(t *testing.T) {
 }
 
 func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -517,6 +513,7 @@ func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
 			return fmt.Sprintf("%s:%d", input.Name, input.Count), nil
 		},
 		&ReplayOptions{
+			CodeChange: CodeChangeSkip,
 			AdaptInputs: func(inputs []any, ctx AdaptContext) ([]any, error) {
 				if ctx.OriginalTraceID == "" || len(inputs) != 2 {
 					return nil, errors.New("missing adaptation context")
@@ -544,7 +541,6 @@ func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
 }
 
 func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{completeErr: true}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))
 	defer server.Close()
@@ -555,7 +551,7 @@ func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
 		context.Background(),
 		"completion-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
-		nil,
+		&ReplayOptions{CodeChange: CodeChangeSkip},
 	)
 	var replayErr *ReplayError
 	if !errors.As(err, &replayErr) {
@@ -576,7 +572,7 @@ func TestReplayOmitsExperimentGroupNameWhenUnset(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: "group-1", DisableCodeChangeCapture: true}
+	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}
 	if _, err := client.Replay(context.Background(), "group-workflow", func() {}, options); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -601,7 +597,7 @@ func TestReplayRefusesExperimentGroupNameWithoutID(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupName: "Prompt sweep", DisableCodeChangeCapture: true}
+	options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupName: "Prompt sweep", CodeChange: CodeChangeSkip}
 	_, err := client.Replay(context.Background(), "group-workflow", func() {}, options)
 	if err == nil || !strings.Contains(err.Error(), "ExperimentGroupName requires ExperimentGroupID") {
 		t.Fatalf("Replay error = %v", err)
@@ -730,7 +726,7 @@ func TestReplayReportsTheGitStateItRanFrom(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{DisableCodeChangeCapture: true}
+	options := &ReplayOptions{CodeChange: CodeChangeSkip}
 	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -758,7 +754,7 @@ func TestReplayOmitsGitStateWhenSwitchedOff(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{DisableCodeChangeCapture: true}
+	options := &ReplayOptions{CodeChange: CodeChangeSkip}
 	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -776,18 +772,17 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
-	description := "try the new prompt"
-
 	_, err := client.Replay(
 		context.Background(),
 		"options-workflow",
 		func() {},
 		&ReplayOptions{
+			CodeChange:            CodeChangeManual,
 			TraceIDs:              []string{"trace-1", "trace-2"},
 			Name:                  "candidate",
 			Notes:                 "forced the new-checkout flag on",
 			Metadata:              map[string]string{"schedule": "eod"},
-			CodeChangeDescription: &description,
+			CodeChangeDescription: "try the new prompt",
 			CodeChangeFiles: []CodeChangeFile{{
 				Path:   "prompt.go",
 				Before: "old",
@@ -834,14 +829,14 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 }
 
 func TestReplayOmitsMetadataWhenUnset(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	for _, metadata := range []map[string]string{nil, {}} {
 		state := &replayTestServerState{}
 		server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
 		client := newTestClient(server.URL)
 		_, err := client.Replay(context.Background(), "options-workflow", func() {}, &ReplayOptions{
-			TraceIDs: []string{"trace-1"},
-			Metadata: metadata,
+			CodeChange: CodeChangeSkip,
+			TraceIDs:   []string{"trace-1"},
+			Metadata:   metadata,
 		})
 		client.Close(5 * time.Second)
 		server.Close()
@@ -875,7 +870,7 @@ func TestReplayJudgesAssertionsByDefault(t *testing.T) {
 			client := newTestClient(server.URL)
 			defer client.Close(5 * time.Second)
 
-			options := &ReplayOptions{DisableCodeChangeCapture: true, SkipAssertionJudging: tc.skip, JudgeAssertions: tc.judge}
+			options := &ReplayOptions{CodeChange: CodeChangeSkip, SkipAssertionJudging: tc.skip, JudgeAssertions: tc.judge}
 			if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -916,7 +911,7 @@ func TestReplayStartsWithoutAnInvocationWhenBuildingItPanics(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	result, err := client.Replay(context.Background(), "invocation-workflow", func() {}, &ReplayOptions{DisableCodeChangeCapture: true, Name: "baseline"})
+	result, err := client.Replay(context.Background(), "invocation-workflow", func() {}, &ReplayOptions{CodeChange: CodeChangeSkip, Name: "baseline"})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -934,20 +929,20 @@ func TestReplayStartsWithoutAnInvocationWhenBuildingItPanics(t *testing.T) {
 func TestReplayReportsTheOptionsTheCallerPassedAsFlags(t *testing.T) {
 	clearInvocationEnvironment(t)
 	invocation := replayStartInvocation(t, &ReplayOptions{
-		DisableCodeChangeCapture: true,
-		Name:                     "baseline",
-		MaxConcurrency:           2,
-		DatasetIDs:               []string{"ds-1"},
-		Metadata:                 map[string]string{"team": "search", "owner": "ada"},
-		OnItemStart:              func(ReplayItemStartProgress) {},
+		CodeChange:     CodeChangeSkip,
+		Name:           "baseline",
+		MaxConcurrency: 2,
+		DatasetIDs:     []string{"ds-1"},
+		Metadata:       map[string]string{"team": "search", "owner": "ada"},
+		OnItemStart:    func(ReplayItemStartProgress) {},
 	})
 	want := map[string]any{
-		"disable-code-change-capture": true,
-		"name":                        "baseline",
-		"concurrency":                 float64(2),
-		"dataset-ids":                 []any{"ds-1"},
-		"metadata":                    []any{"owner", "team"},
-		"on-item-start":               true,
+		"code-change":   "skip",
+		"name":          "baseline",
+		"concurrency":   float64(2),
+		"dataset-ids":   []any{"ds-1"},
+		"metadata":      []any{"owner", "team"},
+		"on-item-start": true,
 	}
 	if !reflect.DeepEqual(invocation["flags"], want) {
 		t.Fatalf("flags = %#v, want %#v", invocation["flags"], want)
@@ -959,9 +954,9 @@ func TestReplayReportsTheOptionsTheCallerPassedAsFlags(t *testing.T) {
 
 func TestReplayReportsTheCommandLineFlagsWhenTheCLIStartedIt(t *testing.T) {
 	invocation := replayStartInvocation(t, &ReplayOptions{
-		DisableCodeChangeCapture: true,
-		Limit:                    2,
-		cliFlags:                 map[string]any{"limit": 2, "dry-run": true},
+		CodeChange: CodeChangeSkip,
+		Limit:      2,
+		cliFlags:   map[string]any{"limit": 2, "dry-run": true},
 	})
 	want := map[string]any{"limit": float64(2), "dry-run": true}
 	if !reflect.DeepEqual(invocation["flags"], want) {
@@ -972,7 +967,7 @@ func TestReplayReportsTheCommandLineFlagsWhenTheCLIStartedIt(t *testing.T) {
 func TestReplayReportsTheCloudRunner(t *testing.T) {
 	clearInvocationEnvironment(t)
 	t.Setenv("BITFAB_REPLAY_EXECUTION_TARGET", "hosted")
-	invocation := replayStartInvocation(t, &ReplayOptions{DisableCodeChangeCapture: true})
+	invocation := replayStartInvocation(t, &ReplayOptions{CodeChange: CodeChangeSkip})
 	if invocation["environment"] != "cloud_replay" {
 		t.Fatalf("environment = %#v", invocation["environment"])
 	}
@@ -993,7 +988,7 @@ func TestReplayDeprecatedJudgeAssertionsSendsJudgingAndWarnsOnce(t *testing.T) {
 	defer client.Close(5 * time.Second)
 
 	for range 2 {
-		options := &ReplayOptions{DisableCodeChangeCapture: true, JudgeAssertions: true}
+		options := &ReplayOptions{CodeChange: CodeChangeSkip, JudgeAssertions: true}
 		if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
 			t.Fatalf("Replay returned error: %v", err)
 		}

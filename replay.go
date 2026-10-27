@@ -209,15 +209,37 @@ type ReplayOptions struct {
 	// {"schedule": "eod"}, that Experiments.List can filter on. Keys match
 	// ^[A-Za-z0-9_.:-]{1,40}$, values are at most 500 characters, and a run
 	// carries at most 50 keys.
-	Metadata                 map[string]string
-	MaxConcurrency           int
-	CodeChangeDescription    *string
-	CodeChangeFiles          []CodeChangeFile
-	DisableCodeChangeCapture bool
-	Mock                     MockStrategy
-	MockOverrides            []MockOverride
-	DBBranch                 *DBBranchOptions
-	ExperimentGroupID        string
+	Metadata       map[string]string
+	MaxConcurrency int
+	// CodeChange is required: which code change this replay tests, stored on
+	// the resulting experiment so it can be reviewed alongside the results. A
+	// replay without it is refused before any request is sent.
+	//   - CodeChangeWorkingTree: the uncommitted changes in the git working
+	//     tree, vs HEAD
+	//   - CodeChangeLastBranch: the diff against the branch this one was cut
+	//     from, such as the branch below it in a stack, else the default branch
+	//   - CodeChangeDefaultBranch: the diff against where HEAD split from the
+	//     default branch (origin/HEAD, else origin/main, origin/master, main,
+	//     master)
+	//   - CodeChangeSkip: no code change, such as for a baseline run
+	//   - CodeChangeManual: the files passed in CodeChangeFiles
+	//
+	// The three git choices include uncommitted edits and untracked files, and
+	// warn and attach nothing when they find no changed files.
+	CodeChange CodeChangeType
+	// CodeChangeDescription describes the code change being tested. Defaults
+	// to one generated from the captured files. Not accepted with
+	// CodeChangeSkip.
+	CodeChangeDescription string
+	// CodeChangeFiles holds the edited files when CodeChange is
+	// CodeChangeManual, and only then. Each entry holds the file path and the
+	// full Before/After contents. Use "" for newly created files (Before) or
+	// deleted files (After).
+	CodeChangeFiles   []CodeChangeFile
+	Mock              MockStrategy
+	MockOverrides     []MockOverride
+	DBBranch          *DBBranchOptions
+	ExperimentGroupID string
 	// ExperimentGroupName names the experiment group when this replay creates
 	// it, or when the group exists but has no name yet. A group that already
 	// has a name keeps it. Requires ExperimentGroupID; setting it without one
@@ -549,6 +571,9 @@ func (c *Client) Replay(
 	fn any,
 	options *ReplayOptions,
 ) (ReplayResult, error) {
+	if err := validateCodeChange(options); err != nil {
+		return ReplayResult{}, err
+	}
 	resolvedFn, err := resolveReplayFunction(traceFunctionKey, fn)
 	if err != nil {
 		return ReplayResult{}, err
@@ -572,14 +597,7 @@ func (c *Client) Replay(
 	if resolved.JudgeAssertions {
 		warnOnce("judge-assertions-deprecated", judgeAssertionsDeprecation)
 	}
-	if resolved.CodeChangeFiles == nil && !resolved.DisableCodeChangeCapture {
-		if captured := resolveAutoCodeChange(ctx, resolved.Name); captured != nil {
-			resolved.CodeChangeFiles = captured.Files
-			if resolved.CodeChangeDescription == nil {
-				resolved.CodeChangeDescription = captured.Description
-			}
-		}
-	}
+	resolved.CodeChangeDescription, resolved.CodeChangeFiles = resolveCodeChange(ctx, resolved)
 	resolved.MockOverrides = append(resolved.MockOverrides, c.registeredMockOverrides()...)
 	if resolved.ExperimentalSelectiveReplay != nil {
 		if err := validateSelectiveOptions(resolved.ExperimentalSelectiveReplay); err != nil {
@@ -822,14 +840,11 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	if len(options.Metadata) > 0 {
 		payload["metadata"] = options.Metadata
 	}
-	if options.CodeChangeDescription != nil {
-		payload["codeChangeDescription"] = *options.CodeChangeDescription
+	if options.CodeChangeDescription != "" {
+		payload["codeChangeDescription"] = options.CodeChangeDescription
 	}
 	if options.CodeChangeFiles != nil {
 		payload["codeChangeFiles"] = options.CodeChangeFiles
-	}
-	if options.DisableCodeChangeCapture && options.CodeChangeFiles == nil {
-		payload["codeChangeFiles"] = nil
 	}
 	if options.DBBranch != nil && !options.DryRun {
 		payload["includeDbBranchLease"] = true

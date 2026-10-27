@@ -45,7 +45,7 @@ func main() {
 			branch = value.DatabaseURL()
 		}
 		return map[string]any{"pid": os.Getpid(), "calls": calls, "name": name, "count": count, "branch": branch}, nil
-	}, Options: bitfab.ReplayOptions{Mock: bitfab.MockNone, DisableCodeChangeCapture: true, Concurrency: &bitfab.ReplayConcurrency{Primitive: "process", Attempts: 2, MaxConcurrency: 2, MemoryThrottle: &memory, ChildTimeout: timeout, ChildDeliveryTimeout: deliveryTimeout, OnItemFinishInChildProcess: func(event bitfab.ReplayItemFinishEvent) {
+	}, Options: bitfab.ReplayOptions{Mock: bitfab.MockNone, Concurrency: &bitfab.ReplayConcurrency{Primitive: "process", Attempts: 2, MaxConcurrency: 2, MemoryThrottle: &memory, ChildTimeout: timeout, ChildDeliveryTimeout: deliveryTimeout, OnItemFinishInChildProcess: func(event bitfab.ReplayItemFinishEvent) {
 		if os.Getenv("BITFAB_TEST_HOOK_SPAN") == "1" {
 			_, _ = client.Span(context.Background(), "grading", func(ctx context.Context) (any, error) { return "graded", nil })
 		}

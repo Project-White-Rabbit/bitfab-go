@@ -18,7 +18,6 @@ import (
 )
 
 func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	base := replayTestHandler(t, state, replayItems())
 	reads := []string{}
@@ -52,7 +51,7 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--limit", "1", "--dry-run", "--param", "count=2", "--no-code-change", "--notes", "staging env override"}, &stdout, &stderr)
+	_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--limit", "1", "--dry-run", "--param", "count=2", "--notes", "staging env override"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +84,6 @@ func TestReplayRegistryCLIOptionsSelectionAndFactory(t *testing.T) {
 }
 
 func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -107,13 +105,13 @@ func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
 		return metadata
 	}
 	var stdout, stderr bytes.Buffer
-	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--metadata", "schedule=eod", "--metadata", "owner=ada=team"}, &stdout, &stderr); err != nil {
+	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run", "--metadata", "schedule=eod", "--metadata", "owner=ada=team"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if metadata := startMetadata(); len(metadata) != 2 || metadata["schedule"] != "eod" || metadata["owner"] != "ada=team" {
 		t.Fatalf("metadata from flags = %+v", metadata)
 	}
-	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run"}, &stdout, &stderr); err != nil {
+	if _, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run"}, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if metadata := startMetadata(); len(metadata) != 1 || metadata["schedule"] != "registered" {
@@ -123,7 +121,7 @@ func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
 	state.startBody = nil
 	state.mu.Unlock()
 	for _, bad := range []string{"schedule", "=eod"} {
-		_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--metadata", bad}, &stdout, &stderr)
+		_, err = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run", "--metadata", bad}, &stdout, &stderr)
 		if err == nil || !strings.Contains(err.Error(), "--metadata expects key=value") {
 			t.Fatalf("--metadata %q error = %v", bad, err)
 		}
@@ -137,7 +135,6 @@ func TestReplayRegistryCLIMetadataFlag(t *testing.T) {
 }
 
 func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -152,7 +149,7 @@ func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	args := []string{"pipeline", "--dry-run", "--name", "baseline", "--max-concurrency", "2", "--dataset-id", "ds-1", "--metadata", "team=search", "--metadata", "owner=ada", "--param", "model=gpt", "--no-db-branch"}
+	args := []string{"pipeline", "--code-change", "skip", "--dry-run", "--name", "baseline", "--max-concurrency", "2", "--dataset-id", "ds-1", "--metadata", "team=search", "--metadata", "owner=ada", "--param", "model=gpt", "--no-db-branch"}
 	if _, err := RunReplayCLI(context.Background(), registry, args, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +157,7 @@ func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
 	invocation, _ := state.startBody["invocation"].(map[string]any)
 	state.mu.Unlock()
 	want := map[string]any{
+		"code-change":  "skip",
 		"dry-run":      true,
 		"name":         "baseline",
 		"concurrency":  float64(2),
@@ -174,7 +172,6 @@ func TestReplayRegistryCLIReportsItsFlagsAsTheInvocation(t *testing.T) {
 }
 
 func TestReplayRegistryCLIExperimentGroupNameFlag(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -189,7 +186,7 @@ func TestReplayRegistryCLIExperimentGroupNameFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	args := []string{"pipeline", "--dry-run", "--experiment-group-id", "group-1", "--experiment-group-name", "Prompt sweep"}
+	args := []string{"pipeline", "--code-change", "skip", "--dry-run", "--experiment-group-id", "group-1", "--experiment-group-name", "Prompt sweep"}
 	if _, err := RunReplayCLI(context.Background(), registry, args, &stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +202,7 @@ func TestReplayRegistryCLIExperimentGroupNameFlag(t *testing.T) {
 	if flags["experiment-group-id"] != "group-1" || flags["experiment-group-name"] != "Prompt sweep" {
 		t.Fatalf("invocation flags = %#v", flags)
 	}
-	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run", "--experiment-group-name", "Prompt sweep"}, &stdout, &stderr)
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run", "--experiment-group-name", "Prompt sweep"}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "ExperimentGroupName requires ExperimentGroupID") {
 		t.Fatalf("name without id error = %v", err)
 	}
@@ -282,7 +279,6 @@ func TestSeedRegistryCLIRecordsCasesAndRuns(t *testing.T) {
 }
 
 func TestReplayRegistryValidationAndEmptySelection(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, []map[string]any{}))
 	defer server.Close()
@@ -292,18 +288,17 @@ func TestReplayRegistryValidationAndEmptySelection(t *testing.T) {
 	if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func() {}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"pipeline", "--limit", "0"}, {"pipeline", "--attempts", "101"}, {"pipeline", "--trace-ids", "a", "--dataset-id", "b"}, {"pipeline", "--db-branch", "--no-db-branch"}} {
+	for _, args := range [][]string{{"pipeline", "--code-change", "skip", "--limit", "0"}, {"pipeline", "--code-change", "skip", "--attempts", "101"}, {"pipeline", "--code-change", "skip", "--trace-ids", "a", "--dataset-id", "b"}, {"pipeline", "--code-change", "skip", "--db-branch", "--no-db-branch"}} {
 		if _, err := RunReplayCLI(context.Background(), registry, args, io.Discard, io.Discard); err == nil {
 			t.Fatalf("accepted %v", args)
 		}
 	}
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run"}, io.Discard, io.Discard); err == nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run"}, io.Discard, io.Discard); err == nil {
 		t.Fatal("empty selection accepted")
 	}
 }
 
 func TestReplayRegistryGradeHookChainsAndDryRunSkips(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -321,13 +316,13 @@ func TestReplayRegistryGradeHookChainsAndDryRunSkips(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline"}, io.Discard, &stderr); err != nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip"}, io.Discard, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 || !bytes.Contains(stderr.Bytes(), []byte("grade failed")) {
 		t.Fatalf("hook calls=%d stderr=%s", calls, stderr.String())
 	}
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--dry-run"}, io.Discard, io.Discard); err != nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--dry-run"}, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -339,7 +334,6 @@ func TestReplayRegistryGradeHookChainsAndDryRunSkips(t *testing.T) {
 // under --only-with-assertions: only an approved assertion is checked on a
 // replay, so narrowing must skip it exactly as the server's selection does.
 func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	base := replayTestHandler(t, state, replayItems())
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +358,7 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	if _, err := RunReplayCLI(context.Background(), registry,
-		[]string{"pipeline", "--trace-ids", "draft,reviewed", "--limit", "1", "--dry-run", "--only-with-assertions", "--no-code-change"},
+		[]string{"pipeline", "--code-change", "skip", "--trace-ids", "draft,reviewed", "--limit", "1", "--dry-run", "--only-with-assertions"},
 		&stdout, &stderr); err != nil {
 		t.Fatal(err)
 	}
@@ -375,16 +369,15 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 }
 
 func TestReplayRegistryCLISkipAssertionJudging(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	for _, tc := range []struct {
 		name       string
 		registered bool
 		args       []string
 		want       any
 	}{
-		{"flag omits judging", false, []string{"pipeline", "--skip-assertion-judging"}, nil},
-		{"absent flag keeps judging on", false, []string{"pipeline"}, true},
-		{"absent flag keeps a registered skip", true, []string{"pipeline"}, nil},
+		{"flag omits judging", false, []string{"pipeline", "--code-change", "skip", "--skip-assertion-judging"}, nil},
+		{"absent flag keeps judging on", false, []string{"pipeline", "--code-change", "skip"}, true},
+		{"absent flag keeps a registered skip", true, []string{"pipeline", "--code-change", "skip"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := &replayTestServerState{}
@@ -410,7 +403,6 @@ func TestReplayRegistryCLISkipAssertionJudging(t *testing.T) {
 }
 
 func TestReplayRegistryCLIDeprecatedJudgeAssertionsWarnsAndChangesNothing(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	for _, tc := range []struct {
 		name string
 		skip bool
@@ -430,7 +422,7 @@ func TestReplayRegistryCLIDeprecatedJudgeAssertionsWarnsAndChangesNothing(t *tes
 				t.Fatal(err)
 			}
 			var stderr bytes.Buffer
-			if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--judge-assertions"}, io.Discard, &stderr); err != nil {
+			if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--judge-assertions"}, io.Discard, &stderr); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(stderr.String(), "--judge-assertions is deprecated") || !strings.Contains(stderr.String(), "--skip-assertion-judging") {
@@ -447,7 +439,6 @@ func TestReplayRegistryCLIDeprecatedJudgeAssertionsWarnsAndChangesNothing(t *tes
 }
 
 func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -460,7 +451,7 @@ func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
 	startLine := "[replay] Experiment run-1: " + server.URL + "/experiments/run-1\n"
 
 	var stderr bytes.Buffer
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline"}, io.Discard, &stderr); err != nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip"}, io.Discard, &stderr); err != nil {
 		t.Fatal(err)
 	}
 	output := stderr.String()
@@ -475,7 +466,7 @@ func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
 	state.completeErr = true
 	state.mu.Unlock()
 	stderr.Reset()
-	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline"}, io.Discard, &stderr)
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip"}, io.Discard, &stderr)
 	var replayErr *ReplayError
 	if !errors.As(err, &replayErr) || replayErr.ExperimentID != "run-1" {
 		t.Fatalf("error = %T %v", err, err)
@@ -488,7 +479,6 @@ func TestReplayRegistryCLIPrintsExperimentAtStartAndOnFailure(t *testing.T) {
 }
 
 func TestReplayRegistryCLIFailOnErrorReturnsAnErrorOnlyWhenAnItemErrored(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
@@ -502,15 +492,15 @@ func TestReplayRegistryCLIFailOnErrorReturnsAnErrorOnlyWhenAnItemErrored(t *test
 		t.Fatal(err)
 	}
 
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"broken"}, io.Discard, io.Discard); err != nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"broken", "--code-change", "skip"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("without the flag an errored item must not fail the command: %v", err)
 	}
-	if _, err := RunReplayCLI(context.Background(), registry, []string{"working", "--fail-on-error"}, io.Discard, io.Discard); err != nil {
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"working", "--code-change", "skip", "--fail-on-error"}, io.Discard, io.Discard); err != nil {
 		t.Fatalf("no item errored: %v", err)
 	}
 
 	var stdout bytes.Buffer
-	_, err := RunReplayCLI(context.Background(), registry, []string{"broken", "--fail-on-error"}, &stdout, io.Discard)
+	_, err := RunReplayCLI(context.Background(), registry, []string{"broken", "--code-change", "skip", "--fail-on-error"}, &stdout, io.Discard)
 	want := "[replay] 2 of 2 replayed items errored; exiting 1 because of --fail-on-error"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v", err)
@@ -519,7 +509,7 @@ func TestReplayRegistryCLIFailOnErrorReturnsAnErrorOnlyWhenAnItemErrored(t *test
 		t.Fatalf("result was not printed before the error: %s", stdout.String())
 	}
 
-	_, err = RunReplayCLI(context.Background(), registry, []string{"broken", "--dry-run", "--fail-on-error"}, io.Discard, io.Discard)
+	_, err = RunReplayCLI(context.Background(), registry, []string{"broken", "--code-change", "skip", "--dry-run", "--fail-on-error"}, io.Discard, io.Discard)
 	if err == nil || err.Error() != "[replay] 2 of 2 resolved items errored; exiting 1 because of --fail-on-error" {
 		t.Fatalf("dry run error = %v", err)
 	}
@@ -531,7 +521,7 @@ func TestReplayRegistryCLIHelpListsFailOnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--help"}, io.Discard, &stderr)
 	if !strings.Contains(stderr.String(), "-fail-on-error") {
 		t.Fatalf("help = %s", stderr.String())
 	}
@@ -625,8 +615,142 @@ func TestReplayRegistryCLIIgnoresThePrintAPIKeyEnvironmentVariable(t *testing.T)
 		t.Fatal(err)
 	}
 	var stdout bytes.Buffer
-	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--trace-ids", "a"}, &stdout, io.Discard)
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip", "--trace-ids", "a"}, &stdout, io.Discard)
 	if strings.Contains(stdout.String(), "@@bitfab:api-key") {
 		t.Fatalf("stdout %q", stdout.String())
+	}
+}
+
+func TestReplayRegistryCLIRequiresACodeChangeChoice(t *testing.T) {
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	pairing := "bitfab: --code-change-file goes with --code-change manual, and --code-change manual needs --code-change-file PATH."
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"pipeline", "--dry-run"}, `bitfab: --code-change is required: ` + codeChangeChoices + `. "manual" takes the edits from --code-change-file PATH.`},
+		{[]string{"pipeline", "--code-change", "change.json"}, `bitfab: Unknown --code-change 'change.json'. Pass ` + codeChangeChoices + `. A file of edits goes in --code-change manual --code-change-file PATH.`},
+		{[]string{"pipeline", "--no-code-change"}, "bitfab: --no-code-change was replaced by --code-change skip."},
+		{[]string{"pipeline", "--code-change", "skip", "-no-code-change=true"}, "bitfab: --no-code-change was replaced by --code-change skip."},
+		{[]string{"pipeline", "--code-change", "manual"}, pairing},
+		{[]string{"pipeline", "--code-change", "working-tree", "--code-change-file", "change.json"}, pairing},
+	} {
+		_, err := RunReplayCLI(context.Background(), registry, test.args, io.Discard, io.Discard)
+		if err == nil || err.Error() != test.want {
+			t.Fatalf("%v: error = %v, want %q", test.args, err, test.want)
+		}
+		if check := checkRegistryCLI(registry, test.args, io.Discard); check == nil || check.Error() != test.want {
+			t.Fatalf("%v: check error = %v, want %q", test.args, check, test.want)
+		}
+	}
+}
+
+func TestReplayRegistryCLIPassesEachCodeChangeType(t *testing.T) {
+	t.Chdir(initReplayGitRepo(t, "main"))
+	for _, codeChange := range []string{"working-tree", "last-branch", "default-branch", "skip"} {
+		t.Run(codeChange, func(t *testing.T) {
+			state := &replayTestServerState{}
+			server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+			defer server.Close()
+			client := newTestClient(server.URL)
+			defer client.Close(time.Second)
+			registry := NewReplayRegistry()
+			if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", codeChange, "--dry-run"}, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if _, present := state.startBody["codeChangeFiles"]; present {
+				t.Fatalf("clean tree sent files: %#v", state.startBody)
+			}
+			flags := state.startBody["invocation"].(map[string]any)["flags"].(map[string]any)
+			if flags["code-change"] != codeChange {
+				t.Fatalf("flags = %#v", flags)
+			}
+		})
+	}
+}
+
+func TestReplayRegistryCLIManualReadsTheCodeChangeFile(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "change.json")
+	if err := os.WriteFile(path, []byte(`{"description":"shorter prompt","files":[{"path":"prompt.go","before":"a","after":"b"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "manual", "--code-change-file", path, "--dry-run"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	body := state.startBody
+	state.mu.Unlock()
+	files, _ := body["codeChangeFiles"].([]any)
+	if body["codeChangeDescription"] != "shorter prompt" || len(files) != 1 {
+		t.Fatalf("start body = %#v", body)
+	}
+
+	invalid := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(invalid, []byte(`{"files":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "manual", "--code-change-file", invalid}, io.Discard, io.Discard)
+	if want := "bitfab: Invalid --code-change-file '" + invalid + "': expected { description, files }."; err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestReplayRegistryRefusesRegisteredCodeChangeOptions(t *testing.T) {
+	client := newTestClient("http://127.0.0.1:1")
+	defer client.Close(time.Second)
+	want := "bitfab: registry options cannot set CodeChange, CodeChangeDescription, or CodeChangeFiles; pass --code-change on the command line"
+	for _, options := range []ReplayOptions{
+		{CodeChange: CodeChangeSkip},
+		{CodeChangeDescription: "x"},
+		{CodeChangeFiles: []CodeChangeFile{}},
+	} {
+		err := NewReplayRegistry().Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func() {}, Options: options})
+		if err == nil || err.Error() != want {
+			t.Fatalf("%+v: error = %v", options, err)
+		}
+	}
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func() {}, OptionsFactory: func(_ context.Context, _ ReplayRegistryContext, options *ReplayOptions) error {
+		options.CodeChange = CodeChangeWorkingTree
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--code-change", "skip"}, io.Discard, io.Discard); err == nil || err.Error() != want {
+		t.Fatalf("factory error = %v", err)
+	}
+}
+
+func TestReplayRegistryCLIHelpDescribesCodeChange(t *testing.T) {
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
+	for _, want := range []string{"-code-change working-tree|last-branch|default-branch|skip|manual", "(required: the code change this run tests;", "-code-change-file PATH", "(with --code-change manual: a JSON file of { description, files })"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("help lacks %q: %s", want, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), "no-code-change") {
+		t.Fatalf("help still lists --no-code-change: %s", stderr.String())
 	}
 }

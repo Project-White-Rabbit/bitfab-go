@@ -12,7 +12,6 @@ import (
 )
 
 func TestReplayAttemptsCarryIdentityMetadataAndIndependentBranches(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	items := replayItems()
 	for _, item := range items {
@@ -60,7 +59,7 @@ func TestReplayAttemptsCarryIdentityMetadataAndIndependentBranches(t *testing.T)
 	var finishes []ReplayItemFinishProgress
 	result, err := client.Replay(context.Background(), "attempts", func(ctx context.Context, name string, count int) string {
 		return GetCurrentReplayBranch(ctx).DatabaseURL()
-	}, &ReplayOptions{Attempts: 2, MaxConcurrency: 2, Mock: MockNone, DBBranch: &DBBranchOptions{}, OnlyWithAssertions: true,
+	}, &ReplayOptions{CodeChange: CodeChangeSkip, Attempts: 2, MaxConcurrency: 2, Mock: MockNone, DBBranch: &DBBranchOptions{}, OnlyWithAssertions: true,
 		AdaptInputs: func(inputs []any, ctx AdaptContext) ([]any, error) {
 			if ctx.Metadata["case"] != "sample" {
 				return nil, fmt.Errorf("metadata missing")
@@ -126,13 +125,12 @@ func TestReplayAttemptsCarryIdentityMetadataAndIndependentBranches(t *testing.T)
 }
 
 func TestReplayDryRunSkipsExecutionBranchesAndPersistence(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	state := &replayTestServerState{}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
 	defer server.Close()
 	client := newTestClient(server.URL)
 	defer client.Close(time.Second)
-	result, err := client.Replay(context.Background(), "dry", func(string, int) { t.Error("dry run executed") }, &ReplayOptions{DryRun: true, Attempts: 2, DBBranch: &DBBranchOptions{}, Mock: MockAll})
+	result, err := client.Replay(context.Background(), "dry", func(string, int) { t.Error("dry run executed") }, &ReplayOptions{CodeChange: CodeChangeSkip, DryRun: true, Attempts: 2, DBBranch: &DBBranchOptions{}, Mock: MockAll})
 	if err != nil {
 		t.Fatal(err)
 	}

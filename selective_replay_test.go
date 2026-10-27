@@ -202,7 +202,6 @@ func TestSelectiveReplayTraceConfiguredNodes(t *testing.T) {
 }
 
 func TestSelectiveReplayRequestAndAttempts(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	t.Setenv(disableCompressionEnv, "1")
 	plan, options := selectiveFixture(t)
 	state := &replayTestServerState{}
@@ -219,7 +218,7 @@ func TestSelectiveReplayRequestAndAttempts(t *testing.T) {
 			return nil, err
 		}
 		return client.Span(ctx, "shop", func(context.Context) (any, error) { return 7, nil }, WithName("price"))
-	}, &ReplayOptions{ExperimentalSelectiveReplay: options, Attempts: 2})
+	}, &ReplayOptions{CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2})
 	if err != nil || calls.Load() != 2 || len(result.Items) != 2 {
 		t.Fatalf("replay failed: %v %#v", err, result)
 	}
@@ -234,7 +233,6 @@ func TestSelectiveReplayRequestAndAttempts(t *testing.T) {
 }
 
 func TestSelectiveReplayConcurrentStickyFailure(t *testing.T) {
-	t.Setenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE", "1")
 	t.Setenv(disableCompressionEnv, "1")
 	plan, options := selectiveFixture(t)
 	plan.Nodes[2].Recording.Output = json.RawMessage(`{"value":"recorded"}`)
@@ -270,7 +268,7 @@ func TestSelectiveReplayConcurrentStickyFailure(t *testing.T) {
 			_, _ = client.Span(ctx, "shop", func(context.Context) (any, error) { t.Error("unsafe body ran"); return nil, nil }, WithName("unsafe"), WithMockOnReplay(true))
 		}
 		return client.Span(ctx, "shop", func(context.Context) (any, error) { return 7, nil }, WithName("price"))
-	}, &ReplayOptions{ExperimentalSelectiveReplay: options, Attempts: 2, MaxConcurrency: 2})
+	}, &ReplayOptions{CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2, MaxConcurrency: 2})
 	if err != nil || len(result.Items) != 2 {
 		t.Fatalf("replay failed: %v %#v", err, result)
 	}

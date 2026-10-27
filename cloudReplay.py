@@ -147,8 +147,9 @@ RENAMED_FLAGS = {
     "--cloud-include": "nothing: new files that git does not ignore are already in the snapshot",
 }
 SEED_FLAGS = ("--seed", "--cases", "--from-trace", "--run")
-PATH_FLAGS = ("--registry", "--params", "--code-change")
-CODE_CHANGE_FLAGS = ("--code-change", "--no-code-change")
+PATH_FLAGS = ("--registry", "--params", "--code-change-file")
+CODE_CHANGE_FLAG = "--code-change"
+BRANCH_CODE_CHANGES = ("last-branch", "default-branch")
 CHECKOUT_DEPTH = 2
 CODE_CHANGE_PATH_ENV = "BITFAB_CODE_CHANGE_PATH"
 CODE_CHANGE_MAX_FILES = 60
@@ -1022,6 +1023,21 @@ def branch_point(root):
     return None
 
 
+def default_branch_point(root):
+    default = default_branch(root)
+    sha = quiet_git(root, "merge-base", "HEAD", default) if default else ""
+    return {"sha": sha, "ref": default} if sha else None
+
+
+def code_change_base(root, replay):
+    kind = flag_value(replay, CODE_CHANGE_FLAG)
+    if kind == "last-branch":
+        return branch_point(root)
+    if kind == "default-branch":
+        return default_branch_point(root)
+    return None
+
+
 def replay_artifact(path):
     return path == ".bitfab" or path.startswith(".bitfab/")
 
@@ -1126,11 +1142,10 @@ def snapshot(
         }
         if preview:
             return summary
-        code_change_base = request.get("codeChangeBase") or {}
+        branch_base = str((request.get("codeChangeBase") or {}).get("sha", ""))
         extra_parent = (
-            ["-p", code_change_base["sha"]]
-            if not any(not replay_artifact(path) for _, path in changes)
-            and SHA.fullmatch(str(code_change_base.get("sha", "")))
+            ["-p", branch_base]
+            if SHA.fullmatch(branch_base) and branch_base != head
             else []
         )
         sha = git(
@@ -1461,9 +1476,9 @@ def submit(root, repo, workflow, parsed, path):
     branch = current_branch(root)
     if branch:
         request["branch"] = branch
-    code_change_base = branch_point(root)
-    if code_change_base:
-        request["codeChangeBase"] = code_change_base
+    base = code_change_base(root, parsed["replay"])
+    if base:
+        request["codeChangeBase"] = base
     check_arguments(parsed["replay"])
     allowed = allowed_files(root, parsed)
     if "--cloud-preview" in parsed["switches"]:
@@ -2121,13 +2136,17 @@ def check_out_snapshot_base(root, commit, branch):
     return base
 
 
-def replay_name(args):
+def flag_value(args, flag):
     for index, value in enumerate(args):
-        if value.startswith("--name="):
+        if value.startswith(f"{flag}="):
             return value.partition("=")[2]
-        if value == "--name" and index + 1 < len(args):
+        if value == flag and index + 1 < len(args):
             return args[index + 1]
     return None
+
+
+def replay_name(args):
+    return flag_value(args, "--name")
 
 
 def git_blob(root, ref, path):
@@ -2209,12 +2228,26 @@ def branch_code_change(root, base, commit, request):
         and SHA.fullmatch(sha)
         and isinstance(ref, str)
         and BRANCH_NAME.fullmatch(ref)
-        and quiet_git(root, "rev-parse", "--verify", "-q", f"{commit}^2") == sha
+        and (
+            sha == base
+            or quiet_git(root, "rev-parse", "--verify", "-q", f"{commit}^2") == sha
+        )
     ):
         return None
     return snapshot_code_change(
         root, sha, commit, replay_name(request["args"]), f"vs {ref}", base
     )
+
+
+def runner_code_change(root, base, commit, request):
+    kind = flag_value(request["args"], CODE_CHANGE_FLAG)
+    if kind == "working-tree":
+        change = snapshot_code_change(root, base, commit, replay_name(request["args"]))
+    elif kind in BRANCH_CODE_CHANGES:
+        change = branch_code_change(root, base, commit, request)
+    else:
+        return None
+    return change or {"files": []}
 
 
 def write_code_change(change):
@@ -2247,22 +2280,11 @@ def execute():
     if environment:
         workflow_environment_conflicts(root, environment)
         print(f"Setting {', '.join(sorted(environment))} from the request", flush=True)
-    names = {option_name(value) for value in request["args"]}
-    explicit_change = bool(names & set(CODE_CHANGE_FLAGS))
-    change = (
-        None
-        if explicit_change or base is None
-        else snapshot_code_change(root, base, commit, replay_name(request["args"]))
-        or branch_code_change(root, base, commit, request)
-    )
+    change = None if base is None else runner_code_change(root, base, commit, request)
     run_environment = dict(environment)
-    if change:
+    if change is not None:
         run_environment[CODE_CHANGE_PATH_ENV] = write_code_change(change)
-    args = [
-        *replay_command(),
-        *request["args"],
-        *([] if explicit_change or change else ["--no-code-change"]),
-    ]
+    args = [*replay_command(), *request["args"]]
     if dry_run(request["args"]):
         run_check_command(directory, environment)
     experiment = {}

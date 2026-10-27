@@ -3,6 +3,8 @@ package bitfab
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +21,35 @@ const (
 	maxBranchWalk          = 1000
 )
 
+// CodeChangeType names the code change a replay runs against.
+type CodeChangeType string
+
+const (
+	// CodeChangeWorkingTree attaches the uncommitted changes in the git
+	// working tree, tracked edits plus untracked files, vs HEAD.
+	CodeChangeWorkingTree CodeChangeType = "working-tree"
+	// CodeChangeLastBranch attaches the diff against the branch this one was
+	// cut from, such as the branch below it in a stack, else the default
+	// branch. Nothing is attached on the default branch itself.
+	CodeChangeLastBranch CodeChangeType = "last-branch"
+	// CodeChangeDefaultBranch attaches the diff against where HEAD split from
+	// the default branch (origin/HEAD, else origin/main, origin/master, main,
+	// master).
+	CodeChangeDefaultBranch CodeChangeType = "default-branch"
+	// CodeChangeSkip attaches no code change, such as for a baseline run.
+	CodeChangeSkip CodeChangeType = "skip"
+	// CodeChangeManual attaches the files passed in ReplayOptions.CodeChangeFiles.
+	CodeChangeManual CodeChangeType = "manual"
+)
+
+const codeChangeChoices = `"working-tree" (uncommitted changes vs HEAD), "last-branch" (the diff against the branch this one was cut from), "default-branch" (the diff against the default branch), "skip" (no code change), or "manual" (pass the files yourself)`
+
+var codeChangeTypes = []CodeChangeType{CodeChangeWorkingTree, CodeChangeLastBranch, CodeChangeDefaultBranch, CodeChangeSkip, CodeChangeManual}
+
+func isCodeChangeType(value string) bool {
+	return slices.Contains(codeChangeTypes, CodeChangeType(value))
+}
+
 type resolvedCodeChange struct {
 	Description *string          `json:"description"`
 	Files       []CodeChangeFile `json:"files"`
@@ -30,10 +61,52 @@ type gitCodeChange struct {
 	path       string
 }
 
-func resolveAutoCodeChange(ctx context.Context, label string) *resolvedCodeChange {
-	if os.Getenv("BITFAB_DISABLE_CODE_CHANGE_CAPTURE") != "" {
-		return nil
+func validateCodeChange(options *ReplayOptions) error {
+	if options == nil || options.CodeChange == "" {
+		return fmt.Errorf("bitfab: replay needs a CodeChange naming the code this run tests: %s.", codeChangeChoices)
 	}
+	codeChange := options.CodeChange
+	if !isCodeChangeType(string(codeChange)) {
+		return fmt.Errorf("bitfab: Unknown CodeChange %q. Pass %s.", string(codeChange), codeChangeChoices)
+	}
+	hasFiles := options.CodeChangeFiles != nil
+	if codeChange == CodeChangeManual && !hasFiles {
+		return fmt.Errorf(`bitfab: CodeChange "manual" needs CodeChangeFiles: the path and before/after contents of each edited file.`)
+	}
+	if codeChange != CodeChangeManual && hasFiles {
+		return fmt.Errorf(`bitfab: CodeChangeFiles only applies with CodeChange "manual" (got %q).`, string(codeChange))
+	}
+	if codeChange == CodeChangeSkip && options.CodeChangeDescription != "" {
+		return fmt.Errorf(`bitfab: CodeChange "skip" attaches no code change, so it cannot take a CodeChangeDescription.`)
+	}
+	return nil
+}
+
+func resolveCodeChange(ctx context.Context, options ReplayOptions) (string, []CodeChangeFile) {
+	switch options.CodeChange {
+	case CodeChangeSkip:
+		return "", nil
+	case CodeChangeManual:
+		return options.CodeChangeDescription, options.CodeChangeFiles
+	}
+	captured := captureCodeChange(ctx, options.CodeChange, options.Name)
+	if captured == nil || len(captured.Files) == 0 {
+		warnNoCodeChangeFound(options.CodeChange)
+		return options.CodeChangeDescription, nil
+	}
+	description := options.CodeChangeDescription
+	if description == "" && captured.Description != nil {
+		description = *captured.Description
+	}
+	return description, captured.Files
+}
+
+func warnNoCodeChangeFound(codeChange CodeChangeType) {
+	defer func() { recover() }()
+	log.Printf("Bitfab: CodeChange %q found no changed files, so this replay has no code change attached.", string(codeChange))
+}
+
+func captureCodeChange(ctx context.Context, codeChange CodeChangeType, label string) *resolvedCodeChange {
 	if fromFile := readCodeChangeOverride(); fromFile != nil {
 		return fromFile
 	}
@@ -41,7 +114,7 @@ func resolveAutoCodeChange(ctx context.Context, label string) *resolvedCodeChang
 	if err != nil {
 		return nil
 	}
-	return captureCodeChangeFromGit(ctx, workingDirectory, label)
+	return captureCodeChangeFromGit(ctx, workingDirectory, codeChange, label)
 }
 
 func readCodeChangeOverride() *resolvedCodeChange {
@@ -76,23 +149,17 @@ func readCodeChangeOverride() *resolvedCodeChange {
 	return &resolvedCodeChange{Description: description, Files: files}
 }
 
-func captureCodeChangeFromGit(ctx context.Context, cwd string, label string) *resolvedCodeChange {
+func captureCodeChangeFromGit(ctx context.Context, cwd string, codeChange CodeChangeType, label string) *resolvedCodeChange {
 	root, ok := runReplayGit(ctx, cwd, "rev-parse", "--show-toplevel")
 	root = strings.TrimSpace(root)
 	if !ok || root == "" {
 		return nil
 	}
-	base, against, ok := resolveCodeChangeBase(ctx, root)
+	base, against, ok := resolveCodeChangeBase(ctx, root, codeChange)
 	if !ok {
 		return nil
 	}
 	entries := listCodeChanges(ctx, root, base)
-	if len(entries) == 0 && base == "HEAD" {
-		if branchBase, branchAgainst, found := resolveBranchPoint(ctx, root); found {
-			base, against = branchBase, branchAgainst
-			entries = listCodeChanges(ctx, root, base)
-		}
-	}
 	if len(entries) == 0 {
 		return nil
 	}
@@ -293,19 +360,25 @@ func resolveBranchPoint(ctx context.Context, root string) (string, string, bool)
 	return "", "", false
 }
 
-// resolveCodeChangeBase returns the base to diff the working tree against and
-// the label for it. HEAD by default, so only uncommitted edits show;
-// BITFAB_CODE_CHANGE_BASE moves the base to the merge-base with that ref. A
-// clean working tree falls back to resolveBranchPoint.
-func resolveCodeChangeBase(ctx context.Context, root string) (string, string, bool) {
-	if forced := os.Getenv("BITFAB_CODE_CHANGE_BASE"); forced != "" && replayGitRefExists(ctx, root, forced) {
-		if base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", forced); ok && strings.TrimSpace(base) != "" {
-			return strings.TrimSpace(base), "vs " + forced, true
-		}
-		if base, ok := runReplayGit(ctx, root, "rev-parse", "--verify", forced); ok && strings.TrimSpace(base) != "" {
-			return strings.TrimSpace(base), "vs " + forced, true
-		}
+func resolveDefaultBranchPoint(ctx context.Context, root string) (string, string, bool) {
+	defaultBranch := resolveDefaultBranch(ctx, root)
+	if defaultBranch == "" {
 		return "", "", false
+	}
+	base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", defaultBranch)
+	base = strings.TrimSpace(base)
+	if !ok || base == "" {
+		return "", "", false
+	}
+	return base, "vs " + defaultBranch, true
+}
+
+func resolveCodeChangeBase(ctx context.Context, root string, codeChange CodeChangeType) (string, string, bool) {
+	switch codeChange {
+	case CodeChangeLastBranch:
+		return resolveBranchPoint(ctx, root)
+	case CodeChangeDefaultBranch:
+		return resolveDefaultBranchPoint(ctx, root)
 	}
 	if replayGitRefExists(ctx, root, "HEAD") {
 		return "HEAD", "uncommitted (vs HEAD)", true
