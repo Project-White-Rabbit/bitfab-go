@@ -96,24 +96,57 @@ const (
 	TraceAssertionHuman TraceAssertionSource = "human"
 )
 
+// AssertionKind says who decides an assertion on a replay.
+type AssertionKind string
+
+const (
+	// AssertionKindJudge means the LLM judge reads the run and decides.
+	AssertionKindJudge AssertionKind = "judge"
+	// AssertionKindCode means the assertion's code decides every replay.
+	AssertionKindCode AssertionKind = "code"
+	// AssertionKindHybrid means the code decides what a program can read and
+	// returns "defer" to hand the rest to the LLM judge.
+	AssertionKindHybrid AssertionKind = "hybrid"
+)
+
+// AssertionCode is code that decides an assertion's verdict from a run's
+// spans instead of the LLM judge. Source is the body of a TypeScript function
+// (plain JavaScript also works) called with spans (each {name, input, output,
+// metadata}, in start order), input, and output; it returns "pass", "fail",
+// or "defer" (hybrid assertions only: hand the rest to the LLM judge), or
+// {result, reason}, and must finish within one second. SpanNames lists every
+// span name the code expects a correct run to produce; a name missing from a
+// replay and from the function's other sampled replays marks the code broken
+// instead of failing the replay.
+type AssertionCode struct {
+	Source    string   `json:"source"`
+	SpanNames []string `json:"spanNames"`
+}
+
 // TraceAssertion describes what should happen when a trace is replayed.
 type TraceAssertion struct {
 	ApprovalFields
-	ID                     string               `json:"id"`
-	TraceID                string               `json:"traceId"`
-	Assertion              string               `json:"assertion"`
-	PassCriteria           *string              `json:"passCriteria"`
-	FailCriteria           *string              `json:"failCriteria"`
-	TargetOnEvaluatedTrace *TraceTarget         `json:"targetOnEvaluatedTrace"`
-	Source                 TraceAssertionSource `json:"source"`
-	HumanNote              *string              `json:"humanNote"`
-	CategoryID             *string              `json:"category_id"`
-	Category               *CategorySummary     `json:"category"`
-	Justification          Justification        `json:"justification"`
-	CategoryJustification  Justification        `json:"categoryJustification"`
-	Assignee               *Assignee            `json:"assignee"`
-	CreatedAt              string               `json:"createdAt"`
-	UpdatedAt              string               `json:"updatedAt"`
+	ID                     string       `json:"id"`
+	TraceID                string       `json:"traceId"`
+	Assertion              string       `json:"assertion"`
+	PassCriteria           *string      `json:"passCriteria"`
+	FailCriteria           *string      `json:"failCriteria"`
+	TargetOnEvaluatedTrace *TraceTarget `json:"targetOnEvaluatedTrace"`
+	// Kind says who decides this assertion on a replay.
+	Kind AssertionKind `json:"kind"`
+	// Code is the code of a code or hybrid assertion, or nil for a judge assertion.
+	Code *AssertionCode `json:"code"`
+	// CodeBrokenReason says why Code could not run on a replay, or is nil while it runs.
+	CodeBrokenReason      *string              `json:"codeBrokenReason"`
+	Source                TraceAssertionSource `json:"source"`
+	HumanNote             *string              `json:"humanNote"`
+	CategoryID            *string              `json:"category_id"`
+	Category              *CategorySummary     `json:"category"`
+	Justification         Justification        `json:"justification"`
+	CategoryJustification Justification        `json:"categoryJustification"`
+	Assignee              *Assignee            `json:"assignee"`
+	CreatedAt             string               `json:"createdAt"`
+	UpdatedAt             string               `json:"updatedAt"`
 	// Rewrite reports Bitfab's latest check of the text sent for this
 	// assertion, on saves and on GetAssertions reads alike. It is nil when no
 	// check ever ran on it.
@@ -205,6 +238,10 @@ type AssertionVerdictEvidence struct {
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
 // the human note, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
+// Kind says who decides the assertion: set AssertionKindCode or
+// AssertionKindHybrid together with Code, or AssertionKindJudge to remove the
+// code. Leave Kind empty and Code nil to keep both. Code that cannot run on
+// the trace, or that returns "defer" for a code assertion, is refused.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
@@ -212,6 +249,8 @@ type SaveAssertion struct {
 	PassCriteria                *string
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
+	Kind                        AssertionKind
+	Code                        *AssertionCode
 	CategoryID                  *string
 	Justification               *Justification
 	CategoryJustification       *Justification
@@ -275,6 +314,16 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 			return nil, err
 		}
 		payload["targetOnEvaluatedTrace"] = target
+	}
+	if assertion.Kind != "" {
+		payload["kind"] = assertion.Kind
+	}
+	if assertion.Code != nil {
+		code := *assertion.Code
+		if code.SpanNames == nil {
+			code.SpanNames = []string{}
+		}
+		payload["code"] = code
 	}
 	if categoryID, clearCategory := assertion.category(); clearCategory {
 		if categoryID != nil {

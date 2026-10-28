@@ -563,3 +563,56 @@ func TestAssertions_GetAssertionsReportsGeneration(t *testing.T) {
 		t.Fatalf("generation = %+v", result.Generation)
 	}
 }
+
+func TestAssertions_SaveSendsKindAndCode(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "assertion-1", "traceId": "trace", "assertion": "books", "source": "agent", "kind": "code",
+				"code": map[string]any{"source": `return "pass"`, "spanNames": []any{"book"}}, "codeBrokenReason": "The code threw: nope"},
+			map[string]any{"id": "assertion-2", "traceId": "trace", "assertion": "books", "source": "agent", "kind": "judge", "code": nil},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	code := AssertionCode{Source: `return "pass"`, SpanNames: []string{"book"}}
+	result, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{
+			{Assertion: "books", Kind: AssertionKindCode, Code: &code},
+			{ID: "assertion-2", Assertion: "books", Kind: AssertionKindJudge},
+		},
+	})
+	if err != nil || len(result) != 2 {
+		t.Fatalf("SaveAssertions = %+v, %v", result, err)
+	}
+	if result[0].Kind != AssertionKindCode || result[0].Code == nil || !reflect.DeepEqual(*result[0].Code, code) ||
+		result[0].CodeBrokenReason == nil || result[1].Kind != AssertionKindJudge || result[1].Code != nil {
+		t.Fatalf("decoded code = %+v", result)
+	}
+	want := map[string]any{"source": "agent", "guidedRewrite": true, "updates": []any{
+		map[string]any{"traceId": "trace", "assertions": []any{
+			map[string]any{"assertion": "books", "kind": "code", "code": map[string]any{"source": `return "pass"`, "spanNames": []any{"book"}}},
+			map[string]any{"id": "assertion-2", "assertion": "books", "kind": "judge"},
+		}},
+	}}
+	if body := server.recorded()[0].body; !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
+func TestAssertions_SaveSendsEmptySpanNamesWhenUnset(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{
+			{Assertion: "books", Kind: AssertionKindCode, Code: &AssertionCode{Source: `return "pass"`}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SaveAssertions: %v", err)
+	}
+	sent := server.recorded()[0].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	if names := sent["code"].(map[string]any)["spanNames"]; !reflect.DeepEqual(names, []any{}) {
+		t.Fatalf("spanNames = %#v, want an empty list", names)
+	}
+}
