@@ -38,6 +38,7 @@ func testScenarioResponse() map[string]any {
 			"source": map[string]any{"spanId": "span-2", "sourceField": "output", "text": "Rebooked onto UA 14"},
 		},
 		"triggerSummary": "Kind: request", "dataSummary": "About: travel",
+		"creationStatus": "created", "creationError": nil,
 		"categories": []any{
 			map[string]any{"id": "category-1", "title": "Rebooking", "description": "Flight changes"},
 			map[string]any{"id": "category-2", "title": "Travel", "description": ""},
@@ -60,11 +61,13 @@ func TestScenarios_GetDecodesScenario(t *testing.T) {
 		t.Fatal("trace ID was not escaped")
 	}
 	if scenario.ID != "scenario-1" || scenario.CreatedAt != "2026-10-01T12:00:00.000Z" || scenario.Extractor != "noah" ||
-		scenario.TriggerSummary != "Kind: request" || scenario.DataSummary != "About: travel" {
+		scenario.TriggerSummary == nil || *scenario.TriggerSummary != "Kind: request" ||
+		scenario.DataSummary == nil || *scenario.DataSummary != "About: travel" ||
+		scenario.CreationStatus != ScenarioCreationCreated || scenario.CreationError != nil {
 		t.Fatalf("scenario = %+v", scenario)
 	}
 	trigger := scenario.Trigger
-	if trigger.InputID == nil || *trigger.InputID != 7 || trigger.To != nil || trigger.Subject == nil || *trigger.Subject != "Delay" ||
+	if trigger == nil || trigger.InputID == nil || *trigger.InputID != 7 || trigger.To != nil || trigger.Subject == nil || *trigger.Subject != "Delay" ||
 		len(trigger.Sources) != 1 || trigger.Sources[0].SourceField != ScenarioSourceInput {
 		t.Fatalf("trigger = %+v", trigger)
 	}
@@ -103,7 +106,7 @@ func TestScenarios_GetDecodesMissingActualOutcomeAsNil(t *testing.T) {
 func TestScenarios_GenerateStartsOnTheTracePathAndReturnsAtOnce(t *testing.T) {
 	server := newDatasetsServer(t, func(datasetRequest) any {
 		return map[string]any{"generation": map[string]any{
-			"status": "started", "traceId": "trace-1", "scenarioId": nil,
+			"status": "started", "traceId": "trace-1", "scenarioId": nil, "creationStatus": "generating",
 		}}
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
@@ -115,8 +118,43 @@ func TestScenarios_GenerateStartsOnTheTracePathAndReturnsAtOnce(t *testing.T) {
 	if request.method != http.MethodPost || request.path != "/api/sdk/traces/trace-1/scenario/generate" || len(request.body) != 0 {
 		t.Fatalf("request = %+v", request)
 	}
-	if generation.Status != ScenarioGenerationStarted || generation.TraceID != "trace-1" || generation.ScenarioID != nil {
+	if generation.Status != ScenarioGenerationStarted || generation.TraceID != "trace-1" || generation.ScenarioID != nil ||
+		generation.CreationStatus != ScenarioCreationGenerating {
 		t.Fatalf("generation = %+v", generation)
+	}
+}
+
+func TestScenarios_GetDecodesAScenarioStillGenerating(t *testing.T) {
+	response := testScenarioResponse()
+	scenario := response["scenario"].(map[string]any)
+	scenario["trigger"], scenario["data"], scenario["triggerSummary"], scenario["dataSummary"] = nil, nil, nil, nil
+	scenario["creationStatus"] = "generating"
+	server := newDatasetsServer(t, func(datasetRequest) any { return response })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	read, err := client.Traces.GetScenario(context.Background(), "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.CreationStatus != ScenarioCreationGenerating || read.Trigger != nil || read.Data != nil ||
+		read.TriggerSummary != nil || read.DataSummary != nil {
+		t.Fatalf("scenario = %+v", read)
+	}
+}
+
+func TestScenarios_GetDecodesWhyCreationFailed(t *testing.T) {
+	response := testScenarioResponse()
+	scenario := response["scenario"].(map[string]any)
+	scenario["creationStatus"] = "error"
+	scenario["creationError"] = "The scenario callback answered 500"
+	server := newDatasetsServer(t, func(datasetRequest) any { return response })
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	read, err := client.Traces.GetScenario(context.Background(), "trace-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.CreationStatus != ScenarioCreationError || read.CreationError == nil ||
+		*read.CreationError != "The scenario callback answered 500" {
+		t.Fatalf("scenario = %+v", read)
 	}
 }
 

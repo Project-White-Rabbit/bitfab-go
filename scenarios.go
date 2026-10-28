@@ -257,26 +257,52 @@ type ScenarioDataAppend struct {
 	Missing []string               `json:"missing,omitempty"`
 }
 
+// ScenarioCreationStatus is how far building a scenario has got.
+type ScenarioCreationStatus string
+
+const (
+	// ScenarioCreationEmpty means nothing has started building the scenario.
+	ScenarioCreationEmpty ScenarioCreationStatus = "empty"
+	// ScenarioCreationGenerating means Bitfab is building the scenario, or is
+	// waiting for the scenario callback to save it.
+	ScenarioCreationGenerating ScenarioCreationStatus = "generating"
+	// ScenarioCreationCreated means the scenario has been built.
+	ScenarioCreationCreated ScenarioCreationStatus = "created"
+	// ScenarioCreationError means building the scenario failed. CreationError
+	// says why, and GenerateScenario starts it again.
+	ScenarioCreationError ScenarioCreationStatus = "error"
+)
+
+// Scenario is the scenario built from a trace, in any creation state.
 type Scenario struct {
-	ID              string          `json:"id"`
-	CreatedAt       string          `json:"createdAt"`
-	UpdatedAt       string          `json:"updatedAt"`
-	OrganizationID  string          `json:"organizationId"`
-	TraceFunctionID string          `json:"traceFunctionId"`
-	SourceTraceID   string          `json:"sourceTraceId"`
-	Extractor       string          `json:"extractor"`
-	Name            string          `json:"name"`
-	Description     string          `json:"description"`
-	Trigger         ScenarioTrigger `json:"trigger"`
-	Data            ScenarioData    `json:"data"`
+	ID              string `json:"id"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+	OrganizationID  string `json:"organizationId"`
+	TraceFunctionID string `json:"traceFunctionId"`
+	SourceTraceID   string `json:"sourceTraceId"`
+	Extractor       string `json:"extractor"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	// Trigger is nil until the scenario is built.
+	Trigger *ScenarioTrigger `json:"trigger"`
+	// Data is nil until the scenario is built.
+	Data *ScenarioData `json:"data"`
 	// ActualOutcome is what the run actually did, as last saved by a caller.
 	// It is nil when nothing has been saved or it was cleared.
-	ActualOutcome  *ScenarioActualOutcome `json:"actualOutcome"`
-	TriggerSummary string                 `json:"triggerSummary"`
-	DataSummary    string                 `json:"dataSummary"`
+	ActualOutcome *ScenarioActualOutcome `json:"actualOutcome"`
+	// TriggerSummary is nil until the scenario is built.
+	TriggerSummary *string `json:"triggerSummary"`
+	// DataSummary is nil until the scenario is built.
+	DataSummary *string `json:"dataSummary"`
 	// Categories are the categories the scenario is filed under, sorted by title.
 	// It is empty when the scenario is filed under none.
 	Categories []CategorySummary `json:"categories"`
+	// CreationStatus is how far building the scenario has got.
+	CreationStatus ScenarioCreationStatus `json:"creationStatus"`
+	// CreationError says why building the scenario failed. It is nil unless
+	// CreationStatus is ScenarioCreationError.
+	CreationError *string `json:"creationError"`
 }
 
 type SaveScenarioParams struct {
@@ -373,6 +399,10 @@ func traceScenarioPath(traceID string) string {
 	return "/api/sdk/traces/" + url.PathEscape(traceID) + "/scenario"
 }
 
+// GetScenario reads the scenario built from a trace, in any creation state.
+// After GenerateScenario, poll it until CreationStatus is
+// ScenarioCreationCreated or ScenarioCreationError. A trace with no scenario at
+// all returns an error.
 func (t *TracesClient) GetScenario(ctx context.Context, traceID string) (*Scenario, error) {
 	var response struct {
 		Scenario Scenario `json:"scenario"`
@@ -388,7 +418,7 @@ type ScenarioGenerationStatus string
 
 const (
 	// ScenarioGenerationStarted means Bitfab is building the scenario in the
-	// background. Read it later with GetScenario.
+	// background. Poll GetScenario until it is created or fails.
 	ScenarioGenerationStarted ScenarioGenerationStatus = "started"
 	// ScenarioGenerationAlreadyGenerated means the trace already has a
 	// scenario, so nothing was started and ScenarioID names it.
@@ -396,16 +426,19 @@ const (
 )
 
 // ScenarioGeneration is what GenerateScenario returns. ScenarioID is nil while
-// the trace has no scenario yet.
+// the trace has no scenario yet. CreationStatus is the scenario's creation
+// status right after the call, the same one GetScenario reads.
 type ScenarioGeneration struct {
-	Status     ScenarioGenerationStatus `json:"status"`
-	TraceID    string                   `json:"traceId"`
-	ScenarioID *string                  `json:"scenarioId"`
+	Status         ScenarioGenerationStatus `json:"status"`
+	TraceID        string                   `json:"traceId"`
+	ScenarioID     *string                  `json:"scenarioId"`
+	CreationStatus ScenarioCreationStatus   `json:"creationStatus"`
 }
 
 // GenerateScenario starts building the scenario for one trace and returns at
-// once, without waiting for it. Read it later with GetScenario. A trace that
-// already has a scenario is left as it is. A replay, a trace outside the
+// once, without waiting for it. Poll GetScenario until its CreationStatus is
+// ScenarioCreationCreated or ScenarioCreationError. A trace that already has a
+// scenario is left as it is, unless building it failed, which starts it again. A replay, a trace outside the
 // organization, or a trace Bitfab cannot build a scenario for (not
 // noah-agent-turn and no scenario callback) returns an error. Adding a trace
 // to a dataset starts the same build only when the organization has a
