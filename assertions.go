@@ -110,11 +110,14 @@ const (
 )
 
 // AssertionCode is code that decides an assertion's verdict from a run's
-// spans instead of the LLM judge. Source is the body of a TypeScript function
-// (plain JavaScript also works) called with spans (each {name, input, output,
-// metadata}, in start order), input, and output; it returns "pass", "fail",
-// or "defer" (hybrid assertions only: hand the rest to the LLM judge), or
-// {result, reason}, and must finish within one second. SpanNames lists every
+// spans instead of the LLM judge. Source is the body of an async TypeScript
+// function (plain JavaScript also works) called with spans (each {name, index,
+// hasData}, in start order, without its data), input, and output. It reads
+// span data with await named("span name"), which returns {name, index, input,
+// output, metadata} for each span with that name, or await span.data(). It
+// returns "pass", "fail", or "defer" (hybrid assertions only: hand the rest to
+// the LLM judge), or {result, reason}. It gets one second of compute and may
+// load the data of at most 50 spans within ten seconds. SpanNames lists every
 // span name the code expects a correct run to produce; a name missing from a
 // replay and from the function's other sampled replays marks the code broken
 // instead of failing the replay.
