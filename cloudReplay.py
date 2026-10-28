@@ -149,7 +149,10 @@ RENAMED_FLAGS = {
 SEED_FLAGS = ("--seed", "--cases", "--from-trace", "--run")
 PATH_FLAGS = ("--registry", "--params", "--code-change-file")
 CODE_CHANGE_FLAG = "--code-change"
-BRANCH_CODE_CHANGES = ("last-branch", "default-branch")
+CODE_CHANGE_BASE_FLAG = "--code-change-base"
+BRANCH_CODE_CHANGES = ("last-branch", "default-branch", "ref")
+GIT_CODE_CHANGES = ("working-tree", *BRANCH_CODE_CHANGES)
+DESCRIBED_REF = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 CHECKOUT_DEPTH = 2
 CODE_CHANGE_PATH_ENV = "BITFAB_CODE_CHANGE_PATH"
 CODE_CHANGE_MAX_FILES = 60
@@ -220,7 +223,9 @@ Options added by --cloud:
                          checkout of the repository, with GitHub access that can
                          read it and run Actions (a job token needs contents: read
                          and actions: write, passed as GH_TOKEN), and a workflow on
-                         BRANCH that declares a request input.
+                         BRANCH that declares a request input. With no snapshot
+                         there is nothing to diff against, so it takes
+                         --code-change skip or manual, as does a dispatched run.
 
 A workflow can also dispatch bitfab-replay.yml itself on any branch other than a
 bitfab-replay/ snapshot branch, passing the replay as JSON in the request input:
@@ -1029,8 +1034,30 @@ def default_branch_point(root):
     return {"sha": sha, "ref": default} if sha else None
 
 
+def chosen_base_point(root, chosen):
+    if not chosen or chosen.startswith("-"):
+        return None
+    for ref in (chosen, f"origin/{chosen}"):
+        if quiet_git(root, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}"):
+            sha = quiet_git(root, "merge-base", "HEAD", ref)
+            return {"sha": sha, "ref": chosen} if sha else None
+    raise ValueError(
+        f"{CODE_CHANGE_BASE_FLAG} {chosen} names no branch or commit in this repository; pass a branch name or a commit SHA, and fetch it first if it only exists on the remote"
+    )
+
+
+def refuse_git_code_change(replay, where):
+    kind = flag_value(replay, CODE_CHANGE_FLAG)
+    if kind in GIT_CODE_CHANGES:
+        raise ValueError(
+            f"{where} as it is on GitHub, with no snapshot of a checkout, so --code-change {kind} has nothing to compare against there; pass --code-change skip, or --code-change manual with --code-change-file, or start it with bitfab-replay --cloud and no --cloud-ref, which resolves {kind} from your checkout before upload"
+        )
+
+
 def code_change_base(root, replay):
     kind = flag_value(replay, CODE_CHANGE_FLAG)
+    if kind == "ref":
+        return chosen_base_point(root, flag_value(replay, CODE_CHANGE_BASE_FLAG))
     if kind == "last-branch":
         return branch_point(root)
     if kind == "default-branch":
@@ -1839,6 +1866,7 @@ def submit_as_is(root, repo, workflow, parsed, path):
     branch = parsed["cloud"]["--cloud-ref"]
     request, _ = replay_request(root, parsed)
     check_arguments(parsed["replay"])
+    refuse_git_code_change(parsed["replay"], f"--cloud-ref replays {branch}")
     sha = branch_head(repo, branch)
     if "--cloud-preview" in parsed["switches"]:
         return {
@@ -2089,6 +2117,7 @@ def dispatched_request():
         raise ValueError("The request id does not match the execution_id input")
     args = request.get("args")
     validate_arguments(args)
+    refuse_git_code_change(args, f"A dispatched replay runs {branch}")
     if request.get("check") is True and "--dry-run" not in args:
         args = [*args, "--dry-run"]
     normalized = {
@@ -2227,7 +2256,7 @@ def branch_code_change(root, base, commit, request):
         isinstance(sha, str)
         and SHA.fullmatch(sha)
         and isinstance(ref, str)
-        and BRANCH_NAME.fullmatch(ref)
+        and DESCRIBED_REF.fullmatch(ref)
         and (
             sha == base
             or quiet_git(root, "rev-parse", "--verify", "-q", f"{commit}^2") == sha

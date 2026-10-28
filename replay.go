@@ -221,10 +221,12 @@ type ReplayOptions struct {
 	//   - CodeChangeDefaultBranch: the diff against where HEAD split from the
 	//     default branch (origin/HEAD, else origin/main, origin/master, main,
 	//     master)
+	//   - CodeChangeRef: the diff against where HEAD split from the branch or
+	//     commit in CodeChangeBase
 	//   - CodeChangeSkip: no code change, such as for a baseline run
 	//   - CodeChangeManual: the files passed in CodeChangeFiles
 	//
-	// The three git choices include uncommitted edits and untracked files, and
+	// The four git choices include uncommitted edits and untracked files, and
 	// warn and attach nothing when they find no changed files.
 	CodeChange CodeChangeType
 	// CodeChangeDescription describes the code change being tested. Defaults
@@ -235,7 +237,12 @@ type ReplayOptions struct {
 	// CodeChangeManual, and only then. Each entry holds the file path and the
 	// full Before/After contents. Use "" for newly created files (Before) or
 	// deleted files (After).
-	CodeChangeFiles   []CodeChangeFile
+	CodeChangeFiles []CodeChangeFile
+	// CodeChangeBase is the branch or commit to diff against when CodeChange
+	// is CodeChangeRef, and only then, such as "dev", "release/2.3", or a
+	// commit SHA. A branch that exists only on the remote is read as
+	// origin/<name>. A name git cannot resolve is refused.
+	CodeChangeBase    string
 	Mock              MockStrategy
 	MockOverrides     []MockOverride
 	DBBranch          *DBBranchOptions
@@ -597,7 +604,10 @@ func (c *Client) Replay(
 	if resolved.JudgeAssertions {
 		warnOnce("judge-assertions-deprecated", judgeAssertionsDeprecation)
 	}
-	resolved.CodeChangeDescription, resolved.CodeChangeFiles = resolveCodeChange(ctx, resolved)
+	resolved.CodeChangeDescription, resolved.CodeChangeFiles, err = resolveCodeChange(ctx, resolved)
+	if err != nil {
+		return ReplayResult{}, err
+	}
 	resolved.MockOverrides = append(resolved.MockOverrides, c.registeredMockOverrides()...)
 	if resolved.ExperimentalSelectiveReplay != nil {
 		if err := validateSelectiveOptions(resolved.ExperimentalSelectiveReplay); err != nil {

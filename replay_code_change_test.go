@@ -46,7 +46,7 @@ func TestCaptureCodeChangeFromGitPreservesRename(t *testing.T) {
 		t.Fatalf("stage rename: %s", output)
 	}
 
-	change := captureCodeChangeFromGit(ctx, root, CodeChangeWorkingTree, "rename candidate")
+	change := captureFromGit(t, ctx, root, CodeChangeWorkingTree, "rename candidate")
 	if change == nil || len(change.Files) != 1 {
 		t.Fatalf("change = %#v", change)
 	}
@@ -123,13 +123,13 @@ func TestReadCodeChangeOverrideHandlesMalformedAndPartialFiles(t *testing.T) {
 }
 
 func TestCaptureCodeChangeFromGitReturnsNilOutsideRepoAndForCleanTree(t *testing.T) {
-	if change := captureCodeChangeFromGit(context.Background(), t.TempDir(), CodeChangeWorkingTree, "outside"); change != nil {
+	if change := captureFromGit(t, context.Background(), t.TempDir(), CodeChangeWorkingTree, "outside"); change != nil {
 		t.Fatalf("outside-repo change = %#v", change)
 	}
 
 	root := initReplayGitRepo(t, "main")
 	for _, codeChange := range []CodeChangeType{CodeChangeWorkingTree, CodeChangeLastBranch, CodeChangeDefaultBranch} {
-		if change := captureCodeChangeFromGit(context.Background(), root, codeChange, "clean"); change != nil {
+		if change := captureFromGit(t, context.Background(), root, codeChange, "clean"); change != nil {
 			t.Fatalf("%s clean-tree change = %#v", codeChange, change)
 		}
 	}
@@ -148,10 +148,10 @@ func TestCaptureLastBranchDiffsBranchAgainstDefaultBranch(t *testing.T) {
 		t.Fatalf("git commit failed: %s", output)
 	}
 
-	if change := captureCodeChangeFromGit(ctx, root, CodeChangeWorkingTree, "clean"); change != nil {
+	if change := captureFromGit(t, ctx, root, CodeChangeWorkingTree, "clean"); change != nil {
 		t.Fatalf("working-tree change on a clean tree = %#v", change)
 	}
-	change := captureCodeChangeFromGit(ctx, root, CodeChangeLastBranch, "clean")
+	change := captureFromGit(t, ctx, root, CodeChangeLastBranch, "clean")
 	if change == nil {
 		t.Fatal("change = nil")
 	}
@@ -185,7 +185,7 @@ func TestCaptureLastBranchIgnoresUnpushedCommitsOnDefaultBranch(t *testing.T) {
 		t.Fatalf("git commit failed: %s", output)
 	}
 
-	if change := captureCodeChangeFromGit(ctx, root, CodeChangeLastBranch, "clean"); change != nil {
+	if change := captureFromGit(t, ctx, root, CodeChangeLastBranch, "clean"); change != nil {
 		t.Fatalf("change = %#v, want nil", change)
 	}
 }
@@ -207,7 +207,7 @@ func TestCaptureLastAndDefaultBranchOnStackedBranch(t *testing.T) {
 	commit("parent", "parent\n")
 	commit("child", "child\n")
 
-	change := captureCodeChangeFromGit(ctx, root, CodeChangeLastBranch, "clean")
+	change := captureFromGit(t, ctx, root, CodeChangeLastBranch, "clean")
 	if change == nil {
 		t.Fatal("change = nil")
 	}
@@ -219,7 +219,7 @@ func TestCaptureLastAndDefaultBranchOnStackedBranch(t *testing.T) {
 		t.Fatalf("description = %v", change.Description)
 	}
 
-	change = captureCodeChangeFromGit(ctx, root, CodeChangeDefaultBranch, "clean")
+	change = captureFromGit(t, ctx, root, CodeChangeDefaultBranch, "clean")
 	if change == nil {
 		t.Fatal("default-branch change = nil")
 	}
@@ -257,7 +257,7 @@ func TestCaptureCodeChangeFromGitCapturesAddsDeletesAndSkipsUnsafeFiles(t *testi
 		t.Fatalf("write oversized fixture: %v", err)
 	}
 
-	change := captureCodeChangeFromGit(context.Background(), root, CodeChangeWorkingTree, "mixed changes")
+	change := captureFromGit(t, context.Background(), root, CodeChangeWorkingTree, "mixed changes")
 	if change == nil {
 		t.Fatal("change = nil")
 	}
@@ -279,6 +279,31 @@ func TestCaptureCodeChangeFromGitCapturesAddsDeletesAndSkipsUnsafeFiles(t *testi
 	}
 	if _, exists := files["oversized.txt"]; exists {
 		t.Fatal("oversized file should be excluded")
+	}
+}
+
+func captureFromGit(t *testing.T, ctx context.Context, cwd string, codeChange CodeChangeType, label string) *resolvedCodeChange {
+	t.Helper()
+	change, err := captureCodeChangeFromGit(ctx, cwd, codeChange, label, "")
+	if err != nil {
+		t.Fatalf("capture %s: %v", codeChange, err)
+	}
+	return change
+}
+
+func gitIn(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	output, ok := runReplayGit(context.Background(), root, args...)
+	if !ok {
+		t.Fatalf("git %v failed: %s", args, output)
+	}
+	return strings.TrimSpace(output)
+}
+
+func writeFixture(t *testing.T, root, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
 	}
 }
 
@@ -363,6 +388,10 @@ func TestReplayRefusesInvalidCodeChangeBeforeAnyRequest(t *testing.T) {
 		{name: "manual without files", options: &ReplayOptions{CodeChange: CodeChangeManual}, want: `bitfab: CodeChange "manual" needs CodeChangeFiles: the path and before/after contents of each edited file.`},
 		{name: "files without manual", options: &ReplayOptions{CodeChange: CodeChangeWorkingTree, CodeChangeFiles: files}, want: `bitfab: CodeChangeFiles only applies with CodeChange "manual" (got "working-tree").`},
 		{name: "skip with description", options: &ReplayOptions{CodeChange: CodeChangeSkip, CodeChangeDescription: "x"}, want: `bitfab: CodeChange "skip" attaches no code change, so it cannot take a CodeChangeDescription.`},
+		{name: "ref without base", options: &ReplayOptions{CodeChange: CodeChangeRef}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "ref with blank base", options: &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: " "}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "ref with option-like base", options: &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "--output=x"}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "base without ref", options: &ReplayOptions{CodeChange: CodeChangeDefaultBranch, CodeChangeBase: "dev"}, want: `bitfab: CodeChangeBase only applies with CodeChange "ref" (got "default-branch").`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -484,7 +513,7 @@ func TestReplayGitTypesDiffAgainstTheirBase(t *testing.T) {
 			if body["codeChangeDescription"] != "caller text" {
 				t.Fatalf("description = %#v", body["codeChangeDescription"])
 			}
-			captured := captureCodeChangeFromGit(ctx, root, test.codeChange, "")
+			captured := captureFromGit(t, ctx, root, test.codeChange, "")
 			if captured == nil || !strings.Contains(*captured.Description, test.against) {
 				t.Fatalf("captured = %#v", captured)
 			}
@@ -564,5 +593,82 @@ func TestReplayGitTypeTreatsEmptyHandoffAsNothingFound(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), `Bitfab: CodeChange "working-tree" found no changed files`) {
 		t.Fatalf("warnings = %q", warnings.String())
+	}
+}
+
+func TestCodeChangeChoicesListRef(t *testing.T) {
+	if !strings.Contains(codeChangeChoices, `"default-branch" (the diff against the default branch), "ref" (the diff against a branch or commit you name), "skip"`) {
+		t.Fatalf("choices = %s", codeChangeChoices)
+	}
+	if !isCodeChangeType("ref") {
+		t.Fatal("ref is not a code change type")
+	}
+}
+
+func TestReplayRefDiffsAgainstWhereHeadSplitFromTheNamedBranch(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	gitIn(t, root, "checkout", "-q", "-b", "dev")
+	writeFixture(t, root, "base.txt", "dev\n")
+	gitIn(t, root, "commit", "-qam", "dev change")
+	gitIn(t, root, "checkout", "-q", "-b", "feature")
+	writeFixture(t, root, "base.txt", "feature\n")
+	gitIn(t, root, "commit", "-qam", "feature change")
+	gitIn(t, root, "checkout", "-q", "dev")
+	writeFixture(t, root, "other.txt", "landed later\n")
+	gitIn(t, root, "add", ".")
+	gitIn(t, root, "commit", "-qm", "dev moved on")
+	gitIn(t, root, "checkout", "-q", "feature")
+	writeFixture(t, root, "base.txt", "uncommitted\n")
+	t.Chdir(root)
+
+	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "dev"})
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	if body["codeChangeType"] != "ref" {
+		t.Fatalf("code change type = %#v", body["codeChangeType"])
+	}
+	files := body["codeChangeFiles"].([]any)
+	file := files[0].(map[string]any)
+	if len(files) != 1 || file["path"] != "base.txt" || file["before"] != "dev\n" || file["after"] != "uncommitted\n" {
+		t.Fatalf("code change files = %#v", files)
+	}
+	if description, _ := body["codeChangeDescription"].(string); !strings.Contains(description, "vs dev") {
+		t.Fatalf("description = %#v", body["codeChangeDescription"])
+	}
+}
+
+func TestReplayRefDiffsAgainstACommit(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	writeFixture(t, root, "base.txt", "one\n")
+	gitIn(t, root, "commit", "-qam", "one")
+	sha := gitIn(t, root, "rev-parse", "HEAD")
+	writeFixture(t, root, "base.txt", "two\n")
+	gitIn(t, root, "commit", "-qam", "two")
+	t.Chdir(root)
+
+	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: sha})
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	files := body["codeChangeFiles"].([]any)
+	file := files[0].(map[string]any)
+	if len(files) != 1 || file["before"] != "one\n" || file["after"] != "two\n" {
+		t.Fatalf("code change files = %#v", files)
+	}
+	if description, _ := body["codeChangeDescription"].(string); !strings.Contains(description, "vs "+sha) {
+		t.Fatalf("description = %#v", body["codeChangeDescription"])
+	}
+}
+
+func TestReplayRefusesAnUnresolvableRefBeforeAnyRequest(t *testing.T) {
+	t.Chdir(initReplayGitRepo(t, "main"))
+	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "no-such-branch"})
+	want := `bitfab: CodeChangeBase "no-such-branch" names no branch or commit in this repository. Pass a branch name, such as "dev", or a commit SHA; fetch it first if it only exists on the remote.`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if body != nil {
+		t.Fatalf("refused replay sent a start request: %#v", body)
 	}
 }

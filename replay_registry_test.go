@@ -627,16 +627,19 @@ func TestReplayRegistryCLIRequiresACodeChangeChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	pairing := "bitfab: --code-change-file goes with --code-change manual, and --code-change manual needs --code-change-file PATH."
+	basePairing := "bitfab: --code-change-base goes with --code-change ref, and --code-change ref needs --code-change-base BRANCH|COMMIT."
 	for _, test := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{"pipeline", "--dry-run"}, `bitfab: --code-change is required: ` + codeChangeChoices + `. "manual" takes the edits from --code-change-file PATH.`},
+		{[]string{"pipeline", "--dry-run"}, `bitfab: --code-change is required: ` + codeChangeChoices + `. "ref" takes the branch or commit from --code-change-base, and "manual" takes the edits from --code-change-file PATH.`},
 		{[]string{"pipeline", "--code-change", "change.json"}, `bitfab: Unknown --code-change 'change.json'. Pass ` + codeChangeChoices + `. A file of edits goes in --code-change manual --code-change-file PATH.`},
 		{[]string{"pipeline", "--no-code-change"}, "bitfab: --no-code-change was replaced by --code-change skip."},
 		{[]string{"pipeline", "--code-change", "skip", "-no-code-change=true"}, "bitfab: --no-code-change was replaced by --code-change skip."},
 		{[]string{"pipeline", "--code-change", "manual"}, pairing},
 		{[]string{"pipeline", "--code-change", "working-tree", "--code-change-file", "change.json"}, pairing},
+		{[]string{"pipeline", "--code-change", "ref"}, basePairing},
+		{[]string{"pipeline", "--code-change", "default-branch", "--code-change-base", "dev"}, basePairing},
 	} {
 		_, err := RunReplayCLI(context.Background(), registry, test.args, io.Discard, io.Discard)
 		if err == nil || err.Error() != test.want {
@@ -674,6 +677,40 @@ func TestReplayRegistryCLIPassesEachCodeChangeType(t *testing.T) {
 				t.Fatalf("flags = %#v", flags)
 			}
 		})
+	}
+}
+
+func TestReplayRegistryCLIForwardsTheRefBase(t *testing.T) {
+	root := initReplayGitRepo(t, "main")
+	writeFixture(t, root, "base.txt", "changed\n")
+	t.Chdir(root)
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"pipeline", "--code-change", "ref", "--code-change-base", "main", "--dry-run"}
+	if err := checkRegistryCLI(registry, args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, args, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.startBody["codeChangeType"] != "ref" {
+		t.Fatalf("start body = %#v", state.startBody)
+	}
+	if description, _ := state.startBody["codeChangeDescription"].(string); !strings.Contains(description, "vs main") {
+		t.Fatalf("description = %#v", state.startBody["codeChangeDescription"])
+	}
+	flags := state.startBody["invocation"].(map[string]any)["flags"].(map[string]any)
+	if flags["code-change"] != "ref" || flags["code-change-base"] != "main" {
+		t.Fatalf("flags = %#v", flags)
 	}
 }
 
@@ -715,9 +752,10 @@ func TestReplayRegistryCLIManualReadsTheCodeChangeFile(t *testing.T) {
 func TestReplayRegistryRefusesRegisteredCodeChangeOptions(t *testing.T) {
 	client := newTestClient("http://127.0.0.1:1")
 	defer client.Close(time.Second)
-	want := "bitfab: registry options cannot set CodeChange, CodeChangeDescription, or CodeChangeFiles; pass --code-change on the command line"
+	want := "bitfab: registry options cannot set CodeChange, CodeChangeDescription, CodeChangeFiles, or CodeChangeBase; pass --code-change on the command line"
 	for _, options := range []ReplayOptions{
 		{CodeChange: CodeChangeSkip},
+		{CodeChangeBase: "dev"},
 		{CodeChangeDescription: "x"},
 		{CodeChangeFiles: []CodeChangeFile{}},
 	} {
@@ -745,7 +783,7 @@ func TestReplayRegistryCLIHelpDescribesCodeChange(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
-	for _, want := range []string{"-code-change working-tree|last-branch|default-branch|skip|manual", "(required: the code change this run tests;", "-code-change-file PATH", "(with --code-change manual: a JSON file of { description, files })"} {
+	for _, want := range []string{"-code-change working-tree|last-branch|default-branch|ref|skip|manual", "(required: the code change this run tests;", "-code-change-base BRANCH|COMMIT", "(with --code-change ref: the branch or commit to diff against)", "-code-change-file PATH", "(with --code-change manual: a JSON file of { description, files })"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("help lacks %q: %s", want, stderr.String())
 		}

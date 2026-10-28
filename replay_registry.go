@@ -85,8 +85,8 @@ func (r *ReplayRegistry) Names() []string {
 }
 
 func refuseRegistryCodeChange(options ReplayOptions) error {
-	if options.CodeChange != "" || options.CodeChangeDescription != "" || options.CodeChangeFiles != nil {
-		return fmt.Errorf("bitfab: registry options cannot set CodeChange, CodeChangeDescription, or CodeChangeFiles; pass --code-change on the command line")
+	if options.CodeChange != "" || options.CodeChangeDescription != "" || options.CodeChangeFiles != nil || options.CodeChangeBase != "" {
+		return fmt.Errorf("bitfab: registry options cannot set CodeChange, CodeChangeDescription, CodeChangeFiles, or CodeChangeBase; pass --code-change on the command line")
 	}
 	return nil
 }
@@ -100,13 +100,13 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, codeChangeFile, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                                                                           int
-	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                         bool
-	parameters                                                                                                                                                             []string
-	metadata                                                                                                                                                               map[string]string
-	visited                                                                                                                                                                map[string]bool
-	flags                                                                                                                                                                  map[string]any
+	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                                                                           int
+	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                         bool
+	parameters                                                                                                                                                                             []string
+	metadata                                                                                                                                                                               map[string]string
+	visited                                                                                                                                                                                map[string]bool
+	flags                                                                                                                                                                                  map[string]any
 }
 
 type registryParameters []string
@@ -144,7 +144,8 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.mock, "mock", "", "marked, all, or none")
 	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "experiment group ID")
 	fs.StringVar(&out.experimentGroupName, "experiment-group-name", "", "Name for the experiment group, applied when this run creates the group or the group has no name yet. A group that already has a name keeps it. Requires --experiment-group-id.")
-	fs.StringVar(&out.codeChange, "code-change", "", "`working-tree|last-branch|default-branch|skip|manual` (required: the code change this run tests; working-tree is the uncommitted changes vs HEAD, last-branch the diff against the branch this one was cut from, default-branch the diff against the default branch, skip none, manual the edits in --code-change-file)")
+	fs.StringVar(&out.codeChange, "code-change", "", "`working-tree|last-branch|default-branch|ref|skip|manual` (required: the code change this run tests; working-tree is the uncommitted changes vs HEAD, last-branch the diff against the branch this one was cut from, default-branch the diff against the default branch, ref the diff against --code-change-base, skip none, manual the edits in --code-change-file)")
+	fs.StringVar(&out.codeChangeBase, "code-change-base", "", "`BRANCH|COMMIT` (with --code-change ref: the branch or commit to diff against)")
 	fs.StringVar(&out.codeChangeFile, "code-change-file", "", "`PATH` (with --code-change manual: a JSON file of { description, files })")
 	fs.StringVar(&out.params, "params", "", "parameters JSON file")
 	fs.StringVar(&out.seed, "seed", "", "seed cases JSON or JSONL file")
@@ -208,10 +209,13 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 
 func requireRegistryCodeChange(parsed registryCLIArgs) error {
 	if !parsed.visited["code-change"] {
-		return fmt.Errorf(`bitfab: --code-change is required: %s. "manual" takes the edits from --code-change-file PATH.`, codeChangeChoices)
+		return fmt.Errorf(`bitfab: --code-change is required: %s. "ref" takes the branch or commit from --code-change-base, and "manual" takes the edits from --code-change-file PATH.`, codeChangeChoices)
 	}
 	if (CodeChangeType(parsed.codeChange) == CodeChangeManual) != parsed.visited["code-change-file"] {
 		return fmt.Errorf("bitfab: --code-change-file goes with --code-change manual, and --code-change manual needs --code-change-file PATH.")
+	}
+	if (CodeChangeType(parsed.codeChange) == CodeChangeRef) != parsed.visited["code-change-base"] {
+		return fmt.Errorf("bitfab: --code-change-base goes with --code-change ref, and --code-change ref needs --code-change-base BRANCH|COMMIT.")
 	}
 	return nil
 }
@@ -549,6 +553,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		options.DBBranch = nil
 	}
 	options.CodeChange = CodeChangeType(parsed.codeChange)
+	if options.CodeChange == CodeChangeRef {
+		options.CodeChangeBase = parsed.codeChangeBase
+	}
 	if options.CodeChange == CodeChangeManual {
 		data, e := os.ReadFile(parsed.codeChangeFile)
 		if e != nil {

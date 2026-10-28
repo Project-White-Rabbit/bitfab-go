@@ -36,15 +36,18 @@ const (
 	// the default branch (origin/HEAD, else origin/main, origin/master, main,
 	// master).
 	CodeChangeDefaultBranch CodeChangeType = "default-branch"
+	// CodeChangeRef attaches the diff against where HEAD split from the branch
+	// or commit in ReplayOptions.CodeChangeBase.
+	CodeChangeRef CodeChangeType = "ref"
 	// CodeChangeSkip attaches no code change, such as for a baseline run.
 	CodeChangeSkip CodeChangeType = "skip"
 	// CodeChangeManual attaches the files passed in ReplayOptions.CodeChangeFiles.
 	CodeChangeManual CodeChangeType = "manual"
 )
 
-const codeChangeChoices = `"working-tree" (uncommitted changes vs HEAD), "last-branch" (the diff against the branch this one was cut from), "default-branch" (the diff against the default branch), "skip" (no code change), or "manual" (pass the files yourself)`
+const codeChangeChoices = `"working-tree" (uncommitted changes vs HEAD), "last-branch" (the diff against the branch this one was cut from), "default-branch" (the diff against the default branch), "ref" (the diff against a branch or commit you name), "skip" (no code change), or "manual" (pass the files yourself)`
 
-var codeChangeTypes = []CodeChangeType{CodeChangeWorkingTree, CodeChangeLastBranch, CodeChangeDefaultBranch, CodeChangeSkip, CodeChangeManual}
+var codeChangeTypes = []CodeChangeType{CodeChangeWorkingTree, CodeChangeLastBranch, CodeChangeDefaultBranch, CodeChangeRef, CodeChangeSkip, CodeChangeManual}
 
 func isCodeChangeType(value string) bool {
 	return slices.Contains(codeChangeTypes, CodeChangeType(value))
@@ -76,29 +79,39 @@ func validateCodeChange(options *ReplayOptions) error {
 	if codeChange != CodeChangeManual && hasFiles {
 		return fmt.Errorf(`bitfab: CodeChangeFiles only applies with CodeChange "manual" (got %q).`, string(codeChange))
 	}
+	base := strings.TrimSpace(options.CodeChangeBase)
+	if codeChange == CodeChangeRef && (base == "" || strings.HasPrefix(base, "-")) {
+		return fmt.Errorf(`bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`)
+	}
+	if codeChange != CodeChangeRef && options.CodeChangeBase != "" {
+		return fmt.Errorf(`bitfab: CodeChangeBase only applies with CodeChange "ref" (got %q).`, string(codeChange))
+	}
 	if codeChange == CodeChangeSkip && options.CodeChangeDescription != "" {
 		return fmt.Errorf(`bitfab: CodeChange "skip" attaches no code change, so it cannot take a CodeChangeDescription.`)
 	}
 	return nil
 }
 
-func resolveCodeChange(ctx context.Context, options ReplayOptions) (string, []CodeChangeFile) {
+func resolveCodeChange(ctx context.Context, options ReplayOptions) (string, []CodeChangeFile, error) {
 	switch options.CodeChange {
 	case CodeChangeSkip:
-		return "", nil
+		return "", nil, nil
 	case CodeChangeManual:
-		return options.CodeChangeDescription, options.CodeChangeFiles
+		return options.CodeChangeDescription, options.CodeChangeFiles, nil
 	}
-	captured := captureCodeChange(ctx, options.CodeChange, options.Name)
+	captured, err := captureCodeChange(ctx, options.CodeChange, options.Name, strings.TrimSpace(options.CodeChangeBase))
+	if err != nil {
+		return "", nil, err
+	}
 	if captured == nil || len(captured.Files) == 0 {
 		warnNoCodeChangeFound(options.CodeChange)
-		return options.CodeChangeDescription, nil
+		return options.CodeChangeDescription, nil, nil
 	}
 	description := options.CodeChangeDescription
 	if description == "" && captured.Description != nil {
 		description = *captured.Description
 	}
-	return description, captured.Files
+	return description, captured.Files, nil
 }
 
 func warnNoCodeChangeFound(codeChange CodeChangeType) {
@@ -106,15 +119,15 @@ func warnNoCodeChangeFound(codeChange CodeChangeType) {
 	log.Printf("Bitfab: CodeChange %q found no changed files, so this replay has no code change attached.", string(codeChange))
 }
 
-func captureCodeChange(ctx context.Context, codeChange CodeChangeType, label string) *resolvedCodeChange {
+func captureCodeChange(ctx context.Context, codeChange CodeChangeType, label string, chosenBase string) (*resolvedCodeChange, error) {
 	if fromFile := readCodeChangeOverride(); fromFile != nil {
-		return fromFile
+		return fromFile, nil
 	}
 	workingDirectory, err := os.Getwd()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return captureCodeChangeFromGit(ctx, workingDirectory, codeChange, label)
+	return captureCodeChangeFromGit(ctx, workingDirectory, codeChange, label, chosenBase)
 }
 
 func readCodeChangeOverride() *resolvedCodeChange {
@@ -149,19 +162,19 @@ func readCodeChangeOverride() *resolvedCodeChange {
 	return &resolvedCodeChange{Description: description, Files: files}
 }
 
-func captureCodeChangeFromGit(ctx context.Context, cwd string, codeChange CodeChangeType, label string) *resolvedCodeChange {
+func captureCodeChangeFromGit(ctx context.Context, cwd string, codeChange CodeChangeType, label string, chosenBase string) (*resolvedCodeChange, error) {
 	root, ok := runReplayGit(ctx, cwd, "rev-parse", "--show-toplevel")
 	root = strings.TrimSpace(root)
 	if !ok || root == "" {
-		return nil
+		return nil, nil
 	}
-	base, against, ok := resolveCodeChangeBase(ctx, root, codeChange)
-	if !ok {
-		return nil
+	base, against, ok, err := resolveCodeChangeBase(ctx, root, codeChange, chosenBase)
+	if err != nil || !ok {
+		return nil, err
 	}
 	entries := listCodeChanges(ctx, root, base)
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	files := make([]CodeChangeFile, 0, min(len(entries), maxCodeChangeFiles))
@@ -205,7 +218,7 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, codeChange CodeCh
 		files = append(files, CodeChangeFile{Path: entry.path, Before: before, After: after})
 	}
 	if len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	subject, _ := runReplayGit(ctx, root, "log", "-1", "--format=%s", "HEAD")
@@ -221,7 +234,7 @@ func captureCodeChangeFromGit(ctx context.Context, cwd string, codeChange CodeCh
 		word = "file"
 	}
 	description := head + " (" + strconv.Itoa(len(files)) + " " + word + " changed " + against + ")"
-	return &resolvedCodeChange{Description: &description, Files: files}
+	return &resolvedCodeChange{Description: &description, Files: files}, nil
 }
 
 func listCodeChanges(ctx context.Context, root string, base string) []gitCodeChange {
@@ -373,17 +386,39 @@ func resolveDefaultBranchPoint(ctx context.Context, root string) (string, string
 	return base, "vs " + defaultBranch, true
 }
 
-func resolveCodeChangeBase(ctx context.Context, root string, codeChange CodeChangeType) (string, string, bool) {
+func resolveCodeChangeBase(ctx context.Context, root string, codeChange CodeChangeType, chosenBase string) (string, string, bool, error) {
 	switch codeChange {
+	case CodeChangeRef:
+		if chosenBase == "" {
+			return "", "", false, nil
+		}
+		return resolveChosenBase(ctx, root, chosenBase)
 	case CodeChangeLastBranch:
-		return resolveBranchPoint(ctx, root)
+		base, against, ok := resolveBranchPoint(ctx, root)
+		return base, against, ok, nil
 	case CodeChangeDefaultBranch:
-		return resolveDefaultBranchPoint(ctx, root)
+		base, against, ok := resolveDefaultBranchPoint(ctx, root)
+		return base, against, ok, nil
 	}
 	if replayGitRefExists(ctx, root, "HEAD") {
-		return "HEAD", "uncommitted (vs HEAD)", true
+		return "HEAD", "uncommitted (vs HEAD)", true, nil
 	}
-	return "", "", false
+	return "", "", false, nil
+}
+
+func resolveChosenBase(ctx context.Context, root string, chosen string) (string, string, bool, error) {
+	for _, ref := range []string{chosen, "origin/" + chosen} {
+		if !replayGitRefExists(ctx, root, ref+"^{commit}") {
+			continue
+		}
+		base, ok := runReplayGit(ctx, root, "merge-base", "HEAD", ref)
+		base = strings.TrimSpace(base)
+		if !ok || base == "" {
+			return "", "", false, nil
+		}
+		return base, "vs " + chosen, true, nil
+	}
+	return "", "", false, fmt.Errorf(`bitfab: CodeChangeBase %q names no branch or commit in this repository. Pass a branch name, such as "dev", or a commit SHA; fetch it first if it only exists on the remote.`, chosen)
 }
 
 func replayGitRefExists(ctx context.Context, root string, ref string) bool {
