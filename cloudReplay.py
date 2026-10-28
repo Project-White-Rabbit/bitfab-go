@@ -152,6 +152,11 @@ CODE_CHANGE_FLAG = "--code-change"
 CODE_CHANGE_BASE_FLAG = "--code-change-base"
 BRANCH_CODE_CHANGES = ("last-branch", "default-branch", "ref")
 GIT_CODE_CHANGES = ("working-tree", *BRANCH_CODE_CHANGES)
+FETCHED_CODE_CHANGES = ("default-branch", "ref")
+CHECKOUT_ONLY_CODE_CHANGES = ("working-tree", "last-branch")
+GIT_TOKEN_ENV = "BITFAB_REPLAY_GIT_TOKEN"
+GIT_TOKEN_VALUE = "${{ github.token }}"
+FETCH_SECONDS = 600
 DESCRIBED_REF = re.compile(r"[^\x00-\x1f\x7f]{1,200}")
 CHECKOUT_DEPTH = 2
 CODE_CHANGE_PATH_ENV = "BITFAB_CODE_CHANGE_PATH"
@@ -223,9 +228,12 @@ Options added by --cloud:
                          checkout of the repository, with GitHub access that can
                          read it and run Actions (a job token needs contents: read
                          and actions: write, passed as GH_TOKEN), and a workflow on
-                         BRANCH that declares a request input. With no snapshot
-                         there is nothing to diff against, so it takes
-                         --code-change skip or manual, as does a dispatched run.
+                         BRANCH that declares a request input. With no snapshot,
+                         --code-change default-branch and ref fetch their base on
+                         the runner with the run's GitHub token, which the
+                         workflow passes as BITFAB_REPLAY_GIT_TOKEN and the
+                         replay never sees; working-tree and last-branch are
+                         refused, as they are on a dispatched run.
 
 A workflow can also dispatch bitfab-replay.yml itself on any branch other than a
 bitfab-replay/ snapshot branch, passing the replay as JSON in the request input:
@@ -1048,9 +1056,15 @@ def chosen_base_point(root, chosen):
 
 def refuse_git_code_change(replay, where):
     kind = flag_value(replay, CODE_CHANGE_FLAG)
-    if kind in GIT_CODE_CHANGES:
+    if kind in CHECKOUT_ONLY_CODE_CHANGES:
         raise ValueError(
-            f"{where} as it is on GitHub, with no snapshot of a checkout, so --code-change {kind} has nothing to compare against there; pass --code-change skip, or --code-change manual with --code-change-file, or start it with bitfab-replay --cloud and no --cloud-ref, which resolves {kind} from your checkout before upload"
+            f"{where} as it is on GitHub, with no snapshot of a checkout, so --code-change {kind} has nothing to compare against there; pass --code-change default-branch, --code-change ref with {CODE_CHANGE_BASE_FLAG}, --code-change skip, or --code-change manual with --code-change-file, or start it with bitfab-replay --cloud and no --cloud-ref, which resolves {kind} from your checkout before upload"
+        )
+    if kind == "ref" and not BRANCH_NAME.fullmatch(
+        flag_value(replay, CODE_CHANGE_BASE_FLAG) or ""
+    ):
+        raise ValueError(
+            f"{where} as it is on GitHub, so --code-change ref needs {CODE_CHANGE_BASE_FLAG} naming a branch or commit SHA on GitHub to fetch there"
         )
 
 
@@ -2069,12 +2083,27 @@ def snapshot_request(root, commit):
     return request
 
 
-def dispatched_inputs():
+def dispatch_event():
     path = os.environ.get("GITHUB_EVENT_PATH")
     if not path or not Path(path).is_file():
         return {}
-    inputs = json.loads(Path(path).read_text()).get("inputs")
+    event = json.loads(Path(path).read_text())
+    return event if isinstance(event, dict) else {}
+
+
+def dispatched_inputs():
+    inputs = dispatch_event().get("inputs")
     return inputs if isinstance(inputs, dict) else {}
+
+
+def event_default_branch():
+    repository = dispatch_event().get("repository")
+    branch = repository.get("default_branch") if isinstance(repository, dict) else None
+    if not isinstance(branch, str) or not BRANCH_NAME.fullmatch(branch):
+        raise ValueError(
+            "The run's event names no default branch, so --code-change default-branch has nothing to compare against; pass --code-change ref with --code-change-base"
+        )
+    return branch
 
 
 def decode_request(text):
@@ -2279,6 +2308,72 @@ def runner_code_change(root, base, commit, request):
     return change or {"files": []}
 
 
+def git_token_environment(token):
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if not token:
+        return environment
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return {
+        **environment,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+    }
+
+
+def fetched_base(root, ref, token):
+    shallow = quiet_git(root, "rev-parse", "--is-shallow-repository") == "true"
+    try:
+        command(
+            [
+                "git",
+                "-C",
+                str(root),
+                "fetch",
+                "-q",
+                "--no-tags",
+                *(["--unshallow"] if shallow else []),
+                "origin",
+                ref,
+            ],
+            env=git_token_environment(token),
+            timeout=FETCH_SECONDS,
+        )
+    except (CommandError, subprocess.TimeoutExpired) as error:
+        hint = (
+            "check that it exists on GitHub"
+            if token
+            else f"the workflow passes no {GIT_TOKEN_ENV} to fetch it with, so run bitfab-replay --cloud-update and commit the workflow it updates"
+        )
+        raise ValueError(
+            f"Could not fetch {ref} from origin to compare against ({error}); {hint}, or pass --code-change skip"
+        ) from None
+    base = quiet_git(root, "merge-base", "HEAD", "FETCH_HEAD")
+    if not base:
+        raise ValueError(
+            f"This branch shares no history with {ref}, so there is nothing to compare against"
+        )
+    return base
+
+
+def dispatched_code_change(root, commit, request, token):
+    args = request["args"]
+    kind = flag_value(args, CODE_CHANGE_FLAG)
+    if kind not in FETCHED_CODE_CHANGES:
+        return None
+    ref = (
+        flag_value(args, CODE_CHANGE_BASE_FLAG)
+        if kind == "ref"
+        else event_default_branch()
+    )
+    print(f"Fetching {ref} to record the code change against it", flush=True)
+    base = fetched_base(root, ref, token)
+    change = snapshot_code_change(
+        root, base, commit, replay_name(args), f"vs {ref}", commit
+    )
+    return change or {"files": []}
+
+
 def write_code_change(change):
     handle, path = tempfile.mkstemp(
         prefix="bitfab-code-change-",
@@ -2293,14 +2388,16 @@ def write_code_change(change):
 def execute():
     if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
         raise ValueError("Submit a new replay instead of rerunning an Actions job")
+    git_token = os.environ.pop(GIT_TOKEN_ENV, None)
     root = root_directory()
     commit = os.environ["GITHUB_SHA"]
     if git(root, "rev-parse", "HEAD") != commit:
         raise ValueError("Runner checkout does not match the dispatched commit")
     request = runner_request(root, commit)
+    snapshot = os.environ.get("GITHUB_REF_NAME", "").startswith(PREFIX)
     base = (
         check_out_snapshot_base(root, commit, request.get("branch"))
-        if os.environ.get("GITHUB_REF_NAME", "").startswith(PREFIX)
+        if snapshot
         else None
     )
     directory = within(root, request["cwd"])
@@ -2309,7 +2406,12 @@ def execute():
     if environment:
         workflow_environment_conflicts(root, environment)
         print(f"Setting {', '.join(sorted(environment))} from the request", flush=True)
-    change = None if base is None else runner_code_change(root, base, commit, request)
+    if snapshot:
+        change = (
+            None if base is None else runner_code_change(root, base, commit, request)
+        )
+    else:
+        change = dispatched_code_change(root, commit, request, git_token)
     run_environment = dict(environment)
     if change is not None:
         run_environment[CODE_CHANGE_PATH_ENV] = write_code_change(change)
@@ -3087,7 +3189,7 @@ def workflow_document(steps, run, directory, env, *, runs_on, environment):
         {
             **({} if directory == "." else {"working-directory": directory}),
             "run": f"{run} --cloud-execute",
-            "env": env,
+            "env": {**env, GIT_TOKEN_ENV: GIT_TOKEN_VALUE},
         },
     ]
     return {
@@ -3224,6 +3326,46 @@ def add_checkout_depth(lines):
         lines[end:end] = [" " * key + "with:", " " * (key + 2) + entry]
         return "updated"
     return "unchanged"
+
+
+def has_git_token_env(lines):
+    return any(
+        re.match(rf'[ \t]*(- +)?"?{GIT_TOKEN_ENV}"?[ \t]*:', without_yaml_comment(line))
+        for line in lines
+    )
+
+
+def add_git_token_env(lines):
+    execute = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if "--cloud-execute" in without_yaml_comment(lines[index])
+        ),
+        None,
+    )
+    if execute is None:
+        return False
+    start = execute
+    while start > 0 and not re.match(r"[ \t]*- ", lines[start]):
+        start -= 1
+    key = len(lines[start]) - len(lines[start].lstrip(" \t-"))
+    end = block_end(lines, start, key - 1)
+    entry = f"{GIT_TOKEN_ENV}: {json.dumps(GIT_TOKEN_VALUE)}"
+    for at in range(start, end):
+        env_key = re.fullmatch(
+            r"[ \t]*(- +)?\"?env\"?[ \t]*:(.*)", without_yaml_comment(lines[at])
+        )
+        if not env_key or len(lines[at]) - len(lines[at].lstrip(" \t-")) != key:
+            continue
+        if env_key[2].strip():
+            return False
+        entries = block_end(lines, at, key)
+        child = indentation(lines[at + 1]) if entries > at + 1 else key + 2
+        lines.insert(entries, " " * child + entry)
+        return True
+    lines[end:end] = [" " * key + "env:", " " * (key + 2) + entry]
+    return True
 
 
 def add_id_token_permission(lines):
@@ -3412,6 +3554,15 @@ def update_workflow(root, path, *, remove_old_key_secrets=False):
         updated.append(
             f"Removed the {API_KEY_ENV} line, which read a secret by a name built from the run's inputs and so gave the runner every secret in the repository; the runner now gets the key from Bitfab"
         )
+    if not has_git_token_env(lines):
+        if add_git_token_env(lines):
+            updated.append(
+                f"Passed the run's GitHub token to the replay step as {GIT_TOKEN_ENV}, so a --cloud-ref or dispatched replay can fetch the branch it compares against for --code-change default-branch or ref; the replay itself never sees it"
+            )
+        else:
+            by_hand.append(
+                f"{GIT_TOKEN_ENV}: {json.dumps(GIT_TOKEN_VALUE)} in the env of the step that runs --cloud-execute"
+            )
     depth = add_checkout_depth(lines)
     if depth == "updated":
         updated.append(
@@ -3450,7 +3601,7 @@ def update_workflow(root, path, *, remove_old_key_secrets=False):
 def initialize(argv, name="--cloud-init"):
     parser = argparse.ArgumentParser(
         prog=f"bitfab-replay {name}",
-        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the push trigger and the condition that skips a duplicate push run, the run name, and the id-token: write permission), removes the BITFAB_REPLAY_BITFAB_API_KEY line older SDKs wrote, lists what it changed, and lists the BITFAB_REPLAY_KEY_* secrets older SDKs left in the repository; edit it directly for anything else.",
+        description="Write .github/workflows/bitfab-replay.yml, the only file cloud replay keeps in the repository, and list what is left to do. It detects the runtime, package manager, install command, and replay command from the directory you run it in. On an existing workflow it only adds what a newer SDK needs (the execution_id and key_id inputs, the push trigger and the condition that skips a duplicate push run, the run name, the id-token: write permission, and the BITFAB_REPLAY_GIT_TOKEN line that lets a --cloud-ref or dispatched replay fetch the branch it compares against), removes the BITFAB_REPLAY_BITFAB_API_KEY line older SDKs wrote, lists what it changed, and lists the BITFAB_REPLAY_KEY_* secrets older SDKs left in the repository; edit it directly for anything else.",
     )
     parser.add_argument(
         "--secret",
