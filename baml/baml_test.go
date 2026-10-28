@@ -29,7 +29,7 @@ func localBAML(t *testing.T) (string, *httptest.Server) {
 			response = `{"answer":42}`
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "chat-test", "object": "chat.completion", "model": "local-test", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": response}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}})
+		json.NewEncoder(w).Encode(map[string]any{"id": "chat-test", "object": "chat.completion", "model": "local-test", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": response}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9, "cost": 0.00042}})
 	}))
 	source := fmt.Sprintf(`client<llm> Local {
  provider openai
@@ -98,6 +98,22 @@ func TestNativeCollectorWrapper(t *testing.T) {
 	log, _ := data["last"].(map[string]any)
 	if len(log["calls"].([]any)) != 1 {
 		t.Fatal("missing wrapped invocation")
+	}
+	selected, _ := log["calls"].([]any)[0].(map[string]any)
+	request, _ := selected["http_request"].(map[string]any)
+	body, _ := request["body"].(map[string]any)
+	entry := contextEntry(log, selected, request, body, data)
+	if entry["costUsd"] != 0.00042 || entry["model"] != "local-test" || fmt.Sprint(entry["inputTokens"]) != "5" {
+		t.Fatalf("context entry is missing the reported cost or usage: %#v", entry)
+	}
+}
+
+func TestContextEntryRecordsCachedTokensAndLeavesOutAMissingCost(t *testing.T) {
+	selected := map[string]any{"provider": "openai", "usage": map[string]any{"input_tokens": 100, "cached_input_tokens": 40}}
+	entry := contextEntry(map[string]any{}, selected, map[string]any{}, map[string]any{"model": "gpt-4.1"}, map[string]any{})
+	want := map[string]any{"provider": "openai", "model": "gpt-4.1", "inputTokens": 100, "cachedInputTokens": 40}
+	if !reflect.DeepEqual(entry, want) {
+		t.Fatalf("context entry = %#v, want %#v", entry, want)
 	}
 }
 

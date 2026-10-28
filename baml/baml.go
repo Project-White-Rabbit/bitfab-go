@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"regexp"
 	"sync"
@@ -118,7 +119,7 @@ func serialize(value reflect.Value, depth int) (result any) {
 	if method := value.MethodByName("JSON"); method.IsValid() {
 		result := method.Call(nil)
 		if len(result) == 2 && result[1].IsNil() {
-			return serialize(result[0], depth+1)
+			return result[0].Interface()
 		}
 	}
 	output := map[string]any{}
@@ -207,6 +208,12 @@ func enrich(ctx context.Context, collector map[string]any) {
 			bitfab.GetCurrentSpan(ctx).SetPrompt(string(encoded))
 		}
 	}
+	if metadata := contextEntry(log, selected, request, body, collector); len(metadata) > 0 {
+		bitfab.GetCurrentSpan(ctx).AddContext(metadata)
+	}
+}
+
+func contextEntry(log, selected, request, body, collector map[string]any) map[string]any {
 	metadata := map[string]any{}
 	if provider, ok := selected["provider"].(string); ok {
 		metadata["provider"] = provider
@@ -220,7 +227,7 @@ func enrich(ctx context.Context, collector map[string]any) {
 	}
 	usage, _ := collector["usage"].(map[string]any)
 	fallback, _ := selected["usage"].(map[string]any)
-	for key, target := range map[string]string{"input_tokens": "inputTokens", "output_tokens": "outputTokens"} {
+	for key, target := range map[string]string{"input_tokens": "inputTokens", "output_tokens": "outputTokens", "cached_input_tokens": "cachedInputTokens"} {
 		value := usage[key]
 		if value == nil {
 			value = fallback[key]
@@ -229,13 +236,17 @@ func enrich(ctx context.Context, collector map[string]any) {
 			metadata[target] = value
 		}
 	}
+	response, _ := selected["http_response"].(map[string]any)
+	responseBody, _ := response["body"].(map[string]any)
+	responseUsage, _ := responseBody["usage"].(map[string]any)
+	if cost, ok := responseUsage["cost"].(float64); ok && !math.IsInf(cost, 0) && !math.IsNaN(cost) {
+		metadata["costUsd"] = cost
+	}
 	timing, _ := log["timing"].(map[string]any)
 	if value := timing["duration_ms"]; value != nil {
 		metadata["durationMs"] = value
 	}
-	if len(metadata) > 0 {
-		bitfab.GetCurrentSpan(ctx).AddContext(metadata)
-	}
+	return metadata
 }
 
 func normalizeDynamic(value any) any {
