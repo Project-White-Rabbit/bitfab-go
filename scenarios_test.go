@@ -124,6 +124,22 @@ func TestScenarios_GenerateStartsOnTheTracePathAndReturnsAtOnce(t *testing.T) {
 	}
 }
 
+func TestScenarios_GenerateSendsRegenerateWhenAsked(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"generation": map[string]any{
+			"status": "started", "traceId": "trace-1", "scenarioId": "s1", "creationStatus": "generating",
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Traces.GenerateScenario(context.Background(), "trace-1", WithRegenerate()); err != nil {
+		t.Fatal(err)
+	}
+	request := server.recorded()[0]
+	if request.body["regenerate"] != true || len(request.body) != 1 {
+		t.Fatalf("body = %+v", request.body)
+	}
+}
+
 func TestScenarios_GetDecodesAScenarioStillGenerating(t *testing.T) {
 	response := testScenarioResponse()
 	scenario := response["scenario"].(map[string]any)

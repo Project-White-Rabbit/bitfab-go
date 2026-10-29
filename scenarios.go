@@ -435,19 +435,44 @@ type ScenarioGeneration struct {
 	CreationStatus ScenarioCreationStatus   `json:"creationStatus"`
 }
 
+// GenerateScenarioOption configures GenerateScenario.
+type GenerateScenarioOption func(*generateScenarioConfig)
+
+type generateScenarioConfig struct {
+	regenerate bool
+}
+
+// WithRegenerate builds a scenario the trace already has again: its name,
+// description, trigger, data, and actual outcome are cleared and built over,
+// and the organization's scenario callback, when one is set up, is asked
+// again. Its categories, review status, labels, and assertions are kept, and
+// asking while it is generating starts nothing more.
+func WithRegenerate() GenerateScenarioOption {
+	return func(config *generateScenarioConfig) { config.regenerate = true }
+}
+
 // GenerateScenario starts building the scenario for one trace and returns at
 // once, without waiting for it. Poll GetScenario until its CreationStatus is
 // ScenarioCreationCreated or ScenarioCreationError. A trace that already has a
-// scenario is left as it is, unless building it failed, which starts it again. A replay, a trace outside the
+// scenario is left as it is, unless building it failed, which starts it again,
+// or WithRegenerate is passed. A replay, a trace outside the
 // organization, or a trace Bitfab cannot build a scenario for (not
 // noah-agent-turn and no scenario callback) returns an error. Adding a trace
 // to a dataset starts the same build only when the organization has a
 // scenario callback.
-func (t *TracesClient) GenerateScenario(ctx context.Context, traceID string) (*ScenarioGeneration, error) {
+func (t *TracesClient) GenerateScenario(ctx context.Context, traceID string, options ...GenerateScenarioOption) (*ScenarioGeneration, error) {
+	config := generateScenarioConfig{}
+	for _, option := range options {
+		option(&config)
+	}
+	payload := map[string]any{}
+	if config.regenerate {
+		payload["regenerate"] = true
+	}
 	var response struct {
 		Generation ScenarioGeneration `json:"generation"`
 	}
-	if err := t.httpClient.requestInto(ctx, traceScenarioPath(traceID)+"/generate", map[string]any{}, &response); err != nil {
+	if err := t.httpClient.requestInto(ctx, traceScenarioPath(traceID)+"/generate", payload, &response); err != nil {
 		return nil, err
 	}
 	return &response.Generation, nil
