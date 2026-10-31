@@ -100,13 +100,13 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                                                                                           int
-	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                         bool
-	parameters                                                                                                                                                                             []string
-	metadata                                                                                                                                                                               map[string]string
-	visited                                                                                                                                                                                map[string]bool
-	flags                                                                                                                                                                                  map[string]any
+	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                                                                                        int
+	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                      bool
+	parameters                                                                                                                                                                                          []string
+	metadata                                                                                                                                                                                            map[string]string
+	visited                                                                                                                                                                                             map[string]bool
+	flags                                                                                                                                                                                               map[string]any
 }
 
 type registryParameters []string
@@ -153,6 +153,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.executeItem, "execute-item", "", "internal replay assignment")
 	fs.StringVar(&out.fromTrace, "from-trace", "", "trace IDs to reseed")
 	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
+	fs.StringVar(&out.categoryIDs, "category-ids", "", "with --trace-ids or --dataset-ids: replay only the traces carrying an approved assertion in one of these categories; which assertions are judged stays the same")
 	fs.BoolVar(&out.judge, "judge-assertions", false, "deprecated: judging is on by default")
 	fs.BoolVar(&out.skipJudging, "skip-assertion-judging", false, "don't judge approved assertions on each replay; judging is on by default and costs model calls")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
@@ -315,28 +316,40 @@ func loadRegistryParams(path string, raw []string) (map[string]any, error) {
 	return params, nil
 }
 
+type registryAssertionNarrowing struct {
+	onlyWithAssertions bool
+	categoryIDs        []string
+}
+
+func (n registryAssertionNarrowing) narrows() bool {
+	return n.onlyWithAssertions || n.categoryIDs != nil
+}
+
 // hasApprovedAssertion reports whether a trace carries an assertion a person has
 // approved. GetAssertions returns every state so a reviewer can see drafts, but
 // only an approved assertion is checked on a replay, so narrowing on anything
 // else would pick traces the run cannot be judged against. The server applies
 // the same rule when it revalidates the selection.
-func hasApprovedAssertion(assertions []TraceAssertion) bool {
+func hasApprovedAssertion(assertions []TraceAssertion, categoryIDs []string) bool {
 	for _, assertion := range assertions {
-		if assertion.ApprovalState == ApprovalApproved {
+		if assertion.ApprovalState != ApprovalApproved {
+			continue
+		}
+		if categoryIDs == nil || (assertion.CategoryID != nil && slices.Contains(categoryIDs, *assertion.CategoryID)) {
 			return true
 		}
 	}
 	return false
 }
 
-func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, limit int, assertions bool) ([]string, error) {
+func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, limit int, narrowing registryAssertionNarrowing) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("bitfab: replay limit must be positive")
 	}
 	if limit >= len(ids) {
 		return ids, nil
 	}
-	if !assertions {
+	if !narrowing.narrows() {
 		return ids[:limit], nil
 	}
 	selected := []string{}
@@ -345,7 +358,7 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		if err != nil {
 			return nil, err
 		}
-		if result.InheritedFrom == nil && hasApprovedAssertion(result.Assertions) {
+		if result.InheritedFrom == nil && hasApprovedAssertion(result.Assertions, narrowing.categoryIDs) {
 			selected = append(selected, id)
 			if len(selected) == limit {
 				break
@@ -353,6 +366,9 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		}
 	}
 	if len(selected) == 0 {
+		if narrowing.categoryIDs != nil {
+			return nil, fmt.Errorf("bitfab: No traces with an approved assertion in the given categories matched this replay selection.")
+		}
 		return nil, fmt.Errorf("bitfab: no traces with approved assertions matched this selection")
 	}
 	return selected, nil
@@ -427,6 +443,7 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	options.TraceIDs = slices.Clone(options.TraceIDs)
 	options.DatasetIDs = slices.Clone(options.DatasetIDs)
 	options.GraderIDs = slices.Clone(options.GraderIDs)
+	options.CategoryIDs = slices.Clone(options.CategoryIDs)
 	options.MockOverrides = slices.Clone(options.MockOverrides)
 	if options.DBBranch != nil {
 		branch := *options.DBBranch
@@ -465,6 +482,16 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		if parsed.visited["only-with-assertions"] {
 			options.OnlyWithAssertions = parsed.assertions
 		}
+		if parsed.visited["category-ids"] {
+			options.CategoryIDs, err = registryIDs(parsed.categoryIDs)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if options.CategoryIDs != nil && options.TraceIDs == nil && options.DatasetIDs == nil {
+			return nil, fmt.Errorf("bitfab: --category-ids narrows a trace ID or dataset selection. Pass it with --trace-ids or --dataset-ids.")
+		}
+		narrowing := registryAssertionNarrowing{onlyWithAssertions: options.OnlyWithAssertions, categoryIDs: options.CategoryIDs}
 		if parsed.visited["judge-assertions"] {
 			fmt.Fprintln(stderr, "bitfab: --judge-assertions is deprecated. Assertion judging is on by default; pass --skip-assertion-judging to turn it off.")
 		}
@@ -481,7 +508,7 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		options.Limit = 0
 		if options.TraceIDs != nil {
 			if bound > 0 {
-				options.TraceIDs, err = boundRegistryTraceIDs(ctx, entry.Client, options.TraceIDs, bound, options.OnlyWithAssertions)
+				options.TraceIDs, err = boundRegistryTraceIDs(ctx, entry.Client, options.TraceIDs, bound, narrowing)
 			}
 		} else if options.DatasetIDs != nil {
 			if bound > 0 {
@@ -499,7 +526,7 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 					if bound > 100 {
 						return nil, fmt.Errorf("bitfab: bounding datasets supports at most 100 pinned trace IDs")
 					}
-					options.TraceIDs, err = boundRegistryTraceIDs(ctx, entry.Client, members, bound, options.OnlyWithAssertions)
+					options.TraceIDs, err = boundRegistryTraceIDs(ctx, entry.Client, members, bound, narrowing)
 				}
 			}
 		} else {

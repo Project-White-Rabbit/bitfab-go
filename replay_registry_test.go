@@ -230,11 +230,11 @@ func TestReplayRegistryBoundExplicitOrderingInheritedAndErrors(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(server.URL)
 	defer client.Close(time.Second)
-	ids, err := boundRegistryTraceIDs(context.Background(), client, []string{"replayed", "good", "unread"}, 1, true)
+	ids, err := boundRegistryTraceIDs(context.Background(), client, []string{"replayed", "good", "unread"}, 1, registryAssertionNarrowing{onlyWithAssertions: true})
 	if err != nil || !slices.Equal(ids, []string{"good"}) || len(reads) != 2 {
 		t.Fatalf("selection %v %v reads %v", ids, err, reads)
 	}
-	if _, err = boundRegistryTraceIDs(context.Background(), client, []string{"bad", "good"}, 1, true); err == nil {
+	if _, err = boundRegistryTraceIDs(context.Background(), client, []string{"bad", "good"}, 1, registryAssertionNarrowing{onlyWithAssertions: true}); err == nil {
 		t.Fatal("transport error swallowed")
 	}
 }
@@ -365,6 +365,119 @@ func TestReplayRegistryCLISkipsAssertionsAwaitingReview(t *testing.T) {
 	got, ok := state.startBody["traceIds"].([]any)
 	if !ok || len(got) != 1 || got[0] != "reviewed" {
 		t.Fatalf("selected trace ids = %#v, want only the reviewed trace", state.startBody["traceIds"])
+	}
+}
+
+func TestReplayRegistryCLIBoundsSelectionByCategory(t *testing.T) {
+	state := &replayTestServerState{}
+	base := replayTestHandler(t, state, replayItems())
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/sdk/traces/uncategorized/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a1", "approvalState": "approved", "category_id": nil}}, "inheritedFrom": nil})
+		case "/api/sdk/traces/other/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a2", "approvalState": "approved", "category_id": "cat-other"}}, "inheritedFrom": nil})
+		case "/api/sdk/traces/pending/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a3", "approvalState": "pending", "category_id": "cat-1"}}, "inheritedFrom": nil})
+		case "/api/sdk/traces/match/assertions":
+			writeReplayTestJSON(t, w, map[string]any{"assertions": []any{map[string]any{"id": "a4", "approvalState": "approved", "category_id": "cat-1"}}, "inheritedFrom": nil})
+		default:
+			base(w, r)
+		}
+	})
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string, int) {})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry,
+		[]string{"pipeline", "--code-change", "skip", "--trace-ids", "uncategorized,other,pending,match", "--limit", "1", "--dry-run", "--category-ids", "cat-1,cat-2"},
+		io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	body := state.startBody
+	state.mu.Unlock()
+	if got, _ := body["traceIds"].([]any); len(got) != 1 || got[0] != "match" {
+		t.Fatalf("selected trace ids = %#v, want only the trace with an approved assertion in a named category", body["traceIds"])
+	}
+	if !reflect.DeepEqual(body["categoryIds"], []any{"cat-1", "cat-2"}) {
+		t.Fatalf("categoryIds = %#v", body["categoryIds"])
+	}
+	_, err := RunReplayCLI(context.Background(), registry,
+		[]string{"pipeline", "--code-change", "skip", "--trace-ids", "uncategorized,other,pending", "--limit", "1", "--dry-run", "--category-ids", "cat-1"},
+		io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "No traces with an approved assertion in the given categories matched this replay selection.") {
+		t.Fatalf("empty narrowing error = %v", err)
+	}
+}
+
+func TestReplayRegistryCLICategoryIDs(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("registered", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string, int) {}), Options: ReplayOptions{DatasetIDs: []string{"ds"}, CategoryIDs: []string{"cat-registered"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register("bare", ReplayRegistration{Client: client, Function: BindReplayFunction("registry", func(string, int) {})}); err != nil {
+		t.Fatal(err)
+	}
+	startBody := func() map[string]any {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		body := state.startBody
+		state.startBody = nil
+		return body
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"registered", "--code-change", "skip", "--dry-run"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := startBody()["categoryIds"]; !reflect.DeepEqual(got, []any{"cat-registered"}) {
+		t.Fatalf("registered categories = %#v", got)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"registered", "--code-change", "skip", "--dry-run", "--category-ids", "cat-1, cat-2"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	body := startBody()
+	if got := body["categoryIds"]; !reflect.DeepEqual(got, []any{"cat-1", "cat-2"}) {
+		t.Fatalf("flag categories = %#v", got)
+	}
+	invocation, _ := body["invocation"].(map[string]any)
+	flags, _ := invocation["flags"].(map[string]any)
+	if !reflect.DeepEqual(flags["category-ids"], []any{"cat-1", "cat-2"}) {
+		t.Fatalf("invocation flags = %#v", flags)
+	}
+	_, err := RunReplayCLI(context.Background(), registry, []string{"bare", "--code-change", "skip", "--dry-run", "--category-ids", "cat-1"}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--category-ids narrows a trace ID or dataset selection. Pass it with --trace-ids or --dataset-ids.") {
+		t.Fatalf("no selection error = %v", err)
+	}
+	if body := startBody(); body != nil {
+		t.Fatalf("refused categories still started a replay: %+v", body)
+	}
+	if _, err := RunReplayCLI(context.Background(), registry, []string{"bare", "--code-change", "skip", "--dry-run", "--dataset-ids", "ds", "--category-ids", "cat-1"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := startBody()["categoryIds"]; !reflect.DeepEqual(got, []any{"cat-1"}) {
+		t.Fatalf("dataset categories = %#v", got)
+	}
+}
+
+func TestReplayRegistryCLIHelpDescribesCategoryIDs(t *testing.T) {
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{Client: newTestClient("http://127.0.0.1:1"), TraceFunctionKey: "key", Function: func(string, int) {}}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	_, _ = RunReplayCLI(context.Background(), registry, []string{"pipeline", "--help"}, io.Discard, &stderr)
+	for _, want := range []string{"-category-ids", "with --trace-ids or --dataset-ids: replay only the traces carrying an approved assertion in one of these categories; which assertions are judged stays the same"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("help lacks %q: %s", want, stderr.String())
+		}
 	}
 }
 

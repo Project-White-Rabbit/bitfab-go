@@ -32,12 +32,13 @@ var (
 		"DatasetID":         "dataset-ids",
 		"DatasetIDs":        "dataset-ids",
 		"GraderIDs":         "grader-ids",
+		"CategoryIDs":       "category-ids",
 		"ExperimentGroupID": "experiment-group-id",
 		"DBBranch":          "db-branch",
 		"MockOverrides":     "mock-override",
 	}
 	buildInvocation       = replayInvocation
-	commaSeparatedIDFlags = map[string]bool{"trace-ids": true, "dataset-ids": true, "grader-ids": true}
+	commaSeparatedIDFlags = map[string]bool{"trace-ids": true, "dataset-ids": true, "grader-ids": true, "category-ids": true}
 )
 
 type invocationFlag struct {

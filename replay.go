@@ -255,13 +255,21 @@ type ReplayOptions struct {
 	DatasetID           string
 	DatasetIDs          []string
 	GraderIDs           []string
-	AdaptInputs         ReplayInputAdapter
-	OnItemStart         func(ReplayItemStartProgress)
-	OnItemFinish        func(ReplayItemFinishProgress)
-	OnExperimentStart   func(ReplayExperimentStart)
-	dbBranchSettings    map[string]any
-	cliFlags            map[string]any
-	invocation          map[string]any
+	// CategoryIDs replays only the selected traces that carry an approved
+	// assertion in one of these categories. It narrows a TraceIDs, DatasetID
+	// or DatasetIDs selection the way OnlyWithAssertions does, but counts only
+	// assertions filed under a named category. It changes which traces
+	// replay, not which assertions are judged on each replay. Setting it without a trace ID or dataset selection, or to an
+	// empty slice, returns an error before any request is sent. A selection
+	// that narrows to nothing replays nothing.
+	CategoryIDs       []string
+	AdaptInputs       ReplayInputAdapter
+	OnItemStart       func(ReplayItemStartProgress)
+	OnItemFinish      func(ReplayItemFinishProgress)
+	OnExperimentStart func(ReplayExperimentStart)
+	dbBranchSettings  map[string]any
+	cliFlags          map[string]any
+	invocation        map[string]any
 }
 
 // ReportReplayProgress writes a replay lifecycle event using the Bitfab plugin wire protocol.
@@ -760,6 +768,14 @@ func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 		return ReplayOptions{}, err
 	}
 	resolved.DatasetID = ""
+	if resolved.CategoryIDs != nil {
+		if len(resolved.CategoryIDs) == 0 {
+			return ReplayOptions{}, fmt.Errorf("bitfab: CategoryIDs must contain at least one category ID")
+		}
+		if resolved.TraceIDs == nil && resolved.DatasetIDs == nil {
+			return ReplayOptions{}, fmt.Errorf("bitfab: CategoryIDs narrows a trace ID or dataset selection. Pass it with TraceIDs, DatasetID or DatasetIDs.")
+		}
+	}
 	if resolved.TraceIDs != nil {
 		if len(resolved.TraceIDs) == 0 {
 			return ReplayOptions{}, fmt.Errorf("bitfab: replay trace IDs must contain at least one ID")
@@ -826,6 +842,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.OnlyWithAssertions {
 		payload["onlyWithAssertions"] = true
+	}
+	if options.CategoryIDs != nil {
+		payload["categoryIds"] = options.CategoryIDs
 	}
 	if !options.SkipAssertionJudging {
 		payload["judgeAssertions"] = true

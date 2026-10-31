@@ -153,6 +153,7 @@ func TestInvocationFlagNames(t *testing.T) {
 		"DatasetID":         "dataset-ids",
 		"DatasetIDs":        "dataset-ids",
 		"TraceIDs":          "trace-ids",
+		"CategoryIDs":       "category-ids",
 		"DBBranch":          "db-branch",
 		"ExperimentGroupID": "experiment-group-id",
 		"DryRun":            "dry-run",

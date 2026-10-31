@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -156,6 +158,63 @@ func TestReplayAttemptsValidateBeforeStarting(t *testing.T) {
 	for _, attempts := range []int{0, 1, 100} {
 		if _, err := normalizeReplayOptions(&ReplayOptions{Attempts: attempts}); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestReplayForwardsCategoryIDs(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	if _, err := client.Replay(context.Background(), "categories", func(string, int) {}, &ReplayOptions{CodeChange: CodeChangeSkip, DryRun: true, TraceIDs: []string{"a", "b"}, CategoryIDs: []string{"cat-1", "cat-2"}}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	got := state.startBody["categoryIds"]
+	state.mu.Unlock()
+	if !reflect.DeepEqual(got, []any{"cat-1", "cat-2"}) {
+		t.Fatalf("categoryIds = %#v", got)
+	}
+	state = &replayTestServerState{}
+	server2 := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server2.Close()
+	client2 := newTestClient(server2.URL)
+	defer client2.Close(time.Second)
+	if _, err := client2.Replay(context.Background(), "categories", func(string, int) {}, &ReplayOptions{CodeChange: CodeChangeSkip, DryRun: true, TraceIDs: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	_, sent := state.startBody["categoryIds"]
+	state.mu.Unlock()
+	if sent {
+		t.Fatal("categoryIds sent without the option")
+	}
+}
+
+func TestReplayRefusesCategoryIDsWithoutSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options ReplayOptions
+		want    string
+	}{
+		{"no selection", ReplayOptions{CategoryIDs: []string{"cat-1"}}, "CategoryIDs narrows a trace ID or dataset selection. Pass it with TraceIDs, DatasetID or DatasetIDs."},
+		{"empty list", ReplayOptions{TraceIDs: []string{"a"}, CategoryIDs: []string{}}, "CategoryIDs must contain at least one category ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := normalizeReplayOptions(&tc.options); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, options := range []ReplayOptions{
+		{TraceIDs: []string{"a"}, CategoryIDs: []string{"cat-1"}},
+		{DatasetID: "ds", CategoryIDs: []string{"cat-1"}},
+		{DatasetIDs: []string{"ds"}, CategoryIDs: []string{"cat-1"}},
+	} {
+		if _, err := normalizeReplayOptions(&options); err != nil {
+			t.Fatalf("refused %+v: %v", options, err)
 		}
 	}
 }
