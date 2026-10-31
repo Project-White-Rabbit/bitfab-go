@@ -73,19 +73,26 @@ func capValueReport(v any) (any, []string) {
 	if v == nil {
 		return nil, nil
 	}
+	if exceedsSerializedBudget(v, MaxSerializedValueBytes) {
+		warnValueTooLarge()
+		return fmt.Sprintf("<unserializable: too_large_over_%d_bytes>", MaxSerializedValueBytes), []string{"too_large"}
+	}
 	body, err := json.Marshal(v)
 	if err != nil {
-		// Leave it for the boundary sanitizer (marshalPayloadSafe) to stub.
 		return v, nil
 	}
 	if len(body) > MaxSerializedValueBytes {
-		warnOnce(
-			"value:too_large",
-			fmt.Sprintf("a captured span value exceeded %d bytes and was replaced with a placeholder so the span still ships. The captured input/output for this span is incomplete.", MaxSerializedValueBytes),
-		)
+		warnValueTooLarge()
 		return fmt.Sprintf("<unserializable: too_large_%d_bytes>", len(body)), []string{"too_large"}
 	}
 	return v, nil
+}
+
+func warnValueTooLarge() {
+	warnOnce(
+		"value:too_large",
+		fmt.Sprintf("a captured span value exceeded %d bytes and was replaced with a placeholder so the span still ships. The captured input/output for this span is incomplete.", MaxSerializedValueBytes),
+	)
 }
 
 // warnedKeys dedups warnOnce messages for the life of the process.
