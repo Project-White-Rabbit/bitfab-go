@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 // TraceTargetKind selects the output or a named span on the evaluated trace.
@@ -154,8 +155,34 @@ type TraceAssertion struct {
 	// assertion, on saves and on GetAssertions reads alike. It is nil when no
 	// check ever ran on it.
 	Rewrite *AssertionRewrite `json:"rewrite,omitempty"`
+	// CodeDraft reports on a saved entry that set AssertionKindCode or
+	// AssertionKindHybrid with no Code for Bitfab to write. It is nil on every
+	// other entry and on GetAssertions reads.
+	CodeDraft *AssertionCodeDraft `json:"codeDraft,omitempty"`
 	// Deprecated: Use CategoryID instead.
 	CategoryAssertionID *string `json:"category_assertion_id"`
+}
+
+// AssertionCodeDraftStatus says whether Bitfab wrote code for an assertion that asked for it.
+type AssertionCodeDraftStatus string
+
+const (
+	// AssertionCodeDraftWritten means code of the requested kind was saved and ran on the trace.
+	AssertionCodeDraftWritten AssertionCodeDraftStatus = "written"
+	// AssertionCodeDraftNotWritten means no working code could be written, so
+	// the assertion was saved as a judge assertion without code. Reason says why.
+	AssertionCodeDraftNotWritten AssertionCodeDraftStatus = "not_written"
+)
+
+// AssertionCodeDraft reports whether Bitfab wrote the code an entry asked for.
+// When it was not written, reword the assertion and ask again, or send Code yourself.
+type AssertionCodeDraft struct {
+	// RequestedKind is the kind the entry asked for, code or hybrid.
+	RequestedKind AssertionKind `json:"requestedKind"`
+	// Status says whether working code was written.
+	Status AssertionCodeDraftStatus `json:"status"`
+	// Reason says why no code was written, or is nil when it was.
+	Reason *string `json:"reason"`
 }
 
 // AssertionRewriteStatus says where Bitfab's check of an assertion's sent text stands.
@@ -243,7 +270,13 @@ type AssertionVerdictEvidence struct {
 // the human note, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
 // Kind says who decides the assertion: set AssertionKindCode or
 // AssertionKindHybrid together with Code, or AssertionKindJudge to remove the
-// code. Leave Kind empty and Code nil to keep both. Code that cannot run on
+// code. Leave Kind empty and Code nil to keep both. Set AssertionKindCode or
+// AssertionKindHybrid with Code nil, on an assertion that has no code yet, to
+// have Bitfab write it: the text is checked by the guided rewrite (unless
+// skipped), code of that kind is written and run on the trace, and the save
+// waits for both. The returned CodeDraft says whether working code was
+// written. At most 10 assertions per save may ask for code this way, and a
+// save that asks for any waits up to five minutes. Code that cannot run on
 // the trace, or that returns "defer" for a code assertion, is refused.
 type SaveAssertion struct {
 	ID                          string
@@ -268,6 +301,23 @@ type SaveAssertion struct {
 	CategoryAssertionID *string
 	// Deprecated: Use ClearCategoryID instead. CategoryID and ClearCategoryID take precedence when either is set.
 	ClearCategoryAssertionID bool
+}
+
+const codeDraftSaveTimeout = 300 * time.Second
+
+func (assertion SaveAssertion) asksBitfabToWriteCode() bool {
+	return (assertion.Kind == AssertionKindCode || assertion.Kind == AssertionKindHybrid) && assertion.Code == nil
+}
+
+func saveTimeout(updates []TraceAssertionsUpdate) time.Duration {
+	for _, update := range updates {
+		for _, assertion := range update.Assertions {
+			if assertion.asksBitfabToWriteCode() {
+				return codeDraftSaveTimeout
+			}
+		}
+	}
+	return 0
 }
 
 func (assertion SaveAssertion) category() (*string, bool) {
@@ -448,7 +498,9 @@ func (t *TracesClient) SaveAssertions(ctx context.Context, params SaveAssertions
 // writing rules in the background and rewrites it in place when it breaks one,
 // usually within a minute.
 // Read the result later with GetAssertions, whose rows carry Rewrite, and save
-// each of its SeparateAssertions as its own assertion. The assertions come back
+// each of its SeparateAssertions as its own assertion. Entries that ask Bitfab
+// to write their code are checked and given code before the call returns, so
+// their Rewrite and CodeDraft are final. The assertions come back
 // in the order sent. An empty update list returns an empty slice without a
 // request.
 func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAssertionsAllParams) ([]TraceAssertion, error) {
@@ -474,9 +526,9 @@ func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAsserti
 	var response struct {
 		Assertions []TraceAssertion `json:"assertions"`
 	}
-	if err := t.httpClient.requestInto(ctx, "/api/sdk/traces/assertions", map[string]any{
+	if err := t.httpClient.requestIntoWithTimeout(ctx, "/api/sdk/traces/assertions", map[string]any{
 		"updates": updates, "source": source, "guidedRewrite": !params.SkipGuidedRewrite,
-	}, &response); err != nil {
+	}, saveTimeout(params.Updates), &response); err != nil {
 		return nil, err
 	}
 	return response.Assertions, nil

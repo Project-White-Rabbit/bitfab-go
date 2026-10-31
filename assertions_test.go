@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
@@ -157,6 +158,60 @@ func TestAssertions_SaveDecodesRewriteOntoEachAssertion(t *testing.T) {
 	failed := saved[1].Rewrite
 	if failed == nil || failed.Status != AssertionRewriteCheckFailed || failed.Error == nil || *failed.Error != "model call timed out" {
 		t.Fatalf("second rewrite = %#v", failed)
+	}
+}
+
+func TestAssertions_SaveSendsCodeKindWithoutCodeAndDecodesCodeDraft(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "a1", "traceId": "trace", "assertion": "Books the 9am flight", "kind": "judge",
+				"codeDraft": map[string]any{
+					"requestedKind": "hybrid", "status": "not_written", "reason": "No span holds the booking.",
+				}},
+			map[string]any{"id": "a2", "traceId": "trace", "assertion": "Arrives on time", "kind": "judge", "codeDraft": nil},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	saved, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{
+			{Assertion: "Books the 9am flight", Kind: AssertionKindHybrid},
+			{Assertion: "Arrives on time"},
+		},
+	})
+	if err != nil || len(saved) != 2 {
+		t.Fatalf("SaveAssertions = %+v, %v", saved, err)
+	}
+	reason := "No span holds the booking."
+	want := &AssertionCodeDraft{RequestedKind: AssertionKindHybrid, Status: AssertionCodeDraftNotWritten, Reason: &reason}
+	if !reflect.DeepEqual(saved[0].CodeDraft, want) {
+		t.Fatalf("first codeDraft = %#v, want %#v", saved[0].CodeDraft, want)
+	}
+	if saved[1].CodeDraft != nil {
+		t.Fatalf("second codeDraft = %#v", saved[1].CodeDraft)
+	}
+	sent := server.recorded()[0].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	if _, hasCode := sent["code"]; sent["kind"] != "hybrid" || hasCode {
+		t.Fatalf("sent = %#v", sent)
+	}
+}
+
+func TestAssertions_SaveTimeoutOnlyWhenAnEntryAsksForCode(t *testing.T) {
+	code := &AssertionCode{Source: "return 'pass'"}
+	cases := []struct {
+		assertion SaveAssertion
+		want      time.Duration
+	}{
+		{SaveAssertion{Assertion: "a", Kind: AssertionKindCode}, 300 * time.Second},
+		{SaveAssertion{Assertion: "a", Kind: AssertionKindHybrid}, 300 * time.Second},
+		{SaveAssertion{Assertion: "a", Kind: AssertionKindCode, Code: code}, 0},
+		{SaveAssertion{Assertion: "a", Kind: AssertionKindJudge}, 0},
+		{SaveAssertion{Assertion: "a"}, 0},
+	}
+	for _, c := range cases {
+		got := saveTimeout([]TraceAssertionsUpdate{{TraceID: "trace", Assertions: []SaveAssertion{c.assertion}}})
+		if got != c.want {
+			t.Fatalf("saveTimeout(%+v) = %v, want %v", c.assertion, got, c.want)
+		}
 	}
 }
 
