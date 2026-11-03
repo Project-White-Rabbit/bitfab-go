@@ -409,6 +409,35 @@ type HumanVerdictOutcome struct {
 // Deprecated: Use HumanVerdictOutcome instead.
 type HumanLabelOutcome = HumanVerdictOutcome
 
+// VerdictEvidenceItem is one span a saved verdict cites. SpanID and Text are
+// always set. Evidence written by Bitfab's assertion judge also carries Field,
+// Ranges, and SpanChanged, which point at the exact passages the judge read.
+type VerdictEvidenceItem struct {
+	SpanID string `json:"spanId"`
+	// Text is what the span shows. For a judge item whose span is unchanged,
+	// it is the full text of Ranges read from the span, joined by a newline,
+	// an ellipsis, and a newline. When SpanChanged is true, it is only a short
+	// preview saved with the verdict.
+	Text string `json:"text"`
+	// Field is the span field the judge read: "summary", "input", "output",
+	// "reasoning", "content", "metadata", "errors", "contexts", or
+	// "llm_usage". Empty on plain text evidence.
+	Field string `json:"field,omitempty"`
+	// Ranges are [start, end) character ranges into Field's text as the judge
+	// saw it: a string field as is, any other value as JSON indented by two
+	// spaces. Indexes count UTF-16 code units, the way JavaScript indexes a
+	// string, not bytes or runes. Use them to highlight only when SpanChanged
+	// is non-nil and false.
+	Ranges [][2]int `json:"ranges,omitempty"`
+	// SpanChanged is true when the span no longer matches what was judged:
+	// Text is then only a preview and Ranges must not be used to highlight
+	// anything. Nil on plain text evidence.
+	SpanChanged *bool `json:"spanChanged,omitempty"`
+}
+
+// VerdictEvidence is the evidence on a saved verdict: one item per span cited.
+type VerdictEvidence []VerdictEvidenceItem
+
 // AssertionVerdict is one assertion's effective saved verdict and author.
 type AssertionVerdict struct {
 	AssertionID string  `json:"assertionId"`
@@ -418,7 +447,7 @@ type AssertionVerdict struct {
 	VerdictStatus VerdictStatus      `json:"verdictStatus"`
 	Source        VerdictSource      `json:"source"`
 	Annotation    *string            `json:"annotation"`
-	Evidence      *Justification     `json:"evidence"`
+	Evidence      *VerdictEvidence   `json:"evidence"`
 	Confidence    *VerdictConfidence `json:"confidence"`
 	Approved      bool               `json:"approved"`
 	// Deprecated: Use VerdictStatus instead.
@@ -437,7 +466,7 @@ type TraceVerdicts struct {
 	Verdict       *Verdict           `json:"verdict"`
 	VerdictStatus VerdictStatus      `json:"verdictStatus"`
 	Annotation    *string            `json:"annotation"`
-	Evidence      *Justification     `json:"evidence"`
+	Evidence      *VerdictEvidence   `json:"evidence"`
 	Approved      bool               `json:"approved"`
 	Passed        int                `json:"passed"`
 	Failed        int                `json:"failed"`

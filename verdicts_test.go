@@ -71,6 +71,43 @@ func TestVerdicts_SaveReplayAssertionSendsFailAndAttemptZero(t *testing.T) {
 	}
 }
 
+func TestVerdicts_GetKeepsJudgeSpanPointersBesidePlainEvidence(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"verdicts": []any{map[string]any{
+			"traceId": "one", "evidence": nil,
+			"assertions": []any{map[string]any{
+				"assertionId": "assertion",
+				"evidence": []any{
+					map[string]any{"spanId": "span", "text": "Returned the right record"},
+					map[string]any{
+						"spanId": "span", "text": "Booked the 06:40 flight\n\u2026\nSent the confirmation",
+						"field": "output", "ranges": []any{[]any{0, 23}, []any{40, 61}}, "spanChanged": false,
+					},
+				},
+			}},
+		}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	got, err := client.Verdicts.Get(context.Background(), "one")
+	if err != nil || got == nil || len(got.Assertions) != 1 || got.Assertions[0].Evidence == nil {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+	spanChanged := false
+	want := VerdictEvidence{
+		{SpanID: "span", Text: "Returned the right record"},
+		{
+			SpanID: "span", Text: "Booked the 06:40 flight\n\u2026\nSent the confirmation",
+			Field: "output", Ranges: [][2]int{{0, 23}, {40, 61}}, SpanChanged: &spanChanged,
+		},
+	}
+	if !reflect.DeepEqual(*got.Assertions[0].Evidence, want) {
+		t.Fatalf("Evidence = %+v, want %+v", *got.Assertions[0].Evidence, want)
+	}
+	if (*got.Assertions[0].Evidence)[0].SpanChanged != nil {
+		t.Fatalf("plain item SpanChanged = %v, want nil", *(*got.Assertions[0].Evidence)[0].SpanChanged)
+	}
+}
+
 func TestVerdicts_SaveAndReadEvidence(t *testing.T) {
 	evidence := Justification{{SpanID: "span", Text: "Returned the right record"}}
 	server := newDatasetsServer(t, func(r datasetRequest) any {
@@ -102,7 +139,8 @@ func TestVerdicts_SaveAndReadEvidence(t *testing.T) {
 		t.Fatalf("request = %#v, want %#v", server.recorded()[0].body, want)
 	}
 	got, err := client.Verdicts.Get(ctx, "one")
-	if err != nil || got == nil || got.Evidence == nil || !reflect.DeepEqual(*got.Evidence, evidence) {
+	wantRead := VerdictEvidence{{SpanID: "span", Text: "Returned the right record"}}
+	if err != nil || got == nil || got.Evidence == nil || !reflect.DeepEqual(*got.Evidence, wantRead) {
 		t.Fatalf("Get = %+v, %v", got, err)
 	}
 	if got.Verdict == nil || *got.Verdict != VerdictPass || got.VerdictStatus != VerdictStatusJudged ||
