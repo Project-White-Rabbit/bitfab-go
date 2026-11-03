@@ -133,7 +133,7 @@ func TestOtel_CarrierHoldsOperationAndPayload(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"traceFunctionKey": "generateAnswer",
 		"rawSpan": map[string]any{
 			"started_at": "2026-01-02T03:04:05.000Z",
@@ -158,8 +158,8 @@ func TestOtel_CarrierHoldsOperationAndPayload(t *testing.T) {
 		t.Fatalf("carriers = %d, want 1", len(carriers))
 	}
 	carrier := carriers[0]
-	if carrier.operation != string(operationExternalSpan) {
-		t.Errorf("operation = %q, want external_span", carrier.operation)
+	if carrier.operation != string(operationSpan) {
+		t.Errorf("operation = %q, want %q", carrier.operation, operationSpan)
 	}
 	if carrier.name != "callModel" {
 		t.Errorf("carrier name = %q, want callModel (the span's own name)", carrier.name)
@@ -187,19 +187,19 @@ func TestOtel_CarrierNameFallbacks(t *testing.T) {
 	}{
 		{
 			name:      "trace completion uses the function key",
-			operation: operationExternalTrace,
+			operation: operationTrace,
 			payload:   map[string]any{"traceFunctionKey": "generateAnswer"},
 			want:      "generateAnswer",
 		},
 		{
 			name:      "span without span_data name falls back to the function key",
-			operation: operationExternalSpan,
+			operation: operationSpan,
 			payload:   map[string]any{"traceFunctionKey": "generateAnswer"},
 			want:      "generateAnswer",
 		},
 		{
 			name:      "no key at all falls back to the operation",
-			operation: operationExternalTrace,
+			operation: operationTrace,
 			payload:   map[string]any{},
 			want:      "bitfab.external_trace",
 		},
@@ -218,10 +218,10 @@ func TestOtel_CarrierStatusReflectsPayloadError(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"rawSpan": map[string]any{"span_data": map[string]any{"name": "ok", "error": nil}},
 	}, nil)
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"rawSpan": map[string]any{"span_data": map[string]any{"name": "boom", "error": "exploded"}},
 	}, nil)
 	transport.flush(5 * time.Second)
@@ -246,13 +246,13 @@ func TestOtel_SdkDegradationDoesNotMarkTheCarrierErrored(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"rawSpan": map[string]any{"span_data": map[string]any{"name": "trimmed"}},
 		"errors": []any{
 			map[string]any{"source": "sdk", "step": payloadBudgetStep, "error": "trimmed a field"},
 		},
 	}, nil)
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"rawSpan": map[string]any{"span_data": map[string]any{"name": "mixed"}},
 		"errors": []any{
 			map[string]any{"source": "sdk", "step": payloadBudgetStep, "error": "trimmed a field"},
@@ -300,7 +300,7 @@ func TestOtel_DirectRequestsAreCountBounded(t *testing.T) {
 	})
 
 	for i := range 1_100 {
-		transport.submit(operationExternalSpan, map[string]any{"index": i}, nil)
+		transport.submit(operationSpan, map[string]any{"index": i}, nil)
 	}
 	transport.flush(10 * time.Second)
 
@@ -328,7 +328,7 @@ func TestOtel_DirectRequestsAreByteBounded(t *testing.T) {
 	})
 
 	for i := range 6 {
-		transport.submit(operationExternalSpan, map[string]any{
+		transport.submit(operationSpan, map[string]any{
 			"index": i,
 			"blob":  strings.Repeat("x", 6_000),
 		}, nil)
@@ -355,7 +355,7 @@ func TestOtel_RequestCarriesResourceAndScope(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	transport.flush(10 * time.Second)
 
 	requests := sender.recorded()
@@ -388,7 +388,7 @@ func TestOtel_AssembledBodyMatchesMarshallingTheRequest(t *testing.T) {
 	transport := newTestTransport(t, sender, nil)
 
 	for i := range 3 {
-		transport.submit(operationExternalSpan, map[string]any{
+		transport.submit(operationSpan, map[string]any{
 			"index": i,
 			"note":  "unicode ✓",
 		}, nil)
@@ -415,7 +415,7 @@ func TestOtel_OversizedSingleCarrierIsRejected(t *testing.T) {
 		cfg.maxRequestBytes = 200
 	})
 
-	transport.submit(operationExternalSpan, map[string]any{"blob": strings.Repeat("x", 10_000)}, nil)
+	transport.submit(operationSpan, map[string]any{"blob": strings.Repeat("x", 10_000)}, nil)
 	if transport.flush(5 * time.Second) {
 		t.Error("flush must report failure when a carrier cannot be exported")
 	}
@@ -487,7 +487,7 @@ func TestOtel_ExportConcurrencyIsBounded(t *testing.T) {
 	})
 
 	for i := range 40 {
-		transport.submit(operationExternalSpan, map[string]any{"index": i}, nil)
+		transport.submit(operationSpan, map[string]any{"index": i}, nil)
 	}
 	transport.flush(30 * time.Second)
 
@@ -517,7 +517,7 @@ func TestOtel_PanickingSenderDoesNotHangExport(t *testing.T) {
 	})
 
 	for i := range 40 {
-		transport.submit(operationExternalSpan, map[string]any{"index": i}, nil)
+		transport.submit(operationSpan, map[string]any{"index": i}, nil)
 	}
 
 	done := make(chan bool, 1)
@@ -595,7 +595,7 @@ func TestOtel_RetriesTransientFailures(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	if !transport.flush(10 * time.Second) {
 		t.Error("flush must succeed once a retry lands")
 	}
@@ -614,7 +614,7 @@ func TestOtel_DoesNotRetryPermanentFailures(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure on a permanent error")
 	}
@@ -669,8 +669,8 @@ func TestOtel_ThrottleHoldsSiblingRequests(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
-	transport.submit(operationExternalSpan, map[string]any{"index": 2}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 2}, nil)
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure while a throttle is active")
 	}
@@ -697,7 +697,7 @@ func TestOtel_DoesNotWaitAfterTheFinalAttempt(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	start := time.Now()
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure once the attempts are exhausted")
@@ -742,7 +742,7 @@ func TestOtel_DoesNotRetryPayloadTooLarge(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure on 413")
 	}
@@ -761,8 +761,8 @@ func TestOtel_DeliveryListenerReceivesOnlySuccessfulCarrierRefs(t *testing.T) {
 	})
 	spanRef := carrierRef{traceID: "trace-1", spanID: "span-1"}
 	closingRef := carrierRef{traceID: "trace-1"}
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &spanRef})
-	transport.submit(operationExternalTrace, map[string]any{"index": 2}, nil, carrierMeta{ref: &closingRef})
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &spanRef})
+	transport.submit(operationTrace, map[string]any{"index": 2}, nil, carrierMeta{ref: &closingRef})
 	if !transport.flush(10 * time.Second) {
 		t.Fatal("flush reported failure")
 	}
@@ -779,7 +779,7 @@ func TestOtel_DeliveryListenerReceivesOnlySuccessfulCarrierRefs(t *testing.T) {
 		}
 	})
 	failedRef := carrierRef{traceID: "trace-2", spanID: "span-2"}
-	transport.submit(operationExternalSpan, map[string]any{"index": 3}, nil, carrierMeta{ref: &failedRef})
+	transport.submit(operationSpan, map[string]any{"index": 3}, nil, carrierMeta{ref: &failedRef})
 	if transport.flush(10 * time.Second) {
 		t.Fatal("failed request should fail the flush")
 	}
@@ -795,7 +795,7 @@ func TestOtel_DeliveryListenerPanicDoesNotFailExport(t *testing.T) {
 		config.onDelivered = func([]carrierRef) { panic("listener crashed") }
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
 	if !transport.flush(10 * time.Second) {
 		t.Fatal("delivery listener panic must not fail an accepted export")
 	}
@@ -819,7 +819,7 @@ func TestOtel_PartialSuccessFailsTheExport(t *testing.T) {
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
 	if transport.flush(10 * time.Second) {
 		t.Error("flush must report failure when ingestion rejects carriers")
 	}
@@ -841,7 +841,7 @@ func TestOtel_ZeroRejectedSpansIsSuccess(t *testing.T) {
 	}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
 	if !transport.flush(10 * time.Second) {
 		t.Error("a partialSuccess reporting zero rejections is a success")
 	}
@@ -860,11 +860,11 @@ func TestOtel_SubmitAfterShutdownIsDropped(t *testing.T) {
 	}
 	transport := newOtelTransport(cfg)
 
-	transport.submit(operationExternalSpan, map[string]any{"before": true}, nil)
+	transport.submit(operationSpan, map[string]any{"before": true}, nil)
 	if !transport.shutdown(5 * time.Second) {
 		t.Fatal("shutdown reported failure")
 	}
-	transport.submit(operationExternalSpan, map[string]any{"after": true}, nil)
+	transport.submit(operationSpan, map[string]any{"after": true}, nil)
 
 	carriers := carriersIn(t, sender.recorded())
 	if len(carriers) != 1 {
@@ -1001,7 +1001,7 @@ func TestOtel_SpanPathEncodesExactlyOnce(t *testing.T) {
 
 	encodes := 0
 	hc := newHTTPClient("test-key", server.URL)
-	hc.sendExternalSpan(map[string]any{
+	hc.sendSpanPayload(map[string]any{
 		"traceFunctionKey": "generateAnswer",
 		"rawSpan": map[string]any{
 			"span_data": map[string]any{"input": countingMarshaler{&encodes}},
@@ -1032,7 +1032,7 @@ func TestOtel_UnserializablePayloadStillShips(t *testing.T) {
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, nil)
 
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"traceFunctionKey": "generateAnswer",
 		"stray":            make(chan int),
 	}, nil)
@@ -1063,7 +1063,7 @@ func TestOtel_DeliversCompressibleSpanAboveRawTargetIntact(t *testing.T) {
 			},
 		},
 	}
-	transport.submit(operationExternalSpan, payload, nil)
+	transport.submit(operationSpan, payload, nil)
 	transport.flush(5 * time.Second)
 
 	carriers := carriersIn(t, sender.recorded())
@@ -1088,7 +1088,7 @@ func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
 		config.onDelivered = func(refs []carrierRef) { delivered = append(delivered, refs...) }
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
-	transport.submit(operationExternalSpan, map[string]any{
+	transport.submit(operationSpan, map[string]any{
 		"rawSpan": map[string]any{
 			"span_data": map[string]any{
 				"name":  "huge",
@@ -1105,5 +1105,15 @@ func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
 	}
 	if !reflect.DeepEqual(delivered, []carrierRef{ref}) {
 		t.Fatalf("trimmed carrier refs = %#v, want %#v", delivered, []carrierRef{ref})
+	}
+}
+
+func TestOtelTimestampReadsRawTraceAndLegacyExternalTrace(t *testing.T) {
+	want := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, field := range []string{"rawTrace", "externalTrace"} {
+		payload := map[string]any{field: map[string]any{"started_at": want.Format(time.RFC3339)}}
+		if got := otelTimestamp(payload, "started_at"); !got.Equal(want) {
+			t.Errorf("%s: otelTimestamp = %v, want %v", field, got, want)
+		}
 	}
 }

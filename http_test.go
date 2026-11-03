@@ -105,13 +105,13 @@ func TestIsRetryableStatus(t *testing.T) {
 	}
 }
 
-func TestHTTPClient_SendExternalSpan_GoesThroughOtel(t *testing.T) {
+func TestHTTPClient_SendSpanPayload_GoesThroughOtel(t *testing.T) {
 	sink := &carrierSink{}
 	server := newCarrierCaptureServer(t, sink)
 	defer server.Close()
 
 	hc := newHTTPClient("test-key", server.URL)
-	hc.sendExternalSpan(map[string]any{"test": true})
+	hc.sendSpanPayload(map[string]any{"test": true})
 	if !hc.flush(5 * time.Second) {
 		t.Fatal("flush reported failure")
 	}
@@ -144,14 +144,14 @@ func TestHTTPClient_TracksCarrierAcknowledgementsAndServerTraceID(t *testing.T) 
 
 	hc := newHTTPClient("test-key", server.URL)
 	hc.trackTraceDeliveries([]string{"local-trace"})
-	hc.sendExternalSpan(map[string]any{
+	hc.sendSpanPayload(map[string]any{
 		"traceId":       "local-trace",
 		"sourceTraceId": "local-trace",
 		"rawSpan":       map[string]any{"id": "span-1"},
 	})
-	hc.sendExternalTrace(map[string]any{
+	hc.sendTracePayload(map[string]any{
 		"sourceTraceId": "local-trace",
-		"externalTrace": map[string]any{"id": "local-trace"},
+		"rawTrace":      map[string]any{"id": "local-trace"},
 		"completed":     true,
 	})
 	if !hc.flush(5 * time.Second) {
@@ -180,7 +180,7 @@ func TestHTTPClient_LazyTransport(t *testing.T) {
 		t.Fatal("a client that never sent a span must not build a transport")
 	}
 
-	hc.sendExternalSpan(map[string]any{"test": true})
+	hc.sendSpanPayload(map[string]any{"test": true})
 
 	hc.transportMu.Lock()
 	transport = hc.transport
@@ -198,7 +198,7 @@ func TestHTTPClient_Flush_Timeout(t *testing.T) {
 	defer server.Close()
 
 	hc := newHTTPClient("test-key", server.URL)
-	hc.sendExternalSpan(map[string]any{"test": true})
+	hc.sendSpanPayload(map[string]any{"test": true})
 
 	start := time.Now()
 	flushed := hc.flush(100 * time.Millisecond)
@@ -218,7 +218,7 @@ func TestHTTPClient_Close_IsIdempotentAndStopsSubmissions(t *testing.T) {
 	defer server.Close()
 
 	hc := newHTTPClient("test-key", server.URL)
-	hc.sendExternalSpan(map[string]any{"first": true})
+	hc.sendSpanPayload(map[string]any{"first": true})
 
 	if !hc.close(5 * time.Second) {
 		t.Fatal("close reported failure")
@@ -227,7 +227,7 @@ func TestHTTPClient_Close_IsIdempotentAndStopsSubmissions(t *testing.T) {
 		t.Fatal("close must be idempotent")
 	}
 
-	hc.sendExternalSpan(map[string]any{"second": true})
+	hc.sendSpanPayload(map[string]any{"second": true})
 	hc.flush(time.Second)
 
 	payloads := sink.spanPayloads()
@@ -236,5 +236,14 @@ func TestHTTPClient_Close_IsIdempotentAndStopsSubmissions(t *testing.T) {
 	}
 	if payloads[0]["first"] != true {
 		t.Errorf("payload = %#v, want the pre-close span", payloads[0])
+	}
+}
+
+func TestCarrierRefForPayloadReadsRawTraceAndLegacyExternalTrace(t *testing.T) {
+	for _, field := range []string{"rawTrace", "externalTrace"} {
+		ref := carrierRefForPayload(map[string]any{field: map[string]any{"id": "trace-1"}})
+		if ref == nil || ref.traceID != "trace-1" {
+			t.Errorf("%s: ref = %#v, want trace-1", field, ref)
+		}
 	}
 }

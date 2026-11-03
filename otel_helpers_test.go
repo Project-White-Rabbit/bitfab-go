@@ -114,11 +114,11 @@ func (s *carrierSink) byOperation(operation traceOperation) []map[string]any {
 }
 
 func (s *carrierSink) spanPayloads() []map[string]any {
-	return s.byOperation(operationExternalSpan)
+	return s.byOperation(operationSpan)
 }
 
 func (s *carrierSink) tracePayloads() []map[string]any {
-	return s.byOperation(operationExternalTrace)
+	return s.byOperation(operationTrace)
 }
 
 func (s *carrierSink) lastSpanPayload() map[string]any {
@@ -163,12 +163,17 @@ func newCarrierCaptureServer(t *testing.T, sink *carrierSink) *httptest.Server {
 	}))
 }
 
+const (
+	legacySpanPath  = "/legacy/spans"
+	legacyTracePath = "/legacy/traces"
+)
+
 func legacyEndpointFor(operation string) string {
 	switch operation {
-	case string(operationExternalSpan):
-		return "/api/sdk/externalSpans"
-	case string(operationExternalTrace):
-		return "/api/sdk/externalTraces"
+	case string(operationSpan):
+		return legacySpanPath
+	case string(operationTrace):
+		return legacyTracePath
 	default:
 		return "/api/sdk/internalTraces"
 	}
@@ -198,7 +203,7 @@ func newLegacyCarrierServer(t *testing.T, handle http.HandlerFunc) *httptest.Ser
 			replay.URL.Path = legacyEndpointFor(carrier.operation)
 			replay.Body = io.NopCloser(bytes.NewReader(encoded))
 			handle(httptest.NewRecorder(), replay)
-			if carrier.operation == string(operationExternalTrace) {
+			if carrier.operation == string(operationTrace) {
 				if ref := carrierRefForPayload(carrier.payload); ref != nil {
 					traceIDs[ref.traceID] = "server-" + ref.traceID
 				}

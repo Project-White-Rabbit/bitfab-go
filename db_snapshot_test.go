@@ -32,7 +32,7 @@ func TestDBSnapshotProviderCapturesSpanAndSubtreeRootsButNotSeeds(t *testing.T) 
 		t.Fatalf("trace count %d", len(state.traces))
 	}
 	for _, payload := range state.traces {
-		trace := payload["externalTrace"].(map[string]any)
+		trace := payload["rawTrace"].(map[string]any)
 		if trace["ingestion_type"] == "seeded" {
 			if trace["db_snapshot_ref"] != nil {
 				t.Fatal("seed received pin")

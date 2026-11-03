@@ -54,8 +54,8 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 			}
 			reply["items"] = items
 			writeReplayTestJSON(t, w, reply)
-		case strings.HasPrefix(request.URL.Path, "/api/sdk/externalSpans/"):
-			spanID := strings.TrimPrefix(request.URL.Path, "/api/sdk/externalSpans/")
+		case strings.HasPrefix(request.URL.Path, "/api/sdk/spans/") && strings.HasSuffix(request.URL.Path, "/raw"):
+			spanID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/api/sdk/spans/"), "/raw")
 			input := map[string]any{
 				"source-span-1": []any{"alpha", float64(2)},
 				"source-span-2": []any{"beta", float64(3)},
@@ -65,14 +65,14 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 				return
 			}
 			writeReplayTestJSON(t, w, map[string]any{
-				"id":              spanID,
-				"externalTraceId": "external-" + spanID,
+				"id":      spanID,
+				"traceId": "source-trace-" + spanID,
 				"rawData": map[string]any{"span_data": map[string]any{
 					"input":  input,
 					"output": "old-" + spanID,
 				}},
 			})
-		case request.URL.Path == "/api/sdk/externalSpans":
+		case request.URL.Path == legacySpanPath:
 			var payload map[string]any
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode span payload: %v", err)
@@ -80,7 +80,7 @@ func replayTestHandler(t *testing.T, state *replayTestServerState, items []map[s
 			state.mu.Lock()
 			state.spans = append(state.spans, payload)
 			state.mu.Unlock()
-		case request.URL.Path == "/api/sdk/externalTraces":
+		case request.URL.Path == legacyTracePath:
 			var payload map[string]any
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode trace payload: %v", err)

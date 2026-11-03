@@ -989,7 +989,7 @@ func otlpValue(value attribute.Value) map[string]any {
 }
 
 func otelSpanName(operation traceOperation, payload map[string]any) string {
-	if operation == operationExternalSpan {
+	if operation == operationSpan {
 		if rawSpan, ok := payload["rawSpan"].(map[string]any); ok {
 			if spanData, ok := rawSpan["span_data"].(map[string]any); ok {
 				if name, ok := spanData["name"].(string); ok && name != "" {
@@ -1010,9 +1010,9 @@ func otelTimestamp(payload map[string]any, field string) time.Time {
 		raw = rawSpan[field]
 	}
 	if raw == nil {
-		container, ok := payload["externalTrace"].(map[string]any)
+		container, ok := payload["rawTrace"].(map[string]any)
 		if !ok {
-			container, _ = payload["rawTrace"].(map[string]any)
+			container, _ = payload["externalTrace"].(map[string]any)
 		}
 		if container != nil {
 			raw = container[field]

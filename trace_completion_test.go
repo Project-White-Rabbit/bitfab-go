@@ -23,9 +23,9 @@ func TestTraceCompletionDeferredTransportFailure(t *testing.T) {
 	client := newTestClient("https://bitfab.ai")
 	client.httpClient.transport = transport
 	client.httpClient.traceCompletion.start("trace", "child")
-	client.httpClient.sendExternalTrace(map[string]any{
-		"externalTrace": map[string]any{"id": "trace"},
-		"completed":     true,
+	client.httpClient.sendTracePayload(map[string]any{
+		"rawTrace":  map[string]any{"id": "trace"},
+		"completed": true,
 	})
 	if transport.calls != 0 {
 		t.Fatal("completion sent before child ended")
@@ -48,7 +48,7 @@ func TestTraceCompletionChildOutlivesRoot(t *testing.T) {
 		t.Fatal("flush failed")
 	}
 	for _, carrier := range sink.all() {
-		if carrier.operation == string(operationExternalTrace) {
+		if carrier.operation == string(operationTrace) {
 			t.Fatal("completion sent before child ended")
 		}
 	}
@@ -61,7 +61,7 @@ func TestTraceCompletionChildOutlivesRoot(t *testing.T) {
 	}
 	completions := 0
 	for _, carrier := range sink.all() {
-		if carrier.operation == string(operationExternalTrace) {
+		if carrier.operation == string(operationTrace) {
 			completions++
 			if carrier.payload["expectedSpanCount"] != float64(3) {
 				t.Fatalf("expected count 3, got %v", carrier.payload["expectedSpanCount"])

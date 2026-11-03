@@ -349,7 +349,7 @@ func (r *autoRecord) finish(output any, err error) {
 				payload["mockTarget"] = "output"
 				payload["mockSource"] = string(r.mockSource)
 			}
-			root.client.httpClient.sendExternalSpanWithPlanPolicy(payload, r.planPolicy, dropped...)
+			root.client.httpClient.sendSpanPayloadWithPlanPolicy(payload, r.planPolicy, dropped...)
 		}
 	})
 }

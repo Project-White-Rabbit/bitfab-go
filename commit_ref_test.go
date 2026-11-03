@@ -285,7 +285,7 @@ func commitRefTraceCompletion(t *testing.T) map[string]any {
 	if payload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	rawTrace, ok := payload["externalTrace"].(map[string]any)
+	rawTrace, ok := payload["rawTrace"].(map[string]any)
 	if !ok {
 		t.Fatalf("payload = %#v", payload)
 	}

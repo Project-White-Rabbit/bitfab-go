@@ -371,12 +371,11 @@ func (h *httpClient) submit(operation traceOperation, payload map[string]any, me
 	transport.submit(operation, merged, body, meta)
 }
 
-// sendExternalSpan queues a span payload on this client's trace transport.
-func (h *httpClient) sendExternalSpan(payload map[string]any, extraDropped ...string) {
-	h.sendExternalSpanWithPlanPolicy(payload, simulationPlanApplies, extraDropped...)
+func (h *httpClient) sendSpanPayload(payload map[string]any, extraDropped ...string) {
+	h.sendSpanPayloadWithPlanPolicy(payload, simulationPlanApplies, extraDropped...)
 }
 
-func (h *httpClient) sendExternalSpanWithPlanPolicy(payload map[string]any, policy simulationPlanPolicy, extraDropped ...string) {
+func (h *httpClient) sendSpanPayloadWithPlanPolicy(payload map[string]any, policy simulationPlanPolicy, extraDropped ...string) {
 	if raw, ok := payload["rawSpan"].(map[string]any); ok && raw["span_origin"] == nil {
 		clonedRaw := make(map[string]any, len(raw)+1)
 		for key, value := range raw {
@@ -396,7 +395,7 @@ func (h *httpClient) sendExternalSpanWithPlanPolicy(payload map[string]any, poli
 			h.traceCompletion.record(ref.traceID, ref.spanID)
 		}
 		h.recordSubmittedCarrier(ref)
-		h.submit(operationExternalSpan, record, carrierMeta{ref: ref}, extraDropped...)
+		h.submit(operationSpan, record, carrierMeta{ref: ref}, extraDropped...)
 	}, func() {
 		if ref := carrierRefForPayload(payload); ref != nil {
 			h.traceCompletion.forget(ref.traceID, ref.spanID)
@@ -407,7 +406,7 @@ func (h *httpClient) sendExternalSpanWithPlanPolicy(payload map[string]any, poli
 func carrierRefForPayload(payload map[string]any) *carrierRef {
 	traceID, _ := payload["sourceTraceId"].(string)
 	if traceID == "" {
-		for _, field := range []string{"externalTrace", "rawTrace"} {
+		for _, field := range []string{"rawTrace", "externalTrace"} {
 			rawTrace, _ := payload[field].(map[string]any)
 			if rawTrace != nil {
 				traceID, _ = rawTrace["id"].(string)
@@ -559,8 +558,7 @@ func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryR
 	return reports
 }
 
-// sendExternalTrace queues a trace payload on this client's trace transport.
-func (h *httpClient) sendExternalTrace(payload map[string]any) {
+func (h *httpClient) sendTracePayload(payload map[string]any) {
 	h.simulationPlan.sendTrace(payload, func(record map[string]any) {
 		ref := carrierRefForPayload(record)
 		if completed, _ := record["completed"].(bool); !completed {
@@ -570,7 +568,7 @@ func (h *httpClient) sendExternalTrace(payload map[string]any) {
 			ref = nil
 		}
 		if ref == nil {
-			h.submit(operationExternalTrace, record, carrierMeta{})
+			h.submit(operationTrace, record, carrierMeta{})
 			return
 		}
 		h.traceCompletion.close(ref.traceID, func(count int) {
@@ -585,7 +583,7 @@ func (h *httpClient) sendExternalTrace(payload map[string]any) {
 			}
 			counted["expectedSpanCount"] = count
 			h.recordSubmittedCarrier(ref)
-			h.submit(operationExternalTrace, counted, carrierMeta{ref: ref})
+			h.submit(operationTrace, counted, carrierMeta{ref: ref})
 		}, record["dropped"] == true)
 	})
 }

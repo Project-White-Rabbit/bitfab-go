@@ -170,7 +170,7 @@ func TestReplayUsesHistoricalDBBranchReportsAccessAndReleases(t *testing.T) {
 	if len(traceState.traces) != 1 {
 		t.Fatalf("traces = %#v", traceState.traces)
 	}
-	rawTrace := traceState.traces[0]["externalTrace"].(map[string]any)
+	rawTrace := traceState.traces[0]["rawTrace"].(map[string]any)
 	if rawTrace["db_snapshot_ref"] == nil {
 		t.Fatalf("trace omitted db_snapshot_ref: %#v", rawTrace)
 	}
@@ -345,7 +345,7 @@ func TestReplayDBSnapshotUsageRecordsUnaccessedBranch(t *testing.T) {
 	}
 	traceState.mu.Lock()
 	defer traceState.mu.Unlock()
-	rawTrace := traceState.traces[0]["externalTrace"].(map[string]any)
+	rawTrace := traceState.traces[0]["rawTrace"].(map[string]any)
 	usage := rawTrace["db_snapshot_usage"].(map[string]any)
 	if usage["accessed"] != false || usage["neon_branch_id"] != "branch-1" {
 		t.Fatalf("db snapshot usage = %#v", usage)
@@ -406,7 +406,7 @@ func TestRootTraceAlwaysCapturesDBSnapshotRef(t *testing.T) {
 	if len(state.traces) != 1 {
 		t.Fatalf("traces = %#v", state.traces)
 	}
-	rawTrace := state.traces[0]["externalTrace"].(map[string]any)
+	rawTrace := state.traces[0]["rawTrace"].(map[string]any)
 	ref := rawTrace["db_snapshot_ref"].(map[string]any)
 	if ref["sdkWallClockBeforeFn"] == "" || ref["provider"] != nil {
 		t.Fatalf("db snapshot ref = %#v", ref)

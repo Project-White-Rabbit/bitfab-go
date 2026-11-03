@@ -59,7 +59,8 @@ type MockOverride struct {
 
 type spanTreeNode struct {
 	SourceSpanID     string          `json:"sourceSpanId"`
-	ExternalSpanID   string          `json:"externalSpanId"`
+	SpanID           string          `json:"spanId"`
+	LegacySpanID     string          `json:"externalSpanId"`
 	TraceFunctionKey string          `json:"traceFunctionKey"`
 	SpanName         string          `json:"spanName"`
 	Type             string          `json:"type"`
@@ -68,15 +69,22 @@ type spanTreeNode struct {
 	Children         []spanTreeNode  `json:"children"`
 }
 
+func (n spanTreeNode) spanRowID() string {
+	if n.SpanID != "" {
+		return n.SpanID
+	}
+	return n.LegacySpanID
+}
+
 type spanTreeResponse struct {
 	Root *spanTreeNode `json:"root"`
 }
 
 type mockSpan struct {
-	sourceSpanID   string
-	externalSpanID string
-	output         any
-	outputPresent  bool
+	sourceSpanID  string
+	spanRowID     string
+	output        any
+	outputPresent bool
 }
 
 type mockTree struct {
@@ -148,8 +156,8 @@ func buildReplayMockTree(root spanTreeNode) (*mockTree, error) {
 			index := counters[counterKey]
 			counters[counterKey] = index + 1
 			span := mockSpan{
-				sourceSpanID:   node.SourceSpanID,
-				externalSpanID: node.ExternalSpanID,
+				sourceSpanID: node.SourceSpanID,
+				spanRowID:    node.spanRowID(),
 			}
 			if len(node.Output) > 0 || len(node.OutputMeta) > 0 {
 				span.outputPresent = true
@@ -317,17 +325,17 @@ func (c *Client) resolveRecordedReplayOutput(
 	if span.outputPresent {
 		return span.output, nil
 	}
-	if strings.TrimSpace(span.externalSpanID) == "" {
-		return nil, fmt.Errorf("bitfab: recorded span omitted both output and external span ID")
+	if strings.TrimSpace(span.spanRowID) == "" {
+		return nil, fmt.Errorf("bitfab: recorded span omitted both output and span ID")
 	}
 
 	replay.mockMu.Lock()
-	entry := replay.outputCache[span.externalSpanID]
+	entry := replay.outputCache[span.spanRowID]
 	if entry == nil {
 		entry = &mockOutputCacheEntry{done: make(chan struct{})}
-		replay.outputCache[span.externalSpanID] = entry
+		replay.outputCache[span.spanRowID] = entry
 		replay.mockMu.Unlock()
-		fetched, err := c.getReplaySpan(ctx, span.externalSpanID)
+		fetched, err := c.getReplaySpan(ctx, span.spanRowID)
 		entry.value = fetched.RawData.SpanData.Output
 		entry.err = err
 		close(entry.done)

@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -37,17 +38,17 @@ func replayMockHandler(
 			}
 			writeReplayTestJSON(t, writer, map[string]any{"root": map[string]any{
 				"sourceSpanId":     "source-span-1",
-				"externalSpanId":   "source-span-1",
+				"spanId":           "source-span-1",
 				"traceFunctionKey": "mock-root",
 				"spanName":         "mock-root",
 				"type":             "function",
 				"children":         children,
 			}})
-		case request.URL.Path == "/api/sdk/externalSpans/recorded-child":
+		case request.URL.Path == "/api/sdk/spans/recorded-child/raw":
 			lazyFetches.Add(1)
 			writeReplayTestJSON(t, writer, map[string]any{
-				"id":              "recorded-child",
-				"externalTraceId": "external-source",
+				"id":      "recorded-child",
+				"traceId": "source-trace",
 				"rawData": map[string]any{"span_data": map[string]any{
 					"output": "recorded",
 				}},
@@ -61,7 +62,7 @@ func replayMockHandler(
 func recordedChildTree() []map[string]any {
 	return []map[string]any{{
 		"sourceSpanId":     "source-child",
-		"externalSpanId":   "recorded-child",
+		"spanId":           "recorded-child",
 		"traceFunctionKey": "child-workflow",
 		"spanName":         "Child",
 		"type":             "function",
@@ -252,7 +253,7 @@ func TestReplayMocksRepeatedSpanOccurrencesInRecordedOrder(t *testing.T) {
 	children := []map[string]any{
 		{
 			"sourceSpanId":     "source-child-1",
-			"externalSpanId":   "recorded-child-1",
+			"spanId":           "recorded-child-1",
 			"traceFunctionKey": "repeated-child",
 			"spanName":         "Lookup",
 			"type":             "function",
@@ -621,4 +622,38 @@ func assertMockPayload(t *testing.T, state *replayTestServerState, source string
 		}
 	}
 	t.Fatal("mocked child payload not found")
+}
+
+func TestSpanTreeNodePrefersSpanIDOverLegacyExternalSpanID(t *testing.T) {
+	cases := map[string]string{
+		`{"spanId":"row-new","externalSpanId":"row-old"}`: "row-new",
+		`{"externalSpanId":"row-old"}`:                    "row-old",
+		`{"spanId":"row-new"}`:                            "row-new",
+	}
+	for body, want := range cases {
+		var node spanTreeNode
+		if err := json.Unmarshal([]byte(body), &node); err != nil {
+			t.Fatalf("decode %s: %v", body, err)
+		}
+		if got := node.spanRowID(); got != want {
+			t.Errorf("spanRowID for %s = %q, want %q", body, got, want)
+		}
+	}
+}
+
+func TestReplaySpanPrefersTraceIDOverLegacyExternalTraceID(t *testing.T) {
+	cases := map[string]string{
+		`{"id":"s","traceId":"trace-new","externalTraceId":"trace-old"}`: "trace-new",
+		`{"id":"s","externalTraceId":"trace-old"}`:                       "trace-old",
+		`{"id":"s","traceId":"trace-new"}`:                               "trace-new",
+	}
+	for body, want := range cases {
+		var span replaySpan
+		if err := json.Unmarshal([]byte(body), &span); err != nil {
+			t.Fatalf("decode %s: %v", body, err)
+		}
+		if got := span.sourceTraceID(); got != want {
+			t.Errorf("sourceTraceID for %s = %q, want %q", body, got, want)
+		}
+	}
 }

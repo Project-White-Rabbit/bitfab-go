@@ -292,7 +292,7 @@ func TestSpan_CaptureWhenNested(t *testing.T) {
 	var payloads []map[string]any
 
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			var payload map[string]any
 			json.NewDecoder(r.Body).Decode(&payload)
 			mu.Lock()
@@ -374,7 +374,7 @@ func TestSpan_UnknownCaptureWhenWarnsOnceAndCapturesRoots(t *testing.T) {
 	spanCount := 0
 
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			spanCount++
 			mu.Unlock()
@@ -419,7 +419,7 @@ func TestSpan_WithNameAndType(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -479,7 +479,7 @@ func TestSpan_CapturesError(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -546,7 +546,7 @@ func TestSpan_NestedSpans_ShareTraceID(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			payloads = append(payloads, payload)
 			mu.Unlock()
@@ -590,7 +590,7 @@ func TestSpan_NestedSpans_HaveParentID(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			payloads = append(payloads, payload)
 			mu.Unlock()
@@ -651,7 +651,7 @@ func TestSpan_IndependentCalls_DifferentTraceIDs(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			payloads = append(payloads, payload)
 			mu.Unlock()
@@ -695,7 +695,7 @@ func TestGetFunction_Span(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -758,7 +758,7 @@ func TestSpan_CapturesOutput(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -796,7 +796,7 @@ func TestSpan_WithInput(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -840,7 +840,7 @@ func TestSpan_WithInputSingleArg(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -877,7 +877,7 @@ func TestStart_BasicExecution(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -935,7 +935,7 @@ func TestStart_CaptureWhenNestedWithoutParentReturnsNoOp(t *testing.T) {
 	spanCount := 0
 
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			spanCount++
 			mu.Unlock()
@@ -975,7 +975,7 @@ func TestStart_CapturesError(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1010,7 +1010,7 @@ func TestStart_IdempotentEnd(t *testing.T) {
 
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		// Only count span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			spanCount++
 			mu.Unlock()
@@ -1046,7 +1046,7 @@ func TestStart_NestedSpans(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			payloads = append(payloads, payload)
 			mu.Unlock()
@@ -1113,7 +1113,7 @@ func TestFunction_Start(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1355,7 +1355,7 @@ func TestSpan_WithMetadata(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1394,7 +1394,7 @@ func TestSpan_NoContext(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1431,7 +1431,7 @@ func TestStart_WithContext(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1477,7 +1477,7 @@ func TestStart_ContextAccumulation(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		// Only capture span requests, not trace requests
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -1655,7 +1655,7 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -1682,7 +1682,6 @@ func TestTraceCompletion_SessionID(t *testing.T) {
 	if tracePayload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	// Session ID is at payload level, not in externalTrace
 	if tracePayload["sessionId"] != "sess-123" {
 		t.Errorf("sessionId = %v, want sess-123", tracePayload["sessionId"])
 	}
@@ -1696,7 +1695,7 @@ func TestTraceCompletion_Name(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -1722,9 +1721,9 @@ func TestTraceCompletion_Name(t *testing.T) {
 	if tracePayload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	rawTrace, _ := tracePayload["externalTrace"].(map[string]any)
+	rawTrace, _ := tracePayload["rawTrace"].(map[string]any)
 	if rawTrace["name"] != "Ticket 4521" {
-		t.Errorf("externalTrace.name = %v, want Ticket 4521", rawTrace["name"])
+		t.Errorf("rawTrace.name = %v, want Ticket 4521", rawTrace["name"])
 	}
 }
 
@@ -1736,7 +1735,7 @@ func TestTraceCompletion_Drop(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -1781,10 +1780,10 @@ func TestTraceDrop_SuppressesLaterSpanUploads(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		mu.Lock()
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			spanUploads++
 		}
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			tracePayload = payload
 		}
 		mu.Unlock()
@@ -1839,7 +1838,7 @@ func TestTraceNoDrop_DoesNotSuppressSpanUploads(t *testing.T) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
 		mu.Lock()
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			spanUploads++
 		}
 		mu.Unlock()
@@ -1877,7 +1876,7 @@ func TestTraceCompletion_NoDrop(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -1970,7 +1969,7 @@ func TestTraceCompletion_Metadata(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -1997,7 +1996,7 @@ func TestTraceCompletion_Metadata(t *testing.T) {
 	if tracePayload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	rawTrace := tracePayload["externalTrace"].(map[string]any)
+	rawTrace := tracePayload["rawTrace"].(map[string]any)
 	metadata := rawTrace["metadata"].(map[string]any)
 	if metadata["user_id"] != "u-123" {
 		t.Errorf("metadata user_id = %v, want u-123", metadata["user_id"])
@@ -2015,7 +2014,7 @@ func TestTraceCompletion_Contexts(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -2042,7 +2041,7 @@ func TestTraceCompletion_Contexts(t *testing.T) {
 	if tracePayload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	rawTrace := tracePayload["externalTrace"].(map[string]any)
+	rawTrace := tracePayload["rawTrace"].(map[string]any)
 	contexts := rawTrace["contexts"].([]any)
 	if len(contexts) != 1 {
 		t.Errorf("expected 1 context entry, got %d", len(contexts))
@@ -2065,7 +2064,7 @@ func TestTraceCompletion_AllMethods(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -2097,7 +2096,7 @@ func TestTraceCompletion_AllMethods(t *testing.T) {
 	if tracePayload["sessionId"] != "sess-789" {
 		t.Errorf("sessionId = %v, want sess-789", tracePayload["sessionId"])
 	}
-	rawTrace := tracePayload["externalTrace"].(map[string]any)
+	rawTrace := tracePayload["rawTrace"].(map[string]any)
 	metadata := rawTrace["metadata"].(map[string]any)
 	if metadata["workflow"] != "checkout" {
 		t.Errorf("metadata workflow = %v, want checkout", metadata["workflow"])
@@ -2115,10 +2114,10 @@ func TestTraceCompletion_OnlyForRootSpans(t *testing.T) {
 
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			spanCount++
 		}
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			traceCount++
 		}
 		mu.Unlock()
@@ -2157,7 +2156,7 @@ func TestTraceCompletion_HasEndedAt(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalTraces") {
+		if r.URL.Path == legacyTracePath {
 			mu.Lock()
 			tracePayload = payload
 			mu.Unlock()
@@ -2182,7 +2181,7 @@ func TestTraceCompletion_HasEndedAt(t *testing.T) {
 	if tracePayload == nil {
 		t.Fatal("no trace payload captured")
 	}
-	rawTrace := tracePayload["externalTrace"].(map[string]any)
+	rawTrace := tracePayload["rawTrace"].(map[string]any)
 	endedAt, ok := rawTrace["ended_at"].(string)
 	if !ok || endedAt == "" {
 		t.Error("ended_at should be present in trace completion")
@@ -2196,7 +2195,7 @@ func TestStart_SetPrompt(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -2232,7 +2231,7 @@ func TestStart_PromptOmittedWhenNotCalled(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -2268,7 +2267,7 @@ func TestStart_SetPromptLastCallWins(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -2311,7 +2310,7 @@ func TestSetPrompt_EmptyStringIgnored(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -2350,7 +2349,7 @@ func TestSpan_MarksNonReplayableOnLossyInput(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()
@@ -2398,7 +2397,7 @@ func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		json.NewDecoder(r.Body).Decode(&payload)
-		if strings.Contains(r.URL.Path, "externalSpans") {
+		if r.URL.Path == legacySpanPath {
 			mu.Lock()
 			captured = payload
 			mu.Unlock()

@@ -42,7 +42,7 @@ func TestSeedCaseAndRunRecordWithoutCaptureOrDatabasePins(t *testing.T) {
 		t.Fatalf("traces: %+v", state.traces)
 	}
 	for _, trace := range state.traces {
-		raw := trace["externalTrace"].(map[string]any)
+		raw := trace["rawTrace"].(map[string]any)
 		if raw["ingestion_type"] != "seeded" || raw["db_snapshot_ref"] != nil {
 			t.Fatalf("seed flags: %+v", raw)
 		}

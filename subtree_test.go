@@ -605,7 +605,7 @@ func TestSubtree_ContentOffSpansAreNotSentOrCountedInCompletion(t *testing.T) {
 	}
 	completions := 0
 	for _, request := range requests() {
-		if trace, _ := request["externalTrace"].(map[string]any); trace != nil && trace["id"] == traceID && request["expectedSpanCount"] != nil {
+		if trace, _ := request["rawTrace"].(map[string]any); trace != nil && trace["id"] == traceID && request["expectedSpanCount"] != nil {
 			completions++
 			if request["expectedSpanCount"] != float64(4) {
 				t.Fatalf("expected span count = %v, want 4", request["expectedSpanCount"])
@@ -680,7 +680,7 @@ func TestSubtree_ContentOffSpanChildrenKeepOriginalParent(t *testing.T) {
 
 func autoTraceTruncation(requests []map[string]any, traceID any) map[string]any {
 	for _, request := range requests {
-		trace, _ := request["externalTrace"].(map[string]any)
+		trace, _ := request["rawTrace"].(map[string]any)
 		if trace == nil || request["traceId"] != traceID && trace["id"] != traceID {
 			continue
 		}
@@ -866,7 +866,7 @@ func TestSubtree_UntruncatedTraceCarriesNoTruncationMetadata(t *testing.T) {
 	}
 	found := false
 	for _, request := range requests() {
-		trace, _ := request["externalTrace"].(map[string]any)
+		trace, _ := request["rawTrace"].(map[string]any)
 		if trace == nil || trace["id"] != traceID {
 			continue
 		}

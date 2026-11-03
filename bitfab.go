@@ -663,7 +663,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 					payload["mockSource"] = string(mockSource)
 				}
 				stampManagedAutoSpan(ctx, rawSpan, payload)
-				c.httpClient.sendExternalSpan(payload, dropped...)
+				c.httpClient.sendSpanPayload(payload, dropped...)
 			}
 
 			if id.isRootSpan {
@@ -1098,7 +1098,7 @@ func (s *ActiveSpan) End() {
 				if s.experimentID != "" {
 					setExperimentIDKeys(payload, s.experimentID)
 				}
-				s.client.httpClient.sendExternalSpan(payload, dropped...)
+				s.client.httpClient.sendSpanPayload(payload, dropped...)
 			}
 
 			if s.isRootSpan {
@@ -1168,7 +1168,7 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		"type":             "sdk-function",
 		"source":           "go-sdk-function",
 		"traceFunctionKey": traceFunctionKey,
-		"externalTrace":    rawTrace,
+		"rawTrace":         rawTrace,
 		"completed":        true,
 	}
 
@@ -1183,7 +1183,7 @@ func (c *Client) sendTraceCompletion(traceFunctionKey, traceID, startedAt, ended
 		payload["dropped"] = true
 	}
 
-	c.httpClient.sendExternalTrace(payload)
+	c.httpClient.sendTracePayload(payload)
 
 	// Clean up trace state
 	deleteTraceState(traceID)

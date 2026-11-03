@@ -5,8 +5,8 @@ import "time"
 type traceOperation string
 
 const (
-	operationExternalSpan  traceOperation = "external_span"
-	operationExternalTrace traceOperation = "external_trace"
+	operationSpan          traceOperation = "external_span"
+	operationTrace         traceOperation = "external_trace"
 	operationInternalTrace traceOperation = "internal_trace"
 )
 
@@ -21,7 +21,7 @@ const (
 type directBatchSender func(endpoint string, request preparedRequest, timeout time.Duration) (map[string]any, error)
 
 // carrierRef identifies one application trace carrier for delivery accounting.
-// An empty spanID denotes the closing external-trace carrier.
+// An empty spanID denotes the closing trace carrier.
 type carrierRef struct {
 	traceID string
 	spanID  string

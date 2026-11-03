@@ -114,7 +114,7 @@ func TestReplayAttemptsCarryIdentityMetadataAndIndependentBranches(t *testing.T)
 	}
 	attempts := map[float64]int{}
 	for _, trace := range state.traces {
-		raw := trace["externalTrace"].(map[string]any)
+		raw := trace["rawTrace"].(map[string]any)
 		attempt, ok := raw["replay_attempt"].(float64)
 		if !ok {
 			t.Fatal("trace missing attempt")

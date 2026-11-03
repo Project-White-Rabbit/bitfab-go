@@ -154,7 +154,7 @@ func TestSpanFinalize_RootWaitsForDroppedChildAndMetadata(t *testing.T) {
 				}
 				if request["completed"] == true {
 					completion = true
-					trace := request["externalTrace"].(map[string]any)
+					trace := request["rawTrace"].(map[string]any)
 					if trace["metadata"].(map[string]any)["late"] != true {
 						t.Fatal("late metadata lost")
 					}

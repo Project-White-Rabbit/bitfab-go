@@ -659,7 +659,7 @@ func TestSendReusesTheEncodedBody(t *testing.T) {
 	hc := newHTTPClient("test-key", server.URL)
 	body := []byte(`{"proof":"reused","spacing":[1,  2]}`)
 
-	if _, err := hc.send(context.Background(), "/api/sdk/externalSpans", body, 0); err != nil {
+	if _, err := hc.send(context.Background(), "/api/sdk/spans/list", body, 0); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 	if string(received) != string(body) {

@@ -334,15 +334,23 @@ type startReplayResponse struct {
 	Items               []replayServerItem `json:"items"`
 }
 
-type externalReplaySpan struct {
-	ID              string `json:"id"`
-	ExternalTraceID string `json:"externalTraceId"`
-	RawData         struct {
+type replaySpan struct {
+	ID            string `json:"id"`
+	TraceID       string `json:"traceId"`
+	LegacyTraceID string `json:"externalTraceId"`
+	RawData       struct {
 		SpanData struct {
 			Input  any `json:"input"`
 			Output any `json:"output"`
 		} `json:"span_data"`
 	} `json:"rawData"`
+}
+
+func (s replaySpan) sourceTraceID() string {
+	if s.TraceID != "" {
+		return s.TraceID
+	}
+	return s.LegacyTraceID
 }
 
 type replayStatusResponse struct {
@@ -938,11 +946,11 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	return start, nil
 }
 
-func (c *Client) getReplaySpan(ctx context.Context, spanID string) (externalReplaySpan, error) {
-	var span externalReplaySpan
-	endpoint := "/api/sdk/externalSpans/" + url.PathEscape(spanID) + "?view=replay"
+func (c *Client) getReplaySpan(ctx context.Context, spanID string) (replaySpan, error) {
+	var span replaySpan
+	endpoint := "/api/sdk/spans/" + url.PathEscape(spanID) + "/raw?view=replay"
 	if err := c.httpClient.get(ctx, endpoint, &span); err != nil {
-		return externalReplaySpan{}, fmt.Errorf("bitfab: fetch replay span %s: %w", spanID, err)
+		return replaySpan{}, fmt.Errorf("bitfab: fetch replay span %s: %w", spanID, err)
 	}
 	return span, nil
 }
@@ -1223,7 +1231,7 @@ func (c *Client) runReplayItem(
 		experimentID:       experimentID,
 		traceID:            localTraceID,
 		inputSourceSpanID:  span.ID,
-		inputSourceTraceID: span.ExternalTraceID,
+		inputSourceTraceID: span.sourceTraceID(),
 		sourceTraceID:      item.OriginalTraceID,
 		mockStrategy:       options.Mock,
 		mockTree:           mockTree,
