@@ -69,11 +69,11 @@ func TestBAMLCallExecutesAndSubmitsThroughTransport(t *testing.T) {
 }
 
 func TestCurrentSpanEnrichmentMatchesActiveSpan(t *testing.T) {
-	ctx, state := withSpanEnrichment(withSpanContext(context.Background(), "trace", "span"), "span")
+	ctx, state := withSpanEnrichment(withSpanContext(context.Background(), "trace", "span", ""), "span")
 	handle := GetCurrentSpan(ctx)
 	handle.SetPrompt("prompt")
 	handle.AddContext(map[string]any{"tokens": 2})
-	nested := withSpanContext(ctx, "trace", "nested")
+	nested := withSpanContext(ctx, "trace", "nested", "")
 	GetCurrentSpan(nested).SetPrompt("wrong")
 	result := map[string]any{}
 	state.apply(result, false)

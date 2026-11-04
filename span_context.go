@@ -5,18 +5,16 @@ import (
 	"sync"
 )
 
-// spanStackKey is the context key for the span stack.
-// Using a private struct type ensures no collisions with other packages.
 type spanStackKey struct{}
 
-// spanEntry represents a single entry in the span stack.
 type spanEntry struct {
-	traceID           string
-	spanID            string
-	sendsOnCompletion func() bool
+	traceID              string
+	spanID               string
+	traceFunctionKey     string
+	rootTraceFunctionKey string
+	sendsOnCompletion    func() bool
 }
 
-// currentSpan returns the top of the span stack from the context, or nil if empty.
 func currentSpan(ctx context.Context) *spanEntry {
 	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
 	if len(stack) == 0 {
@@ -26,24 +24,33 @@ func currentSpan(ctx context.Context) *spanEntry {
 	return &top
 }
 
-// withSpanContext pushes a new span entry onto the context's span stack.
-func withSpanContext(ctx context.Context, traceID, spanID string) context.Context {
-	return withSendingSpanContext(ctx, traceID, spanID, nil)
+func withSpanContext(ctx context.Context, traceID, spanID, traceFunctionKey string) context.Context {
+	return withSendingSpanContext(ctx, traceID, spanID, traceFunctionKey, nil)
 }
 
-// withSendingSpanContext pushes a span entry that can say, when a descendant
-// opens, whether this span will still be sent once the simulation plan has been
-// applied. A nil sendsOnCompletion means the span is always sent.
-func withSendingSpanContext(ctx context.Context, traceID, spanID string, sendsOnCompletion func() bool) context.Context {
+func withSendingSpanContext(ctx context.Context, traceID, spanID, traceFunctionKey string, sendsOnCompletion func() bool) context.Context {
 	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
+	rootTraceFunctionKey := traceFunctionKey
+	if len(stack) > 0 {
+		if parent := stack[len(stack)-1]; parent.traceID == traceID && parent.rootTraceFunctionKey != "" {
+			rootTraceFunctionKey = parent.rootTraceFunctionKey
+		}
+	}
 	newStack := make([]spanEntry, len(stack)+1)
 	copy(newStack, stack)
-	newStack[len(stack)] = spanEntry{traceID: traceID, spanID: spanID, sendsOnCompletion: sendsOnCompletion}
+	newStack[len(stack)] = spanEntry{traceID: traceID, spanID: spanID, traceFunctionKey: traceFunctionKey, rootTraceFunctionKey: rootTraceFunctionKey, sendsOnCompletion: sendsOnCompletion}
 	return context.WithValue(ctx, spanStackKey{}, newStack)
 }
 
-// nearestCapturedAncestorSpanID returns the closest span above this point in the
-// recorded call chain that will still be sent, walking the stack outward.
+func withFrameSpanContext(ctx context.Context, frames []autoFrame) context.Context {
+	base := make([]spanEntry, 0, len(frames))
+	for _, frame := range frames[:len(frames)-1] {
+		base = append(base, spanEntry{traceID: frame.root.traceID, spanID: frame.parent.id, traceFunctionKey: frame.root.key, rootTraceFunctionKey: frame.root.key})
+	}
+	top := frames[len(frames)-1]
+	return withSpanContext(context.WithValue(ctx, spanStackKey{}, base), top.root.traceID, top.parent.id, top.root.key)
+}
+
 func nearestCapturedAncestorSpanID(ctx context.Context) string {
 	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
 	for index := len(stack) - 1; index >= 0; index-- {
@@ -132,9 +139,10 @@ func clearAllTraceStates() {
 
 // CurrentSpan identifies the current active span.
 type CurrentSpan struct {
-	enrichment *spanEnrichment
-	id         string
-	traceID    string
+	enrichment        *spanEnrichment
+	id                string
+	traceID           string
+	traceFunctionKeys []string
 }
 
 // ID returns the canonical Bitfab span ID, or an empty string outside a span.
@@ -155,6 +163,14 @@ func (cs *CurrentSpan) TraceID() string {
 	return cs.traceID
 }
 
+// TraceFunctionKeys returns the keys of every trace function running at this point, outermost first, each listed once. A trace function called inside another one comes after it, so a cost recorded here can be counted toward each of them. Empty outside a trace. Safe to call on a nil receiver.
+func (cs *CurrentSpan) TraceFunctionKeys() []string {
+	if cs == nil || len(cs.traceFunctionKeys) == 0 {
+		return nil
+	}
+	return append([]string(nil), cs.traceFunctionKeys...)
+}
+
 // GetCurrentSpan returns the current active span from the context.
 // Returns nil if not inside a span context.
 func GetCurrentSpan(ctx context.Context) *CurrentSpan {
@@ -166,12 +182,27 @@ func GetCurrentSpan(ctx context.Context) *CurrentSpan {
 	if state != nil && state.id != entry.spanID {
 		state = nil
 	}
-	return &CurrentSpan{id: entry.spanID, traceID: entry.traceID, enrichment: state}
+	return &CurrentSpan{id: entry.spanID, traceID: entry.traceID, traceFunctionKeys: runningTraceFunctionKeys(ctx), enrichment: state}
+}
+
+func runningTraceFunctionKeys(ctx context.Context) []string {
+	stack, _ := ctx.Value(spanStackKey{}).([]spanEntry)
+	var keys []string
+	seen := map[string]bool{}
+	for _, entry := range stack {
+		if entry.traceFunctionKey == "" || seen[entry.traceFunctionKey] {
+			continue
+		}
+		seen[entry.traceFunctionKey] = true
+		keys = append(keys, entry.traceFunctionKey)
+	}
+	return keys
 }
 
 // CurrentTrace provides a handle to the current active trace for setting trace-level context.
 type CurrentTrace struct {
-	traceID string
+	traceID              string
+	rootTraceFunctionKey string
 }
 
 // TraceID returns the canonical Bitfab trace ID, or an empty string outside a span.
@@ -181,6 +212,18 @@ func (ct *CurrentTrace) TraceID() string {
 		return ""
 	}
 	return ct.traceID
+}
+
+// TraceFunctionKey returns the key of the trace function the current trace is
+// stored under, the one that started it. A Span or GetFunction call inside
+// another trace function joins that trace, so it reports the outer key. A Trace
+// inside another Trace starts its own trace, so it reports its own key. Empty
+// string outside a trace. Safe to call on a nil receiver.
+func (ct *CurrentTrace) TraceFunctionKey() string {
+	if ct == nil {
+		return ""
+	}
+	return ct.rootTraceFunctionKey
 }
 
 // SetSessionID sets the session ID for this trace.
@@ -281,5 +324,5 @@ func GetCurrentTrace(ctx context.Context) *CurrentTrace {
 	if entry == nil {
 		return nil
 	}
-	return &CurrentTrace{traceID: entry.traceID}
+	return &CurrentTrace{traceID: entry.traceID, rootTraceFunctionKey: entry.rootTraceFunctionKey}
 }

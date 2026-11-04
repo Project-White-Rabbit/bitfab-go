@@ -123,7 +123,7 @@ func TestWrapJevRecordsMapReplyOnCurrentSpan(t *testing.T) {
 }
 
 func TestWrapJevCallsOnReplyAfterRecording(t *testing.T) {
-	ctx, state := withSpanEnrichment(withSpanContext(context.Background(), "trace", "span"), "span")
+	ctx, state := withSpanEnrichment(withSpanContext(context.Background(), "trace", "span", ""), "span")
 	var seen jevReply
 	var contextsAtReply int
 	ask := WrapJev(func(context.Context, string) (jevReply, error) {

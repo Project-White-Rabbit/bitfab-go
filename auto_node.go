@@ -179,7 +179,7 @@ func enterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		if opts.MockOnReplay != nil {
 			marked = *opts.MockOnReplay
 		}
-		mockCtx := withSpanContext(context.WithValue(ctx, spanStackKey{}, []spanEntry(nil)), r.root.traceID, r.parentID)
+		mockCtx := withSpanContext(context.WithValue(ctx, spanStackKey{}, []spanEntry(nil)), r.root.traceID, r.parentID, r.root.key)
 		if replay := currentReplayContext(r.root.ctx); replay != nil && replay.selective != nil {
 			mockCtx = withReplayContext(mockCtx, replay)
 		}
@@ -211,7 +211,7 @@ func enterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		}
 	}
 	frame := frames[len(frames)-1]
-	node.ctx = withSpanContext(context.WithValue(ctx, spanStackKey{}, []spanEntry(nil)), frame.root.traceID, frame.parent.id)
+	node.ctx = withFrameSpanContext(ctx, frames)
 	if len(node.records) > 0 {
 		var enrichment *spanEnrichment
 		node.ctx, enrichment = withSpanEnrichment(node.ctx, frame.parent.id)

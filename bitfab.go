@@ -549,7 +549,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 	// Execute fn with the new span pushed onto the context stack, unless replay
 	// selected this child span for recorded or overridden output substitution.
 	nearestCapturedAncestor := nearestCapturedAncestorSpanID(ctx)
-	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, func() bool {
+	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, traceFunctionKey, func() bool {
 		return !managedAutoSpanDropped(ctx, c.httpClient.simulationPlan, id.spanID, traceFunctionKey, cfg.name, id.parentSpanID == "")
 	})
 	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)
@@ -793,7 +793,7 @@ func (c *Client) Start(ctx context.Context, traceFunctionKey string, spanName st
 	}
 
 	nearestCapturedAncestor := nearestCapturedAncestorSpanID(ctx)
-	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, func() bool {
+	childCtx := withSendingSpanContext(ctx, id.traceID, id.spanID, traceFunctionKey, func() bool {
 		return !c.httpClient.simulationPlan.dropsSpan(traceFunctionKey, spanName, id.parentSpanID == "")
 	})
 	childCtx, enrichment := withSpanEnrichment(childCtx, id.spanID)

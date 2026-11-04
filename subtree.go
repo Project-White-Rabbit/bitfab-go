@@ -588,7 +588,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	childCtx := context.WithValue(ctx, autoScopeContextKey{}, scope)
 	if len(frames) > 0 {
 		frame := frames[len(frames)-1]
-		childCtx = withSpanContext(context.WithValue(childCtx, spanStackKey{}, []spanEntry(nil)), frame.root.traceID, frame.parent.id)
+		childCtx = withFrameSpanContext(childCtx, frames)
 		var enrichment *spanEnrichment
 		if existing, ok := childCtx.Value(spanEnrichmentKey{}).(*spanEnrichment); ok && existing.id == frame.parent.id {
 			enrichment = existing
