@@ -310,7 +310,7 @@ func (r *autoRecord) finish(output any, err error) {
 			dropped = append(dropped, fields...)
 		}
 		if err != nil {
-			data["error"] = err.Error()
+			data["error"] = describeError(err)
 			data["error_source"] = "code"
 		}
 		if !contentOff && err == nil && r.selectiveInput != "" {

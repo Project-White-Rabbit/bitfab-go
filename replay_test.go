@@ -540,6 +540,40 @@ func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
 	}
 }
 
+func TestReplayItemErrorCarriesTheDeepestCause(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	result, err := client.Replay(
+		context.Background(),
+		"wrapped-error-workflow",
+		func(name string, count int) (string, error) {
+			if name == "beta" {
+				return "", &queryError{query: "select 1", err: pgTimeout{}}
+			}
+			return name, nil
+		},
+		&ReplayOptions{CodeChange: CodeChangeSkip},
+	)
+	if err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	want := "failed query: select 1 (caused by: Connection terminated due to connection timeout)"
+	if result.Items[1].Error == nil || *result.Items[1].Error != want {
+		t.Fatalf("item error = %v, want %q", result.Items[1].Error, want)
+	}
+	serialized, err := SerializeReplayResult(result)
+	if err != nil {
+		t.Fatalf("SerializeReplayResult: %v", err)
+	}
+	if !strings.Contains(serialized, `"code":"08006"`) {
+		t.Fatalf("serialized errors = %s", serialized)
+	}
+}
+
 func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
 	state := &replayTestServerState{completeErr: true}
 	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()[:1]))

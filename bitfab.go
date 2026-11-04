@@ -610,7 +610,7 @@ func (c *Client) Span(ctx context.Context, traceFunctionKey string, fn SpanFunc,
 				dropped = append(dropped, d...)
 			}
 			if recordedErr != nil {
-				spanData["error"] = recordedErr.Error()
+				spanData["error"] = describeError(recordedErr)
 				spanData["error_source"] = "code"
 			}
 			if !contentOff && recordedErr == nil {
@@ -1052,7 +1052,7 @@ func (s *ActiveSpan) End() {
 				dropped = append(dropped, d...)
 			}
 			if recordedErr != nil {
-				spanData["error"] = recordedErr.Error()
+				spanData["error"] = describeError(recordedErr)
 				spanData["error_source"] = "code"
 			}
 			if len(s.contexts) > 0 {

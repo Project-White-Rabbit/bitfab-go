@@ -96,6 +96,10 @@ func (item ReplayItem) MarshalJSON() ([]byte, error) {
 }
 
 func replayErrorJSON(err error) any {
+	return replayErrorJSONAtDepth(err, 1)
+}
+
+func replayErrorJSONAtDepth(err error, depth int) any {
 	if err == nil {
 		return nil
 	}
@@ -103,12 +107,15 @@ func replayErrorJSON(err error) any {
 		"type":    reflect.TypeOf(err).String(),
 		"message": err.Error(),
 	}
+	if code := errorCode(err); code != "" {
+		result["code"] = code
+	}
 	if branchErr := asDBBranchReplayError(err); branchErr != nil {
 		result["code"] = branchErr.Code
 		result["originalTraceId"] = branchErr.OriginalTraceID
 	}
-	if cause := errors.Unwrap(err); cause != nil {
-		result["cause"] = replayErrorJSON(cause)
+	if cause := errors.Unwrap(err); cause != nil && depth < maxErrorCauseDepth {
+		result["cause"] = replayErrorJSONAtDepth(cause, depth+1)
 	}
 	return result
 }
@@ -1270,7 +1277,7 @@ func (c *Client) runReplayItem(
 	}
 	item.localTraceID = localTraceID
 	if traceErr != nil {
-		message := traceErr.Error()
+		message := describeError(traceErr)
 		item.Error = &message
 		item.TraceError = traceErr
 	}
@@ -1287,7 +1294,7 @@ func invokeReplayInputAdapter(adapter ReplayInputAdapter, inputs []any, ctx Adap
 }
 
 func setReplaySetupError(item *ReplayItem, err error) {
-	message := err.Error()
+	message := describeError(err)
 	if branchErr := asDBBranchReplayError(err); branchErr != nil {
 		message = branchErr.itemMessage()
 	}
