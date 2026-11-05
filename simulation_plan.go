@@ -441,10 +441,40 @@ func (p *simulationPlan) apply(payload map[string]any, key string) (map[string]a
 	if !off {
 		return payload, true
 	}
-	if parent, _ := raw["parent_id"].(string); parent != "" && data["error"] == nil {
+	if parent, _ := raw["parent_id"].(string); parent != "" && data["error"] == nil && !recordedUsage(data) {
 		return nil, false
 	}
 	return stripPlanContent(payload), true
+}
+
+var usageFields = []string{"inputTokens", "outputTokens", "cachedInputTokens", "cacheReadTokens", "costUsd"}
+
+func recordedUsage(data map[string]any) bool {
+	switch contexts := data["contexts"].(type) {
+	case []ContextEntry:
+		for _, entry := range contexts {
+			if isUsageEntry(entry) {
+				return true
+			}
+		}
+	case []any:
+		for _, entry := range contexts {
+			if fields, ok := entry.(map[string]any); ok && isUsageEntry(fields) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isUsageEntry(entry map[string]any) bool {
+	for _, field := range usageFields {
+		switch entry[field].(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+			return true
+		}
+	}
+	return false
 }
 
 func withoutPlanContent(payload map[string]any) map[string]any {

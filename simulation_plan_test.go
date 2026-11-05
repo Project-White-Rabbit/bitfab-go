@@ -743,6 +743,12 @@ func TestSimulationPlan_LoadedPlanSkipsErrorFreeContentOffChildren(t *testing.T)
 	<-plan.firstReadDone
 	framework := planTestQuietSpan("secret", true)
 	framework["rawSpan"].(map[string]any)["span_origin"] = MakeSpanOrigin("langgraph")
+	withUsage := planTestQuietSpan("secret", true)
+	planSpanData(withUsage)["contexts"] = []ContextEntry{{"model": "m", "inputTokens": 130, "outputTokens": 92}}
+	decodedUsage := planTestQuietSpan("secret", true)
+	planSpanData(decodedUsage)["contexts"] = []any{map[string]any{"costUsd": 0.01}}
+	withoutUsage := planTestQuietSpan("secret", true)
+	planSpanData(withoutUsage)["contexts"] = []ContextEntry{{"source": "lookup", "model": "m"}}
 	cases := []struct {
 		label string
 		span  map[string]any
@@ -753,6 +759,9 @@ func TestSimulationPlan_LoadedPlanSkipsErrorFreeContentOffChildren(t *testing.T)
 		{"root", planTestQuietSpan("secret", false), true},
 		{"framework child", framework, true},
 		{"listed child", planTestQuietSpan("public", true), true},
+		{"child that recorded LLM usage", withUsage, true},
+		{"child whose decoded contexts report a cost", decodedUsage, true},
+		{"child whose contexts carry no usage", withoutUsage, false},
 	}
 	for _, tc := range cases {
 		var recorded recordedSubmissions
@@ -769,6 +778,10 @@ func TestSimulationPlan_LoadedPlanSkipsErrorFreeContentOffChildren(t *testing.T)
 		switch tc.label {
 		case "errored child":
 			assertWithoutContent(t, tc.label, data)
+		case "child that recorded LLM usage", "child whose decoded contexts report a cost":
+			if _, ok := data["input"]; ok || data["content_off_by_simulation_plan"] != true || data["contexts"] == nil {
+				t.Errorf("%s = %#v", tc.label, data)
+			}
 		case "root":
 			if _, ok := data["input"]; ok || data["content_off_by_simulation_plan"] != true {
 				t.Errorf("root = %#v", data)
