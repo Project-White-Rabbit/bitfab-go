@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
-	"time"
 )
 
 func TestAssertions_SaveBatchPreservesOmittedNullAndTarget(t *testing.T) {
@@ -158,60 +158,6 @@ func TestAssertions_SaveDecodesRewriteOntoEachAssertion(t *testing.T) {
 	failed := saved[1].Rewrite
 	if failed == nil || failed.Status != AssertionRewriteCheckFailed || failed.Error == nil || *failed.Error != "model call timed out" {
 		t.Fatalf("second rewrite = %#v", failed)
-	}
-}
-
-func TestAssertions_SaveSendsCodeKindWithoutCodeAndDecodesCodeDraft(t *testing.T) {
-	server := newDatasetsServer(t, func(datasetRequest) any {
-		return map[string]any{"assertions": []any{
-			map[string]any{"id": "a1", "traceId": "trace", "assertion": "Books the 9am flight", "kind": "judge",
-				"codeDraft": map[string]any{
-					"requestedKind": "hybrid", "status": "not_written", "reason": "No span holds the booking.",
-				}},
-			map[string]any{"id": "a2", "traceId": "trace", "assertion": "Arrives on time", "kind": "judge", "codeDraft": nil},
-		}}
-	})
-	client := NewClient("test-key", WithServiceURL(server.URL))
-	saved, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
-		TraceID: "trace", Assertions: []SaveAssertion{
-			{Assertion: "Books the 9am flight", Kind: AssertionKindHybrid},
-			{Assertion: "Arrives on time"},
-		},
-	})
-	if err != nil || len(saved) != 2 {
-		t.Fatalf("SaveAssertions = %+v, %v", saved, err)
-	}
-	reason := "No span holds the booking."
-	want := &AssertionCodeDraft{RequestedKind: AssertionKindHybrid, Status: AssertionCodeDraftNotWritten, Reason: &reason}
-	if !reflect.DeepEqual(saved[0].CodeDraft, want) {
-		t.Fatalf("first codeDraft = %#v, want %#v", saved[0].CodeDraft, want)
-	}
-	if saved[1].CodeDraft != nil {
-		t.Fatalf("second codeDraft = %#v", saved[1].CodeDraft)
-	}
-	sent := server.recorded()[0].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
-	if _, hasCode := sent["code"]; sent["kind"] != "hybrid" || hasCode {
-		t.Fatalf("sent = %#v", sent)
-	}
-}
-
-func TestAssertions_SaveTimeoutOnlyWhenAnEntryAsksForCode(t *testing.T) {
-	code := &AssertionCode{Source: "return 'pass'"}
-	cases := []struct {
-		assertion SaveAssertion
-		want      time.Duration
-	}{
-		{SaveAssertion{Assertion: "a", Kind: AssertionKindCode}, 300 * time.Second},
-		{SaveAssertion{Assertion: "a", Kind: AssertionKindHybrid}, 300 * time.Second},
-		{SaveAssertion{Assertion: "a", Kind: AssertionKindCode, Code: code}, 0},
-		{SaveAssertion{Assertion: "a", Kind: AssertionKindJudge}, 0},
-		{SaveAssertion{Assertion: "a"}, 0},
-	}
-	for _, c := range cases {
-		got := saveTimeout([]TraceAssertionsUpdate{{TraceID: "trace", Assertions: []SaveAssertion{c.assertion}}})
-		if got != c.want {
-			t.Fatalf("saveTimeout(%+v) = %v, want %v", c.assertion, got, c.want)
-		}
 	}
 }
 
@@ -619,37 +565,58 @@ func TestAssertions_GetAssertionsReportsGeneration(t *testing.T) {
 	}
 }
 
-func TestAssertions_SaveSendsKindAndCode(t *testing.T) {
+func TestAssertions_SaveSendsSetClearedAndOmittedCode(t *testing.T) {
 	server := newDatasetsServer(t, func(datasetRequest) any {
 		return map[string]any{"assertions": []any{
-			map[string]any{"id": "assertion-1", "traceId": "trace", "assertion": "books", "source": "agent", "kind": "code",
+			map[string]any{"id": "assertion-1", "traceId": "trace", "assertion": "books", "source": "agent",
 				"code": map[string]any{"source": `return "pass"`, "spanNames": []any{"book"}}, "codeBrokenReason": "The code threw: nope"},
-			map[string]any{"id": "assertion-2", "traceId": "trace", "assertion": "books", "source": "agent", "kind": "judge", "code": nil},
+			map[string]any{"id": "assertion-2", "traceId": "trace", "assertion": "books", "source": "agent", "code": nil},
+			map[string]any{"id": "assertion-3", "traceId": "trace", "assertion": "books", "source": "agent", "code": nil},
 		}}
 	})
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	code := AssertionCode{Source: `return "pass"`, SpanNames: []string{"book"}}
 	result, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
 		TraceID: "trace", Assertions: []SaveAssertion{
-			{Assertion: "books", Kind: AssertionKindCode, Code: &code},
-			{ID: "assertion-2", Assertion: "books", Kind: AssertionKindJudge},
+			{Assertion: "books", Code: &code},
+			{ID: "assertion-2", Assertion: "books", ClearCode: true},
+			{ID: "assertion-3", Assertion: "books"},
 		},
 	})
-	if err != nil || len(result) != 2 {
+	if err != nil || len(result) != 3 {
 		t.Fatalf("SaveAssertions = %+v, %v", result, err)
 	}
-	if result[0].Kind != AssertionKindCode || result[0].Code == nil || !reflect.DeepEqual(*result[0].Code, code) ||
-		result[0].CodeBrokenReason == nil || result[1].Kind != AssertionKindJudge || result[1].Code != nil {
+	if result[0].Code == nil || !reflect.DeepEqual(*result[0].Code, code) ||
+		result[0].CodeBrokenReason == nil || result[1].Code != nil || result[2].Code != nil {
 		t.Fatalf("decoded code = %+v", result)
 	}
 	want := map[string]any{"source": "agent", "guidedRewrite": true, "updates": []any{
 		map[string]any{"traceId": "trace", "assertions": []any{
-			map[string]any{"assertion": "books", "kind": "code", "code": map[string]any{"source": `return "pass"`, "spanNames": []any{"book"}}},
-			map[string]any{"id": "assertion-2", "assertion": "books", "kind": "judge"},
+			map[string]any{"assertion": "books", "code": map[string]any{"source": `return "pass"`, "spanNames": []any{"book"}}},
+			map[string]any{"id": "assertion-2", "assertion": "books", "code": nil},
+			map[string]any{"id": "assertion-3", "assertion": "books"},
 		}},
 	}}
 	if body := server.recorded()[0].body; !reflect.DeepEqual(body, want) {
 		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
+func TestAssertions_SaveRefusesSettingAndClearingCodeTogether(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{
+			{Assertion: "books", Code: &AssertionCode{Source: `return "pass"`}, ClearCode: true},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot set and clear assertion code together") {
+		t.Fatalf("SaveAssertions error = %v", err)
+	}
+	if len(server.recorded()) != 0 {
+		t.Fatalf("sent %d requests, want none", len(server.recorded()))
 	}
 }
 
@@ -660,7 +627,7 @@ func TestAssertions_SaveSendsEmptySpanNamesWhenUnset(t *testing.T) {
 	client := NewClient("test-key", WithServiceURL(server.URL))
 	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
 		TraceID: "trace", Assertions: []SaveAssertion{
-			{Assertion: "books", Kind: AssertionKindCode, Code: &AssertionCode{Source: `return "pass"`}},
+			{Assertion: "books", Code: &AssertionCode{Source: `return "pass"`}},
 		},
 	})
 	if err != nil {

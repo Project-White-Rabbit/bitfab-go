@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
-	"time"
 )
 
 // TraceTargetKind selects the output or a named span on the evaluated trace.
@@ -97,31 +96,22 @@ const (
 	TraceAssertionHuman TraceAssertionSource = "human"
 )
 
-// AssertionKind says who decides an assertion on a replay.
-type AssertionKind string
-
-const (
-	// AssertionKindJudge means the LLM judge reads the run and decides.
-	AssertionKindJudge AssertionKind = "judge"
-	// AssertionKindCode means the assertion's code decides every replay.
-	AssertionKindCode AssertionKind = "code"
-	// AssertionKindHybrid means the code decides what a program can read and
-	// returns "defer" to hand the rest to the LLM judge.
-	AssertionKindHybrid AssertionKind = "hybrid"
-)
-
 // AssertionCode is code that decides an assertion's verdict from a run's
-// spans instead of the LLM judge. Source is the body of an async TypeScript
-// function (plain JavaScript also works) called with spans (each {name, index,
-// hasData}, in start order, without its data), input, and output. It reads
-// span data with await named("span name"), which returns {name, index, input,
-// output, metadata} for each span with that name, or await span.data(). It
-// returns "pass", "fail", or "defer" (hybrid assertions only: hand the rest to
-// the LLM judge), or {result, reason}. It gets one second of compute and may
-// load the data of at most 50 spans within ten seconds. SpanNames lists every
-// span name the code expects a correct run to produce; a name missing from a
-// replay and from the function's other sampled replays marks the code broken
-// instead of failing the replay.
+// spans before the LLM judge is asked. Source is the body of an async
+// TypeScript function (plain JavaScript also works) called with spans (each
+// {name, index, hasData}, in start order, without its data), input, and
+// output. It reads span data with await named("span name"), which returns
+// {name, index, input, output, metadata} for each span with that name, or
+// await span.data(). It returns "pass" or "fail" to decide the verdict with no
+// judge call, or "defer" to hand the run to the LLM judge, either bare or as
+// {result, reason}. A defer may also carry data, {result: "defer", reason,
+// data}, holding what the code found that the judge needs to decide (such as
+// a sent email's subject and body); the judge reads the reason and data
+// alongside the run. A thrown error counts as "defer" with no data. It gets
+// one second of compute and may load the data of at most 50 spans within ten
+// seconds. SpanNames lists every span name the code expects a correct run to
+// produce; a name missing from a replay and from the function's other sampled
+// replays marks the code broken instead of failing the replay.
 type AssertionCode struct {
 	Source    string   `json:"source"`
 	SpanNames []string `json:"spanNames"`
@@ -136,9 +126,10 @@ type TraceAssertion struct {
 	PassCriteria           *string      `json:"passCriteria"`
 	FailCriteria           *string      `json:"failCriteria"`
 	TargetOnEvaluatedTrace *TraceTarget `json:"targetOnEvaluatedTrace"`
-	// Kind says who decides this assertion on a replay.
-	Kind AssertionKind `json:"kind"`
-	// Code is the code of a code or hybrid assertion, or nil for a judge assertion.
+	// Code decides the verdict before the LLM judge is asked, or is nil when
+	// the judge decides every replay. Bitfab may write code for an assertion in
+	// the background after it is saved, so a later GetAssertions read can carry
+	// Code that the save did not.
 	Code *AssertionCode `json:"code"`
 	// CodeBrokenReason says why Code could not run on a replay, or is nil while it runs.
 	CodeBrokenReason      *string              `json:"codeBrokenReason"`
@@ -155,34 +146,8 @@ type TraceAssertion struct {
 	// assertion, on saves and on GetAssertions reads alike. It is nil when no
 	// check ever ran on it.
 	Rewrite *AssertionRewrite `json:"rewrite,omitempty"`
-	// CodeDraft reports on a saved entry that set AssertionKindCode or
-	// AssertionKindHybrid with no Code for Bitfab to write. It is nil on every
-	// other entry and on GetAssertions reads.
-	CodeDraft *AssertionCodeDraft `json:"codeDraft,omitempty"`
 	// Deprecated: Use CategoryID instead.
 	CategoryAssertionID *string `json:"category_assertion_id"`
-}
-
-// AssertionCodeDraftStatus says whether Bitfab wrote code for an assertion that asked for it.
-type AssertionCodeDraftStatus string
-
-const (
-	// AssertionCodeDraftWritten means code of the requested kind was saved and ran on the trace.
-	AssertionCodeDraftWritten AssertionCodeDraftStatus = "written"
-	// AssertionCodeDraftNotWritten means no working code could be written, so
-	// the assertion was saved as a judge assertion without code. Reason says why.
-	AssertionCodeDraftNotWritten AssertionCodeDraftStatus = "not_written"
-)
-
-// AssertionCodeDraft reports whether Bitfab wrote the code an entry asked for.
-// When it was not written, reword the assertion and ask again, or send Code yourself.
-type AssertionCodeDraft struct {
-	// RequestedKind is the kind the entry asked for, code or hybrid.
-	RequestedKind AssertionKind `json:"requestedKind"`
-	// Status says whether working code was written.
-	Status AssertionCodeDraftStatus `json:"status"`
-	// Reason says why no code was written, or is nil when it was.
-	Reason *string `json:"reason"`
 }
 
 // AssertionRewriteStatus says where Bitfab's check of an assertion's sent text stands.
@@ -268,16 +233,10 @@ type AssertionVerdictEvidence struct {
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
 // the human note, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
-// Kind says who decides the assertion: set AssertionKindCode or
-// AssertionKindHybrid together with Code, or AssertionKindJudge to remove the
-// code. Leave Kind empty and Code nil to keep both. Set AssertionKindCode or
-// AssertionKindHybrid with Code nil, on an assertion that has no code yet, to
-// have Bitfab write it: the text is checked by the guided rewrite (unless
-// skipped), code of that kind is written and run on the trace, and the save
-// waits for both. The returned CodeDraft says whether working code was
-// written. At most 10 assertions per save may ask for code this way, and a
-// save that asks for any waits up to five minutes. Code that cannot run on
-// the trace, or that returns "defer" for a code assertion, is refused.
+// Set Code to give the assertion code, set ClearCode to remove its code, and
+// leave both unset to keep the current code. Code is run on the trace before
+// saving and refused when it throws, runs past its time limit, or returns
+// anything other than a result.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
@@ -285,7 +244,6 @@ type SaveAssertion struct {
 	PassCriteria                *string
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
-	Kind                        AssertionKind
 	Code                        *AssertionCode
 	CategoryID                  *string
 	Justification               *Justification
@@ -297,27 +255,11 @@ type SaveAssertion struct {
 	ClearTargetOnEvaluatedTrace bool
 	ClearCategoryID             bool
 	ClearAssigneeEmail          bool
+	ClearCode                   bool
 	// Deprecated: Use CategoryID instead. CategoryID and ClearCategoryID take precedence when either is set.
 	CategoryAssertionID *string
 	// Deprecated: Use ClearCategoryID instead. CategoryID and ClearCategoryID take precedence when either is set.
 	ClearCategoryAssertionID bool
-}
-
-const codeDraftSaveTimeout = 300 * time.Second
-
-func (assertion SaveAssertion) asksBitfabToWriteCode() bool {
-	return (assertion.Kind == AssertionKindCode || assertion.Kind == AssertionKindHybrid) && assertion.Code == nil
-}
-
-func saveTimeout(updates []TraceAssertionsUpdate) time.Duration {
-	for _, update := range updates {
-		for _, assertion := range update.Assertions {
-			if assertion.asksBitfabToWriteCode() {
-				return codeDraftSaveTimeout
-			}
-		}
-	}
-	return 0
 }
 
 func (assertion SaveAssertion) category() (*string, bool) {
@@ -368,10 +310,12 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 		}
 		payload["targetOnEvaluatedTrace"] = target
 	}
-	if assertion.Kind != "" {
-		payload["kind"] = assertion.Kind
-	}
-	if assertion.Code != nil {
+	if assertion.ClearCode {
+		if assertion.Code != nil {
+			return nil, fmt.Errorf("bitfab: cannot set and clear assertion code together")
+		}
+		payload["code"] = nil
+	} else if assertion.Code != nil {
 		code := *assertion.Code
 		if code.SpanNames == nil {
 			code.SpanNames = []string{}
@@ -498,10 +442,8 @@ func (t *TracesClient) SaveAssertions(ctx context.Context, params SaveAssertions
 // writing rules in the background and rewrites it in place when it breaks one,
 // usually within a minute.
 // Read the result later with GetAssertions, whose rows carry Rewrite, and save
-// each of its SeparateAssertions as its own assertion. Entries that ask Bitfab
-// to write their code are checked and given code before the call returns, so
-// their Rewrite and CodeDraft are final. The assertions come back
-// in the order sent. An empty update list returns an empty slice without a
+// each of its SeparateAssertions as its own assertion. The assertions come
+// back in the order sent. An empty update list returns an empty slice without a
 // request.
 func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAssertionsAllParams) ([]TraceAssertion, error) {
 	if len(params.Updates) == 0 {
@@ -526,9 +468,9 @@ func (t *TracesClient) SaveAssertionsAll(ctx context.Context, params SaveAsserti
 	var response struct {
 		Assertions []TraceAssertion `json:"assertions"`
 	}
-	if err := t.httpClient.requestIntoWithTimeout(ctx, "/api/sdk/traces/assertions", map[string]any{
+	if err := t.httpClient.requestInto(ctx, "/api/sdk/traces/assertions", map[string]any{
 		"updates": updates, "source": source, "guidedRewrite": !params.SkipGuidedRewrite,
-	}, saveTimeout(params.Updates), &response); err != nil {
+	}, &response); err != nil {
 		return nil, err
 	}
 	return response.Assertions, nil

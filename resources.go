@@ -4,15 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 func (h *httpClient) requestInto(ctx context.Context, endpoint string, payload map[string]any, target any) error {
-	return h.requestIntoWithTimeout(ctx, endpoint, payload, 0, target)
-}
-
-func (h *httpClient) requestIntoWithTimeout(ctx context.Context, endpoint string, payload map[string]any, timeout time.Duration, target any) error {
-	response, err := h.request(ctx, endpoint, payload, timeout)
+	response, err := h.request(ctx, endpoint, payload, 0)
 	if err != nil {
 		return err
 	}
