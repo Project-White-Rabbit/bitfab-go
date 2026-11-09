@@ -602,6 +602,38 @@ func TestAssertions_SaveSendsSetClearedAndOmittedCode(t *testing.T) {
 	}
 }
 
+func TestAssertions_SaveSendsCodeOffOnlyWhenSet(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "assertion-1", "traceId": "trace", "assertion": "books", "source": "agent", "codeOff": true},
+			map[string]any{"id": "assertion-2", "traceId": "trace", "assertion": "books", "source": "agent", "codeOff": false},
+			map[string]any{"id": "assertion-3", "traceId": "trace", "assertion": "books", "source": "agent", "codeOff": false},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	off, on := true, false
+	result, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace", Assertions: []SaveAssertion{
+			{ID: "assertion-1", Assertion: "books", CodeOff: &off},
+			{ID: "assertion-2", Assertion: "books", CodeOff: &on},
+			{ID: "assertion-3", Assertion: "books"},
+		},
+	})
+	if err != nil || len(result) != 3 || !result[0].CodeOff || result[1].CodeOff {
+		t.Fatalf("SaveAssertions = %+v, %v", result, err)
+	}
+	want := map[string]any{"source": "agent", "guidedRewrite": true, "updates": []any{
+		map[string]any{"traceId": "trace", "assertions": []any{
+			map[string]any{"id": "assertion-1", "assertion": "books", "codeOff": true},
+			map[string]any{"id": "assertion-2", "assertion": "books", "codeOff": false},
+			map[string]any{"id": "assertion-3", "assertion": "books"},
+		}},
+	}}
+	if body := server.recorded()[0].body; !reflect.DeepEqual(body, want) {
+		t.Fatalf("body = %#v, want %#v", body, want)
+	}
+}
+
 func TestAssertions_SaveRefusesSettingAndClearingCodeTogether(t *testing.T) {
 	server := newDatasetsServer(t, func(datasetRequest) any {
 		return map[string]any{"assertions": []any{}}

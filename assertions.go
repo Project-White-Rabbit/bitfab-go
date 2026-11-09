@@ -132,7 +132,10 @@ type TraceAssertion struct {
 	// Code that the save did not.
 	Code *AssertionCode `json:"code"`
 	// CodeBrokenReason says why Code could not run on a replay, or is nil while it runs.
-	CodeBrokenReason      *string              `json:"codeBrokenReason"`
+	CodeBrokenReason *string `json:"codeBrokenReason"`
+	// CodeOff is true when Code is kept but turned off, so the LLM judge
+	// decides every replay.
+	CodeOff               bool                 `json:"codeOff"`
 	Source                TraceAssertionSource `json:"source"`
 	HumanNote             *string              `json:"humanNote"`
 	CategoryID            *string              `json:"category_id"`
@@ -237,6 +240,11 @@ type AssertionVerdictEvidence struct {
 // leave both unset to keep the current code. Code is run on the trace before
 // saving and refused when it throws, runs past its time limit, or returns
 // anything other than a result.
+// Point CodeOff to true to keep the code but have the LLM judge decide every
+// replay, for code that turns out to be wrong, and to false to use the code
+// again. Bitfab writes no code for an assertion whose code is off, and new
+// code leaves the setting as it is. Removing the code turns it back on.
+// Leave it nil to keep the current setting.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
@@ -245,6 +253,7 @@ type SaveAssertion struct {
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
 	Code                        *AssertionCode
+	CodeOff                     *bool
 	CategoryID                  *string
 	Justification               *Justification
 	CategoryJustification       *Justification
@@ -321,6 +330,9 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 			code.SpanNames = []string{}
 		}
 		payload["code"] = code
+	}
+	if assertion.CodeOff != nil {
+		payload["codeOff"] = *assertion.CodeOff
 	}
 	if categoryID, clearCategory := assertion.category(); clearCategory {
 		if categoryID != nil {
