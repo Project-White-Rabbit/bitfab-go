@@ -100,13 +100,13 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                                                                                                        int
-	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                      bool
-	parameters                                                                                                                                                                                          []string
-	metadata                                                                                                                                                                                            map[string]string
-	visited                                                                                                                                                                                             map[string]bool
-	flags                                                                                                                                                                                               map[string]any
+	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, baselineExperimentID, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                                                                                                              int
+	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                                            bool
+	parameters                                                                                                                                                                                                                []string
+	metadata                                                                                                                                                                                                                  map[string]string
+	visited                                                                                                                                                                                                                   map[string]bool
+	flags                                                                                                                                                                                                                     map[string]any
 }
 
 type registryParameters []string
@@ -144,6 +144,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.mock, "mock", "", "marked, all, or none")
 	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "experiment group ID")
 	fs.StringVar(&out.experimentGroupName, "experiment-group-name", "", "Name for the experiment group, applied when this run creates the group or the group has no name yet. A group that already has a name keeps it. Requires --experiment-group-id.")
+	fs.StringVar(&out.baselineExperimentID, "baseline-experiment-id", "", "ID of an earlier experiment to compare this run against. Without it, the first finished experiment in the run's group is the baseline, and without a group the original traces are.")
 	fs.StringVar(&out.codeChange, "code-change", "", "`working-tree|last-branch|default-branch|ref|skip|manual` (required: the code change this run tests; working-tree is the uncommitted changes vs HEAD, last-branch the diff against the branch this one was cut from, default-branch the diff against the default branch, ref the diff against --code-change-base, skip none, manual the edits in --code-change-file)")
 	fs.StringVar(&out.codeChangeBase, "code-change-base", "", "`BRANCH|COMMIT` (with --code-change ref: the branch or commit to diff against)")
 	fs.StringVar(&out.codeChangeFile, "code-change-file", "", "`PATH` (with --code-change manual: a JSON file of { description, files })")
@@ -566,6 +567,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	}
 	if parsed.visited["experiment-group-name"] {
 		options.ExperimentGroupName = parsed.experimentGroupName
+	}
+	if parsed.visited["baseline-experiment-id"] {
+		options.BaselineExperimentID = parsed.baselineExperimentID
 	}
 	if parsed.visited["grader-ids"] {
 		options.GraderIDs, err = registryIDs(parsed.graderIDs)

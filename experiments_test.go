@@ -15,7 +15,8 @@ func experimentJSON(id string) map[string]any {
 		"id": id, "name": "candidate", "notes": nil, "status": "completed", "traceFunctionKey": "orders",
 		"createdAt": "2026-09-20T00:00:00.000Z", "completedAt": "2026-09-20T00:05:00.000Z",
 		"codeChangeType": "default-branch", "codeChangeDescription": nil, "codeChangeTotals": map[string]any{"files": 2, "added": 10, "removed": 3},
-		"experimentGroupId": nil, "experimentGroupName": nil, "datasetId": "dataset-1", "datasetName": "Checkout",
+		"experimentGroupId": nil, "experimentGroupName": nil,
+		"baselineExperimentId": "experiment-0", "baselineExperimentName": "baseline", "datasetId": "dataset-1", "datasetName": "Checkout",
 		"datasetIds": []string{"dataset-1"}, "datasetNames": []string{"Checkout"}, "attempts": 3, "plannedTraceCount": 12,
 		"runBy":       map[string]any{"id": "user-1", "fullName": "Ada", "email": nil, "imageUrl": nil},
 		"githubEmail": nil, "gitBranch": "main", "commitSha": "abc123", "baseSha": nil, "experimentSha": nil,
@@ -126,7 +127,26 @@ func TestExperiments_Get(t *testing.T) {
 	if len(requests) != 1 || requests[0].path != "/api/sdk/experiments/experiment-1" || requests[0].query != "" {
 		t.Fatalf("requests = %+v", requests)
 	}
-	if experiment.ID != "experiment-1" || *experiment.TraceFunctionKey != "orders" || experiment.Metadata["schedule"] != "eod" {
+	if experiment.ID != "experiment-1" || *experiment.TraceFunctionKey != "orders" || experiment.Metadata["schedule"] != "eod" ||
+		experiment.BaselineExperimentID == nil || *experiment.BaselineExperimentID != "experiment-0" ||
+		experiment.BaselineExperimentName == nil || *experiment.BaselineExperimentName != "baseline" {
+		t.Fatalf("experiment = %+v", experiment)
+	}
+}
+
+func TestExperiments_GetDecodesAnUnsetBaselineAsNil(t *testing.T) {
+	server := newDatasetsServer(t, func(datasetRequest) any {
+		body := experimentJSON("experiment-1")
+		body["baselineExperimentId"] = nil
+		body["baselineExperimentName"] = nil
+		return map[string]any{"experiment": body}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	experiment, err := client.Experiments.Get(context.Background(), "experiment-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if experiment.BaselineExperimentID != nil || experiment.BaselineExperimentName != nil {
 		t.Fatalf("experiment = %+v", experiment)
 	}
 }

@@ -27,15 +27,16 @@ var (
 	unsupportedFlagItem = struct{}{}
 	cliFlagAliases      = map[string]string{"max-concurrency": "concurrency", "dataset-id": "dataset-ids"}
 	optionFlagNames     = map[string]string{
-		"MaxConcurrency":    "concurrency",
-		"TraceIDs":          "trace-ids",
-		"DatasetID":         "dataset-ids",
-		"DatasetIDs":        "dataset-ids",
-		"GraderIDs":         "grader-ids",
-		"CategoryIDs":       "category-ids",
-		"ExperimentGroupID": "experiment-group-id",
-		"DBBranch":          "db-branch",
-		"MockOverrides":     "mock-override",
+		"MaxConcurrency":       "concurrency",
+		"TraceIDs":             "trace-ids",
+		"DatasetID":            "dataset-ids",
+		"DatasetIDs":           "dataset-ids",
+		"GraderIDs":            "grader-ids",
+		"CategoryIDs":          "category-ids",
+		"ExperimentGroupID":    "experiment-group-id",
+		"BaselineExperimentID": "baseline-experiment-id",
+		"DBBranch":             "db-branch",
+		"MockOverrides":        "mock-override",
 	}
 	buildInvocation       = replayInvocation
 	commaSeparatedIDFlags = map[string]bool{"trace-ids": true, "dataset-ids": true, "grader-ids": true, "category-ids": true}

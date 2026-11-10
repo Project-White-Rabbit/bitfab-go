@@ -619,6 +619,9 @@ func TestReplayOmitsExperimentGroupNameWhenUnset(t *testing.T) {
 	if _, present := state.startBody["experimentGroupName"]; present {
 		t.Errorf("start body should omit experimentGroupName: %#v", state.startBody)
 	}
+	if _, present := state.startBody["baselineExperimentId"]; present {
+		t.Errorf("start body should omit baselineExperimentId: %#v", state.startBody)
+	}
 }
 
 func TestReplayRefusesExperimentGroupNameWithoutID(t *testing.T) {
@@ -822,10 +825,11 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 				Before: "old",
 				After:  "new",
 			}},
-			ExperimentGroupID:   "group-1",
-			ExperimentGroupName: "Prompt sweep",
-			DatasetID:           "dataset-1",
-			GraderIDs:           []string{"grader-1"},
+			ExperimentGroupID:    "group-1",
+			ExperimentGroupName:  "Prompt sweep",
+			BaselineExperimentID: "experiment-0",
+			DatasetID:            "dataset-1",
+			GraderIDs:            []string{"grader-1"},
 		},
 	)
 	if err != nil {
@@ -842,6 +846,7 @@ func TestReplaySendsExperimentOptionsAndExplicitTraceIDs(t *testing.T) {
 		"codeChangeDescription": "try the new prompt",
 		"experimentGroupId":     "group-1",
 		"experimentGroupName":   "Prompt sweep",
+		"baselineExperimentId":  "experiment-0",
 		"datasetId":             "dataset-1",
 	} {
 		if state.startBody[key] != want {

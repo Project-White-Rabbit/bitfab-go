@@ -214,6 +214,38 @@ func TestReplayRegistryCLIExperimentGroupNameFlag(t *testing.T) {
 	}
 }
 
+func TestReplayRegistryCLIBaselineExperimentIDFlag(t *testing.T) {
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, replayItems()))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	registry := NewReplayRegistry()
+	if err := registry.Register("pipeline", ReplayRegistration{
+		Client:   client,
+		Function: BindReplayFunction("registry", func(string, int) {}),
+		Options:  ReplayOptions{TraceIDs: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"pipeline", "--code-change", "skip", "--dry-run", "--baseline-experiment-id", "experiment-0"}
+	if _, err := RunReplayCLI(context.Background(), registry, args, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	body := state.startBody
+	state.mu.Unlock()
+	if body["baselineExperimentId"] != "experiment-0" {
+		t.Fatalf("start body = %+v", body)
+	}
+	invocation, _ := body["invocation"].(map[string]any)
+	flags, _ := invocation["flags"].(map[string]any)
+	if flags["baseline-experiment-id"] != "experiment-0" {
+		t.Fatalf("invocation flags = %#v", flags)
+	}
+}
+
 func TestReplayRegistryBoundExplicitOrderingInheritedAndErrors(t *testing.T) {
 	reads := []string{}
 	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {

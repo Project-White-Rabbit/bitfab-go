@@ -67,19 +67,26 @@ type Experiment struct {
 	CodeChangeTotals      *CodeChangeTotals `json:"codeChangeTotals"`
 	ExperimentGroupID     *string           `json:"experimentGroupId"`
 	ExperimentGroupName   *string           `json:"experimentGroupName"`
-	DatasetID             *string           `json:"datasetId"`
-	DatasetName           *string           `json:"datasetName"`
-	DatasetIDs            []string          `json:"datasetIds"`
-	DatasetNames          []string          `json:"datasetNames"`
-	Attempts              int               `json:"attempts"`
-	PlannedTraceCount     *int              `json:"plannedTraceCount"`
-	RunBy                 *ExperimentRunner `json:"runBy"`
-	GitHubEmail           *string           `json:"githubEmail"`
-	GitBranch             *string           `json:"gitBranch"`
-	CommitSHA             *string           `json:"commitSha"`
-	BaseSHA               *string           `json:"baseSha"`
-	ExperimentSHA         *string           `json:"experimentSha"`
-	Metadata              map[string]string `json:"metadata"`
+	// BaselineExperimentID is the experiment chosen as this run's baseline,
+	// or nil when none was chosen and the summary falls back to the first
+	// finished experiment in the group, then to the original traces.
+	BaselineExperimentID *string `json:"baselineExperimentId"`
+	// BaselineExperimentName is the chosen baseline experiment's name, or nil
+	// when no baseline was chosen or it has no name.
+	BaselineExperimentName *string           `json:"baselineExperimentName"`
+	DatasetID              *string           `json:"datasetId"`
+	DatasetName            *string           `json:"datasetName"`
+	DatasetIDs             []string          `json:"datasetIds"`
+	DatasetNames           []string          `json:"datasetNames"`
+	Attempts               int               `json:"attempts"`
+	PlannedTraceCount      *int              `json:"plannedTraceCount"`
+	RunBy                  *ExperimentRunner `json:"runBy"`
+	GitHubEmail            *string           `json:"githubEmail"`
+	GitBranch              *string           `json:"gitBranch"`
+	CommitSHA              *string           `json:"commitSha"`
+	BaseSHA                *string           `json:"baseSha"`
+	ExperimentSHA          *string           `json:"experimentSha"`
+	Metadata               map[string]string `json:"metadata"`
 }
 
 // ExperimentPage is one page of a listing. Pass NextCursor back as Cursor to

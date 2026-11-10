@@ -259,9 +259,14 @@ type ReplayOptions struct {
 	// has a name keeps it. Requires ExperimentGroupID; setting it without one
 	// is refused before any request is sent.
 	ExperimentGroupName string
-	DatasetID           string
-	DatasetIDs          []string
-	GraderIDs           []string
+	// BaselineExperimentID is the earlier experiment this run is compared
+	// against. When unset, the first finished experiment in the run's group
+	// is the baseline, and without a group the original traces are. The
+	// server refuses an experiment outside the caller's organization.
+	BaselineExperimentID string
+	DatasetID            string
+	DatasetIDs           []string
+	GraderIDs            []string
 	// CategoryIDs replays only the selected traces that carry an approved
 	// assertion in one of these categories. It narrows a TraceIDs, DatasetID
 	// or DatasetIDs selection the way OnlyWithAssertions does, but counts only
@@ -905,6 +910,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.ExperimentGroupName != "" {
 		payload["experimentGroupName"] = options.ExperimentGroupName
+	}
+	if options.BaselineExperimentID != "" {
+		payload["baselineExperimentId"] = options.BaselineExperimentID
 	}
 	if len(options.DatasetIDs) == 1 {
 		payload["datasetId"] = options.DatasetIDs[0]

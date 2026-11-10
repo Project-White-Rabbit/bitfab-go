@@ -149,17 +149,18 @@ func TestInvocationFlagNames(t *testing.T) {
 		}
 	}
 	for field, want := range map[string]string{
-		"MaxConcurrency":    "concurrency",
-		"DatasetID":         "dataset-ids",
-		"DatasetIDs":        "dataset-ids",
-		"TraceIDs":          "trace-ids",
-		"CategoryIDs":       "category-ids",
-		"DBBranch":          "db-branch",
-		"ExperimentGroupID": "experiment-group-id",
-		"DryRun":            "dry-run",
-		"OnItemStart":       "on-item-start",
-		"CodeChange":        "code-change",
-		"MockOverrides":     "mock-override",
+		"MaxConcurrency":       "concurrency",
+		"DatasetID":            "dataset-ids",
+		"DatasetIDs":           "dataset-ids",
+		"TraceIDs":             "trace-ids",
+		"CategoryIDs":          "category-ids",
+		"DBBranch":             "db-branch",
+		"ExperimentGroupID":    "experiment-group-id",
+		"BaselineExperimentID": "baseline-experiment-id",
+		"DryRun":               "dry-run",
+		"OnItemStart":          "on-item-start",
+		"CodeChange":           "code-change",
+		"MockOverrides":        "mock-override",
 	} {
 		if got := optionFlagName(field); got != want {
 			t.Fatalf("optionFlagName(%q) = %q, want %q", field, got, want)
