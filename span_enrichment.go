@@ -11,6 +11,7 @@ type spanEnrichment struct {
 	id       string
 	prompt   string
 	contexts []ContextEntry
+	metadata map[string]any
 }
 
 func withSpanEnrichment(ctx context.Context, spanID string) (context.Context, *spanEnrichment) {
@@ -30,6 +31,13 @@ func (s *spanEnrichment) apply(data map[string]any, contentOff bool) {
 	if len(s.contexts) > 0 {
 		existing, _ := data["contexts"].([]ContextEntry)
 		data["contexts"] = append(append([]ContextEntry{}, existing...), s.contexts...)
+	}
+	if len(s.metadata) > 0 {
+		merged := make(map[string]any, len(s.metadata))
+		for k, v := range s.metadata {
+			merged[k] = v
+		}
+		data["metadata"] = merged
 	}
 }
 
@@ -55,4 +63,20 @@ func (cs *CurrentSpan) AddContext(value map[string]any) {
 	cs.enrichment.mu.Lock()
 	defer cs.enrichment.mu.Unlock()
 	cs.enrichment.contexts = append(cs.enrichment.contexts, copied)
+}
+
+// SetMetadata merges metadata into the active span, with later values for a key winning. Use it to label what the span did, for example {"delivery": "blocked"} on a message that was drafted but never sent. Values should be strings, numbers, or booleans; keys are 1 to 40 of A-Z a-z 0-9 _ . : -. Bitfab stores keys and values lowercased, returns them on Spans.List, and narrows that list with its Metadata filter. Sent even when content capture is off, like trace metadata. Safe to call outside a span or on a nil receiver (no-op).
+func (cs *CurrentSpan) SetMetadata(metadata map[string]any) {
+	defer func() { recover() }()
+	if cs == nil || cs.enrichment == nil || len(metadata) == 0 {
+		return
+	}
+	cs.enrichment.mu.Lock()
+	defer cs.enrichment.mu.Unlock()
+	if cs.enrichment.metadata == nil {
+		cs.enrichment.metadata = make(map[string]any, len(metadata))
+	}
+	for k, v := range metadata {
+		cs.enrichment.metadata[k] = v
+	}
 }

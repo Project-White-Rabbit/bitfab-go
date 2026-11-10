@@ -6,12 +6,26 @@ import (
 	"fmt"
 )
 
-type SpanListParams struct {
+const (
+	spanListMaxPageSize           = 200
+	spanListMaxPageSizeWithFields = 50
+)
+
+// SpanListFilters narrows the spans returned by SpansClient.List and SpansClient.ListAll.
+type SpanListFilters struct {
 	SpanType string
 	SpanName string
 	Fields   []string
-	Cursor   string
-	Limit    int
+	// Metadata keeps only spans whose metadata holds every one of these keys with these values, matched exactly and case-insensitively. Up to 10 keys. Span metadata is set with GetCurrentSpan(ctx).SetMetadata.
+	Metadata map[string]string
+}
+
+// SpanListParams selects one page of SpansClient.List.
+type SpanListParams struct {
+	SpanListFilters
+	Cursor string
+	// Limit is spans per page, 1 to 200, or at most 50 when Fields is set, since each span's content is fetched. A larger value is refused with an error naming the cap. The server defaults to 50. Use ListAll to read every span without choosing a page size.
+	Limit int
 }
 
 type ListedSpan struct {
@@ -28,6 +42,8 @@ type ListedSpan struct {
 	Content      any     `json:"content,omitempty"`
 	Errors       any     `json:"errors,omitempty"`
 	Contexts     any     `json:"contexts,omitempty"`
+	// Metadata is the span's metadata, keys and values lowercased. Empty when none was set.
+	Metadata map[string]string `json:"metadata"`
 }
 
 type SpanListResult struct {
@@ -54,6 +70,9 @@ func (s *SpansClient) List(ctx context.Context, traceID string, params SpanListP
 	if len(params.Fields) > 0 {
 		payload["fields"] = params.Fields
 	}
+	if len(params.Metadata) > 0 {
+		payload["metadata"] = params.Metadata
+	}
 	if params.Cursor != "" {
 		payload["cursor"] = params.Cursor
 	}
@@ -73,4 +92,25 @@ func (s *SpansClient) List(ctx context.Context, traceID string, params SpanListP
 		return nil, fmt.Errorf("bitfab: decode span list response: %w", err)
 	}
 	return &result, nil
+}
+
+// ListAll returns every span of one trace in the order they ran, fetched page by page until none are left, so no span is missed by forgetting to follow NextCursor. Pages hold 200 spans, or 50 when Fields is set. Returns an HTTP 404 error when the trace is not in your organization.
+func (s *SpansClient) ListAll(ctx context.Context, traceID string, filters SpanListFilters) ([]ListedSpan, error) {
+	limit := spanListMaxPageSize
+	if len(filters.Fields) > 0 {
+		limit = spanListMaxPageSizeWithFields
+	}
+	spans := []ListedSpan{}
+	cursor := ""
+	for {
+		page, err := s.List(ctx, traceID, SpanListParams{SpanListFilters: filters, Cursor: cursor, Limit: limit})
+		if err != nil {
+			return nil, err
+		}
+		spans = append(spans, page.Spans...)
+		if !page.HasMore || page.NextCursor == nil || *page.NextCursor == "" {
+			return spans, nil
+		}
+		cursor = *page.NextCursor
+	}
 }

@@ -2432,3 +2432,65 @@ func TestSpan_MarksNonReplayableOnOversizeInput(t *testing.T) {
 		t.Fatalf("step = %v, want %s", first["step"], serializationDegradedStep)
 	}
 }
+
+func captureSpanDataFromClosureSpan(t *testing.T, fn SpanFunc) map[string]any {
+	t.Helper()
+	var mu sync.Mutex
+	var captured map[string]any
+	server := newLegacyCarrierServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if r.URL.Path == legacySpanPath {
+			mu.Lock()
+			captured = payload
+			mu.Unlock()
+		}
+		w.WriteHeader(200)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	defer server.Close()
+	client := newTestClient(server.URL)
+	client.Span(context.Background(), "messages", fn)
+	client.FlushTraces(5 * time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	rawSpan := captured["rawSpan"].(map[string]any)
+	return rawSpan["span_data"].(map[string]any)
+}
+
+func TestCurrentSpan_SetMetadataMergesWithLaterKeysWinning(t *testing.T) {
+	spanData := captureSpanDataFromClosureSpan(t, func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).SetMetadata(map[string]any{"delivery": "pending", "channel": "sms"})
+		GetCurrentSpan(ctx).SetMetadata(map[string]any{"delivery": "blocked", "attempt": 2})
+		return "drafted", nil
+	})
+	metadata, _ := spanData["metadata"].(map[string]any)
+	if len(metadata) != 3 || metadata["delivery"] != "blocked" || metadata["channel"] != "sms" || metadata["attempt"] != float64(2) {
+		t.Fatalf("metadata = %#v", spanData["metadata"])
+	}
+}
+
+func TestCurrentSpan_MetadataAbsentWhenUnsetAndNoOpOutsideASpan(t *testing.T) {
+	GetCurrentSpan(context.Background()).SetMetadata(map[string]any{"a": "b"})
+	var nilSpan *CurrentSpan
+	nilSpan.SetMetadata(map[string]any{"a": "b"})
+	spanData := captureSpanDataFromClosureSpan(t, func(ctx context.Context) (any, error) {
+		GetCurrentSpan(ctx).SetMetadata(nil)
+		return 1, nil
+	})
+	if _, ok := spanData["metadata"]; ok {
+		t.Fatalf("metadata should be absent: %#v", spanData["metadata"])
+	}
+}
+
+func TestCurrentSpan_MetadataSentWhenContentIsOff(t *testing.T) {
+	ctx, state := withSpanEnrichment(withSpanContext(context.Background(), "trace", "span", ""), "span")
+	GetCurrentSpan(ctx).SetMetadata(map[string]any{"delivery": "blocked"})
+	GetCurrentSpan(withSpanContext(ctx, "trace", "nested", "")).SetMetadata(map[string]any{"delivery": "wrong"})
+	withheld := map[string]any{}
+	state.apply(withheld, true)
+	metadata, _ := withheld["metadata"].(map[string]any)
+	if metadata["delivery"] != "blocked" {
+		t.Fatalf("metadata = %#v", withheld)
+	}
+}
