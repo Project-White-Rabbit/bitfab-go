@@ -96,6 +96,19 @@ const (
 	TraceAssertionHuman TraceAssertionSource = "human"
 )
 
+// AssertionKind says who decides an assertion.
+type AssertionKind string
+
+const (
+	// AssertionKindBitfab, the default, means Bitfab decides the assertion on
+	// every replay, with its code where it has some and the LLM judge otherwise.
+	AssertionKindBitfab AssertionKind = "bitfab"
+	// AssertionKindExternal means Bitfab never judges it: your own system
+	// posts each verdict with VerdictsClient.SaveExternal. It takes no code,
+	// and an assertion's kind is set when it is created and never changes.
+	AssertionKindExternal AssertionKind = "external"
+)
+
 // AssertionCode is code that decides an assertion's verdict from a run's
 // spans before the LLM judge is asked. Source is the body of an async
 // TypeScript function (plain JavaScript also works) called with spans (each
@@ -126,6 +139,9 @@ type TraceAssertion struct {
 	PassCriteria           *string      `json:"passCriteria"`
 	FailCriteria           *string      `json:"failCriteria"`
 	TargetOnEvaluatedTrace *TraceTarget `json:"targetOnEvaluatedTrace"`
+	// Kind says who decides the assertion: Bitfab, or your own system for an
+	// external assertion.
+	Kind AssertionKind `json:"kind"`
 	// Code decides the verdict before the LLM judge is asked, or is nil when
 	// the judge decides every replay. Bitfab may write code for an assertion in
 	// the background after it is saved, so a later GetAssertions read can carry
@@ -245,6 +261,9 @@ type AssertionVerdictEvidence struct {
 // again. Bitfab writes no code for an assertion whose code is off, and new
 // code leaves the setting as it is. Removing the code turns it back on.
 // Leave it nil to keep the current setting.
+// Set Kind to AssertionKindExternal only on the save that creates the
+// assertion, for one Bitfab never judges; a different kind on an edit is
+// refused, so leave it empty there.
 type SaveAssertion struct {
 	ID                          string
 	Assertion                   string
@@ -252,6 +271,7 @@ type SaveAssertion struct {
 	PassCriteria                *string
 	FailCriteria                *string
 	TargetOnEvaluatedTrace      *TraceTarget
+	Kind                        AssertionKind
 	Code                        *AssertionCode
 	CodeOff                     *bool
 	CategoryID                  *string
@@ -318,6 +338,9 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 			return nil, err
 		}
 		payload["targetOnEvaluatedTrace"] = target
+	}
+	if assertion.Kind != "" {
+		payload["kind"] = assertion.Kind
 	}
 	if assertion.ClearCode {
 		if assertion.Code != nil {

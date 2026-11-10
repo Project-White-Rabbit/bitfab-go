@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	traceVerdictsPath      = "/api/sdk/traces/verdicts"
-	humanTraceVerdictsPath = "/api/sdk/traces/verdicts/human"
+	traceVerdictsPath         = "/api/sdk/traces/verdicts"
+	humanTraceVerdictsPath    = "/api/sdk/traces/verdicts/human"
+	externalTraceVerdictsPath = "/api/sdk/traces/verdicts/external"
 )
 
 // VerdictConfidence expresses the author's certainty in a verdict.
@@ -409,6 +410,53 @@ type HumanVerdictOutcome struct {
 // Deprecated: Use HumanVerdictOutcome instead.
 type HumanLabelOutcome = HumanVerdictOutcome
 
+// ExternalVerdictUpdate is your own system's pass or fail verdict on an
+// external assertion, one created with AssertionKindExternal, which Bitfab
+// never judges. It names only the assertion: Bitfab finds the trace the
+// assertion is on. Attempt picks the replay attempt when the write passes
+// WithVerdictExperimentID.
+type ExternalVerdictUpdate struct {
+	AssertionID string
+	Verdict     Verdict
+	Attempt     int
+	Annotation  string
+	Confidence  VerdictConfidence
+	Evidence    *Justification
+}
+
+func (update ExternalVerdictUpdate) payload() (map[string]any, error) {
+	if update.AssertionID == "" {
+		return nil, fmt.Errorf("bitfab: an external assertion verdict must name its AssertionID")
+	}
+	if update.Verdict != VerdictPass && update.Verdict != VerdictFail {
+		return nil, fmt.Errorf("bitfab: an external assertion verdict must be pass or fail, got %q", update.Verdict)
+	}
+	payload := map[string]any{"assertionId": update.AssertionID, "verdict": update.Verdict}
+	if update.Attempt != 0 {
+		payload["attempt"] = update.Attempt
+	}
+	if update.Annotation != "" {
+		payload["annotation"] = update.Annotation
+	}
+	if update.Confidence != "" {
+		payload["confidence"] = update.Confidence
+	}
+	if update.Evidence != nil {
+		payload["evidence"] = *update.Evidence
+	}
+	return payload, nil
+}
+
+// ExternalVerdictOutcome reports an external assertion verdict saved by the
+// server and the trace it was saved on.
+type ExternalVerdictOutcome struct {
+	AssertionID string        `json:"assertionId"`
+	TraceID     string        `json:"traceId"`
+	Attempt     int           `json:"attempt"`
+	Verdict     Verdict       `json:"verdict"`
+	Action      VerdictAction `json:"action"`
+}
+
 // VerdictEvidenceItem is one span a saved verdict cites. SpanID and Text are
 // always set. Evidence written by Bitfab's assertion judge also carries Field,
 // Ranges, and SpanChanged, which point at the exact passages the judge read.
@@ -450,6 +498,10 @@ type AssertionVerdict struct {
 	Evidence      *VerdictEvidence   `json:"evidence"`
 	Confidence    *VerdictConfidence `json:"confidence"`
 	Approved      bool               `json:"approved"`
+	// Counted is true on the one verdict per assertion that counts toward the
+	// trace's verdict and pass counts. A person's counts over a coding agent's,
+	// and a coding agent's over Bitfab's judge's, which then reads false.
+	Counted bool `json:"counted"`
 	// Deprecated: Use VerdictStatus instead.
 	LabelStatus LabelStatus `json:"labelStatus"`
 	// Deprecated: Use Verdict instead. It carries the verdict as a bool, false
@@ -647,6 +699,48 @@ func (v *VerdictsClient) SaveHumanAll(ctx context.Context, updates []HumanVerdic
 	}
 	for index := range response.Verdicts {
 		response.Verdicts[index].Label = response.Verdicts[index].Verdict == VerdictPass
+	}
+	return response.Verdicts, nil
+}
+
+// SaveExternal writes one verdict on an external assertion. It counts in
+// every pass rate as soon as it is saved, and a person's or an agent's verdict
+// on the same assertion still counts over it. Pass WithVerdictExperimentID to
+// save it on that experiment's replay of the assertion's trace instead.
+func (v *VerdictsClient) SaveExternal(ctx context.Context, update ExternalVerdictUpdate, options ...VerdictWriteOption) (*ExternalVerdictOutcome, error) {
+	outcomes, err := v.SaveExternalAll(ctx, []ExternalVerdictUpdate{update}, options...)
+	if err != nil {
+		return nil, err
+	}
+	if len(outcomes) != 1 {
+		return nil, fmt.Errorf("bitfab: saving one external assertion verdict returned %d outcomes", len(outcomes))
+	}
+	return &outcomes[0], nil
+}
+
+// SaveExternalAll sends up to 200 external assertion verdicts in one atomic request.
+func (v *VerdictsClient) SaveExternalAll(ctx context.Context, updates []ExternalVerdictUpdate, options ...VerdictWriteOption) ([]ExternalVerdictOutcome, error) {
+	config := verdictWriteConfig{}
+	for _, option := range options {
+		option(&config)
+	}
+	verdicts := make([]map[string]any, 0, len(updates))
+	for _, update := range updates {
+		payload, err := update.payload()
+		if err != nil {
+			return nil, err
+		}
+		verdicts = append(verdicts, payload)
+	}
+	payload := map[string]any{"verdicts": verdicts}
+	if config.experimentID != "" {
+		payload["experimentId"] = config.experimentID
+	}
+	var response struct {
+		Verdicts []ExternalVerdictOutcome `json:"verdicts"`
+	}
+	if err := v.httpClient.requestInto(ctx, externalTraceVerdictsPath, payload, &response); err != nil {
+		return nil, err
 	}
 	return response.Verdicts, nil
 }

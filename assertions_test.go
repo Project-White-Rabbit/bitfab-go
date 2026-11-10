@@ -670,3 +670,14 @@ func TestAssertions_SaveSendsEmptySpanNamesWhenUnset(t *testing.T) {
 		t.Fatalf("spanNames = %#v, want an empty list", names)
 	}
 }
+
+func TestAssertions_KindIsSentOnlyWhenSet(t *testing.T) {
+	external, err := SaveAssertion{Assertion: "a", Kind: AssertionKindExternal}.payload()
+	if err != nil || external["kind"] != AssertionKindExternal {
+		t.Fatalf("payload = %#v, %v, want kind external", external, err)
+	}
+	unset, err := SaveAssertion{Assertion: "a"}.payload()
+	if _, sent := unset["kind"]; err != nil || sent {
+		t.Fatalf("payload = %#v, %v, want no kind", unset, err)
+	}
+}

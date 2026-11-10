@@ -302,6 +302,39 @@ func TestVerdicts_HumanWritesUseDedicatedEndpoint(t *testing.T) {
 	}
 }
 
+func TestVerdicts_ExternalWritesKeyByAssertionAlone(t *testing.T) {
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"verdicts": []any{map[string]any{
+			"assertionId": "assertion", "traceId": "trace", "attempt": 1, "verdict": "fail", "action": "set",
+		}}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	result, err := client.Verdicts.SaveExternal(context.Background(), ExternalVerdictUpdate{
+		AssertionID: "assertion", Verdict: VerdictFail, Attempt: 1, Annotation: "CI failed",
+	}, WithVerdictExperimentID("experiment"))
+	if err != nil || result.TraceID != "trace" || result.Attempt != 1 || result.Verdict != VerdictFail {
+		t.Fatalf("SaveExternal = %+v, %v", result, err)
+	}
+	request := server.recorded()[0]
+	if request.method != http.MethodPost || request.path != "/api/sdk/traces/verdicts/external" {
+		t.Fatalf("request = %+v", request)
+	}
+	want := map[string]any{
+		"verdicts": []any{map[string]any{
+			"assertionId": "assertion", "verdict": "fail", "attempt": float64(1), "annotation": "CI failed",
+		}},
+		"experimentId": "experiment",
+	}
+	if !reflect.DeepEqual(request.body, want) {
+		t.Fatalf("external body = %#v", request.body)
+	}
+	if _, err := client.Verdicts.SaveExternal(context.Background(), ExternalVerdictUpdate{
+		AssertionID: "assertion", Verdict: VerdictAbstained,
+	}); err == nil || !strings.Contains(err.Error(), "must be pass or fail") {
+		t.Fatalf("SaveExternal abstained = %v", err)
+	}
+}
+
 func TestVerdicts_HumanWritesRefuseAbstainAndMissingAssertion(t *testing.T) {
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		return map[string]any{"verdicts": []any{}}
