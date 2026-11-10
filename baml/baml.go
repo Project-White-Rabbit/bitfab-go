@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	neturl "net/url"
 	"reflect"
 	"regexp"
 	"sync"
@@ -166,7 +167,28 @@ func serialize(value reflect.Value, depth int) (result any) {
 	return nil
 }
 
-var modelURL = regexp.MustCompile(`/models/([^/:]+)`)
+var modelURL = regexp.MustCompile(`/models?/([^/:?]+)`)
+
+func modelFromURL(request map[string]any) string {
+	url, _ := request["url"].(string)
+	match := modelURL.FindStringSubmatch(url)
+	if match == nil {
+		return ""
+	}
+	if decoded, err := neturl.PathUnescape(match[1]); err == nil {
+		return decoded
+	}
+	return match[1]
+}
+
+func modelOf(request, body, responseBody map[string]any) string {
+	for _, candidate := range []any{body["model"], responseBody["model"], responseBody["modelVersion"]} {
+		if model, ok := candidate.(string); ok && model != "" {
+			return model
+		}
+	}
+	return modelFromURL(request)
+}
 
 func enrich(ctx context.Context, collector map[string]any) {
 	defer func() { recover() }()
@@ -218,13 +240,6 @@ func contextEntry(log, selected, request, body, collector map[string]any) map[st
 	if provider, ok := selected["provider"].(string); ok {
 		metadata["provider"] = provider
 	}
-	if model, ok := body["model"].(string); ok {
-		metadata["model"] = model
-	} else if url, ok := request["url"].(string); ok {
-		if match := modelURL.FindStringSubmatch(url); match != nil {
-			metadata["model"] = match[1]
-		}
-	}
 	usage, _ := collector["usage"].(map[string]any)
 	fallback, _ := selected["usage"].(map[string]any)
 	for key, target := range map[string]string{"input_tokens": "inputTokens", "output_tokens": "outputTokens", "cached_input_tokens": "cachedInputTokens"} {
@@ -238,6 +253,9 @@ func contextEntry(log, selected, request, body, collector map[string]any) map[st
 	}
 	response, _ := selected["http_response"].(map[string]any)
 	responseBody, _ := response["body"].(map[string]any)
+	if model := modelOf(request, body, responseBody); model != "" {
+		metadata["model"] = model
+	}
 	responseUsage, _ := responseBody["usage"].(map[string]any)
 	if cost, ok := responseUsage["cost"].(float64); ok && !math.IsInf(cost, 0) && !math.IsNaN(cost) {
 		metadata["costUsd"] = cost

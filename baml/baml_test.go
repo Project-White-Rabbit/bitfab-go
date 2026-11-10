@@ -117,6 +117,32 @@ func TestContextEntryRecordsCachedTokensAndLeavesOutAMissingCost(t *testing.T) {
 	}
 }
 
+func TestContextEntryModelFallbacks(t *testing.T) {
+	cases := []struct {
+		name     string
+		url      string
+		body     map[string]any
+		response map[string]any
+		want     string
+	}{
+		{"gemini url", "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", map[string]any{}, nil, "gemini-2.5-flash"},
+		{"bedrock url", "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-sonnet-4-5-20250929-v1%3A0/converse", map[string]any{}, nil, "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+		{"response model over azure deployment url", "https://acme.openai.azure.com/openai/deployments/prod-chat/chat/completions", map[string]any{}, map[string]any{"model": "gpt-4o-2024-11-20"}, "gpt-4o-2024-11-20"},
+		{"gemini response modelVersion over url", "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent", map[string]any{}, map[string]any{"modelVersion": "gemini-2.5-flash"}, "gemini-2.5-flash"},
+		{"request body wins", "https://proxy.example.com/models/other:generateContent", map[string]any{"model": "gpt-4o"}, map[string]any{"model": "gpt-4o-2024-11-20"}, "gpt-4o"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := map[string]any{"url": tc.url, "body": tc.body}
+			selected := map[string]any{"http_request": request, "http_response": map[string]any{"body": tc.response}}
+			entry := contextEntry(map[string]any{}, selected, request, tc.body, map[string]any{})
+			if entry["model"] != tc.want {
+				t.Fatalf("model = %#v, want %q", entry["model"], tc.want)
+			}
+		})
+	}
+}
+
 func TestNativeStructuredOutput(t *testing.T) {
 	source, server := localBAML(t)
 	defer server.Close()
