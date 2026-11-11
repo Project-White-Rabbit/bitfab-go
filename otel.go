@@ -24,6 +24,7 @@ const (
 	otelOperationAttribute = "bitfab.operation"
 	otelPayloadAttribute   = "bitfab.payload"
 	otelTracesEndpoint     = "/api/sdk/otel/v1/traces"
+	asyncOkHeader          = "X-Bitfab-Async-Ok"
 
 	otelMaxRequestBytesEnv   = "BITFAB_OTEL_MAX_REQUEST_BYTES"
 	otelExportConcurrencyEnv = "BITFAB_OTEL_EXPORT_CONCURRENCY"
@@ -620,10 +621,12 @@ func (e *bitfabSpanExporter) send(
 		if requestRawBytes <= otelMaxDecompressedBytes {
 			prepared := prepareRequestBody(encodeRequest(envelope, requestSpans))
 			if prepared.wireBytes <= e.maxRequestBytes {
-				if err := e.sendWithRetries(ctx, prepared, len(batch.spans)); err != nil {
+				prepared.headers = map[string]string{asyncOkHeader: "1"}
+				queued, err := e.sendWithRetries(ctx, prepared, len(batch.spans))
+				if err != nil {
 					return err
 				}
-				e.reportDelivered(batch.spans)
+				e.reportDelivered(batch.spans, queued)
 				return nil
 			}
 		}
@@ -644,7 +647,7 @@ func (e *bitfabSpanExporter) send(
 	}
 }
 
-func (e *bitfabSpanExporter) reportDelivered(spans []encodedSpan) {
+func (e *bitfabSpanExporter) reportDelivered(spans []encodedSpan, queued bool) {
 	if e.onDelivered == nil {
 		return
 	}
@@ -662,21 +665,21 @@ func (e *bitfabSpanExporter) reportDelivered(spans []encodedSpan) {
 			warnOnce("otel-delivery-listener-panic", fmt.Sprintf("a delivery listener panicked and was recovered: %v", recovered))
 		}
 	}()
-	e.onDelivered(refs)
+	e.onDelivered(refs, queued)
 }
 
 func (e *bitfabSpanExporter) sendWithRetries(
 	ctx context.Context,
 	request preparedRequest,
 	spanCount int,
-) error {
+) (bool, error) {
 	// One budget for the whole exchange, waits included: the processor kills the
 	// export at this deadline, so a wait past it cannot be served.
 	deadline := time.Now().Add(otelExportTimeout)
 	var lastErr error
 	for attempt := range otelMaxAttempts {
 		if err := e.awaitThrottle(ctx, deadline); err != nil {
-			return err
+			return false, err
 		}
 
 		response, err := e.directSender(otelTracesEndpoint, request, max(0, time.Until(deadline)))
@@ -686,9 +689,9 @@ func (e *bitfabSpanExporter) sendWithRetries(
 					"otel-partial-success",
 					fmt.Sprintf("OTLP ingestion rejected %d span(s): %s", rejected, message),
 				)
-				return fmt.Errorf("bitfab: OTLP ingestion rejected %d span(s)", rejected)
+				return false, fmt.Errorf("bitfab: OTLP ingestion rejected %d span(s)", rejected)
 			}
-			return nil
+			return response["accepted"] == true, nil
 		}
 
 		lastErr = err
@@ -705,25 +708,25 @@ func (e *bitfabSpanExporter) sendWithRetries(
 					"a span batch exceeded the ingestion request limit and could not be exported",
 				)
 			}
-			return err
+			return false, err
 		}
 		if !isRetryableStatus(err) {
-			return err
+			return false, err
 		}
 		if attempt == otelMaxAttempts-1 {
 			break
 		}
 		wait, keepTrying := retryWait(err, attempt, time.Until(deadline))
 		if !keepTrying {
-			return err
+			return false, err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(wait):
 		}
 	}
-	return lastErr
+	return false, lastErr
 }
 
 func otlpPartialSuccess(response map[string]any) (rejected int64, message string, ok bool) {

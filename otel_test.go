@@ -753,11 +753,15 @@ func TestOtel_DoesNotRetryPayloadTooLarge(t *testing.T) {
 
 func TestOtel_DeliveryListenerReceivesOnlySuccessfulCarrierRefs(t *testing.T) {
 	sender := &fakeSender{}
+	var mu sync.Mutex
 	var delivered []carrierRef
+	record := func(refs []carrierRef, _ bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered = append(delivered, refs...)
+	}
 	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
-		config.onDelivered = func(refs []carrierRef) {
-			delivered = append(delivered, refs...)
-		}
+		config.onDelivered = record
 	})
 	spanRef := carrierRef{traceID: "trace-1", spanID: "span-1"}
 	closingRef := carrierRef{traceID: "trace-1"}
@@ -766,25 +770,84 @@ func TestOtel_DeliveryListenerReceivesOnlySuccessfulCarrierRefs(t *testing.T) {
 	if !transport.flush(10 * time.Second) {
 		t.Fatal("flush reported failure")
 	}
-	if !reflect.DeepEqual(delivered, []carrierRef{spanRef, closingRef}) {
+	want := []carrierRef{spanRef, closingRef}
+	mu.Lock()
+	if !reflect.DeepEqual(delivered, want) {
 		t.Fatalf("delivered refs = %#v", delivered)
 	}
+	mu.Unlock()
 
 	failing := &fakeSender{respond: func(int, map[string]any) (map[string]any, error) {
 		return nil, &httpStatusError{StatusCode: http.StatusBadRequest}
 	}}
 	transport = newTestTransport(t, failing, func(config *otelTransportConfig) {
-		config.onDelivered = func(refs []carrierRef) {
-			delivered = append(delivered, refs...)
-		}
+		config.onDelivered = record
 	})
 	failedRef := carrierRef{traceID: "trace-2", spanID: "span-2"}
 	transport.submit(operationSpan, map[string]any{"index": 3}, nil, carrierMeta{ref: &failedRef})
 	if transport.flush(10 * time.Second) {
 		t.Fatal("failed request should fail the flush")
 	}
-	if !reflect.DeepEqual(delivered, []carrierRef{spanRef, closingRef}) {
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(delivered, want) {
 		t.Fatalf("failed carrier was acknowledged: %#v", delivered)
+	}
+}
+
+func TestOtel_EveryRequestIsMarkedSafeToQueueWhateverItHolds(t *testing.T) {
+	sender := &fakeSender{}
+	transport := newTestTransport(t, sender, nil)
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil)
+	transport.submit(operationTrace, map[string]any{"index": 2}, nil)
+	transport.submit(operationInternalTrace, map[string]any{"index": 3}, nil)
+	transport.submit(operationSpan, map[string]any{"index": 4}, nil)
+	if !transport.flush(10 * time.Second) {
+		t.Fatal("flush reported failure")
+	}
+
+	type sentRequest struct {
+		operations []string
+		headers    map[string]string
+	}
+	var sent []sentRequest
+	for _, request := range sender.recorded() {
+		var operations []string
+		for _, carrier := range carriersIn(t, []recordedRequest{request}) {
+			operations = append(operations, carrier.operation)
+		}
+		sent = append(sent, sentRequest{operations: operations, headers: request.prepared.headers})
+	}
+	want := []sentRequest{{
+		operations: []string{"external_span", "external_trace", "internal_trace", "external_span"},
+		headers:    map[string]string{"X-Bitfab-Async-Ok": "1"},
+	}}
+	if !reflect.DeepEqual(sent, want) {
+		t.Fatalf("requests = %#v, want %#v", sent, want)
+	}
+}
+
+func TestOtel_DeliveryListenerLearnsWhenTheServerQueuedARequest(t *testing.T) {
+	sender := &fakeSender{respond: func(int, map[string]any) (map[string]any, error) {
+		return map[string]any{"accepted": true}, nil
+	}}
+	type delivery struct {
+		refs   []carrierRef
+		queued bool
+	}
+	var delivered []delivery
+	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
+		config.onDelivered = func(refs []carrierRef, queued bool) {
+			delivered = append(delivered, delivery{refs: refs, queued: queued})
+		}
+	})
+	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
+	transport.submit(operationSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
+	if !transport.flush(10 * time.Second) {
+		t.Fatal("a queued answer must still count as delivered")
+	}
+	if want := []delivery{{refs: []carrierRef{ref}, queued: true}}; !reflect.DeepEqual(delivered, want) {
+		t.Fatalf("delivered = %#v, want %#v", delivered, want)
 	}
 }
 
@@ -792,7 +855,7 @@ func TestOtel_DeliveryListenerPanicDoesNotFailExport(t *testing.T) {
 	resetWarnOnce()
 	sender := &fakeSender{}
 	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
-		config.onDelivered = func([]carrierRef) { panic("listener crashed") }
+		config.onDelivered = func([]carrierRef, bool) { panic("listener crashed") }
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 	transport.submit(operationSpan, map[string]any{"index": 1}, nil, carrierMeta{ref: &ref})
@@ -815,7 +878,7 @@ func TestOtel_PartialSuccessFailsTheExport(t *testing.T) {
 	}
 	var delivered []carrierRef
 	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
-		config.onDelivered = func(refs []carrierRef) { delivered = append(delivered, refs...) }
+		config.onDelivered = func(refs []carrierRef, _ bool) { delivered = append(delivered, refs...) }
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 
@@ -1085,7 +1148,7 @@ func TestOtel_TrimsOversizedSpanWhenCompressionIsDisabled(t *testing.T) {
 	sender := &fakeSender{}
 	var delivered []carrierRef
 	transport := newTestTransport(t, sender, func(config *otelTransportConfig) {
-		config.onDelivered = func(refs []carrierRef) { delivered = append(delivered, refs...) }
+		config.onDelivered = func(refs []carrierRef, _ bool) { delivered = append(delivered, refs...) }
 	})
 	ref := carrierRef{traceID: "trace-1", spanID: "span-1"}
 	transport.submit(operationSpan, map[string]any{

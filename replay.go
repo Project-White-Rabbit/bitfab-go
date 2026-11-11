@@ -21,6 +21,7 @@ const (
 	defaultReplayLimit       = 5
 	defaultReplayConcurrency = 10
 	replayPersistenceTimeout = 30 * time.Second
+	queuedReplayPollTimeout  = 120 * time.Second
 	maxReplayTraceIDs        = 100
 	maxReplayLimit           = 5000
 	maxReplayAttempts        = 100
@@ -1328,6 +1329,8 @@ func unconfirmedReplayWarning(label string, timeout time.Duration, flushed bool)
 	return message
 }
 
+var replayClock = time.Now
+
 func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID string, traceIDs []string, timeout time.Duration, labels map[string]string) (map[string]string, error) {
 	if len(traceIDs) == 0 {
 		return map[string]string{}, nil
@@ -1341,7 +1344,9 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 	expected := make(map[string]int, len(deliveries))
 	readBackTraceIDs := make(map[string]string, len(deliveries))
 	allDelivered := true
+	anyQueued := false
 	for traceID, delivery := range deliveries {
+		anyQueued = anyQueued || delivery.queued
 		if delivery.serverTraceID != "" {
 			readBackTraceIDs[traceID] = delivery.serverTraceID
 		}
@@ -1355,7 +1360,11 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 		return readBackTraceIDs, nil
 	}
 
-	deadline := time.Now().Add(timeout)
+	pollBudget := timeout
+	if anyQueued {
+		pollBudget = max(timeout, queuedReplayPollTimeout)
+	}
+	deadline := replayClock().Add(pollBudget)
 	for {
 		status, err := c.getReplayStatus(ctx, experimentID, expected)
 		var missing []string
@@ -1374,7 +1383,7 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 				return readBackTraceIDs, nil
 			}
 		}
-		if time.Now().After(deadline) {
+		if replayClock().After(deadline) {
 			if err != nil {
 				return nil, fmt.Errorf("bitfab: replay traces were not fully persisted before the deadline: %w", err)
 			}
@@ -1384,7 +1393,7 @@ func (c *Client) waitForReplayPersistence(ctx context.Context, experimentID stri
 				if label == "" {
 					label = traceID
 				}
-				message := unconfirmedReplayWarning(label, timeout, flushed)
+				message := unconfirmedReplayWarning(label, pollBudget, flushed)
 				log.Print(message)
 				recordReplayDeliveryProblem(message)
 			}

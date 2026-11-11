@@ -31,7 +31,7 @@ type carrierMeta struct {
 	ref *carrierRef
 }
 
-type deliveredCarrierListener func(refs []carrierRef)
+type deliveredCarrierListener func(refs []carrierRef, queued bool)
 
 // traceTransport is the boundary every instrumentation path crosses to hand a
 // Bitfab payload to the network.

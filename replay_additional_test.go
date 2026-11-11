@@ -314,7 +314,7 @@ func TestWaitForReplayPersistenceUsesCarrierAcknowledgementsWithoutPolling(t *te
 	closingRef := &carrierRef{traceID: "local-1"}
 	client.httpClient.recordSubmittedCarrier(spanRef)
 	client.httpClient.recordSubmittedCarrier(closingRef)
-	client.httpClient.recordDeliveredCarriers([]carrierRef{*spanRef, *closingRef})
+	client.httpClient.recordDeliveredCarriers([]carrierRef{*spanRef, *closingRef}, false)
 	client.httpClient.recordServerTraceIDs(map[string]any{
 		"traceIds": map[string]any{"local-1": "server-1"},
 	})
@@ -359,6 +359,58 @@ func TestWaitForReplayPersistenceUsesTheTimeoutItIsGiven(t *testing.T) {
 	want := "[bitfab] replay orig-1#0 could not confirm all spans reached Bitfab within 0.15s. The run continues; Bitfab will show this replay as capture incomplete.\n"
 	if logged.String() != want {
 		t.Fatalf("logged %q, want %q", logged.String(), want)
+	}
+}
+
+func TestWaitForReplayPersistencePollsAfterAQueuedUploadAndWaitsLonger(t *testing.T) {
+	startedAt := time.Now()
+	previousClock := replayClock
+	var clockMu sync.Mutex
+	now := startedAt
+	replayClock = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	defer func() { replayClock = previousClock }()
+
+	var statusCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		statusCalls.Add(1)
+		clockMu.Lock()
+		now = startedAt.Add(150 * time.Second)
+		clockMu.Unlock()
+		writeReplayTestJSON(t, writer, map[string]any{"traceIds": map[string]string{}})
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(time.Second)
+	client.httpClient.trackTraceDeliveries([]string{"local-1"})
+	spanRef := &carrierRef{traceID: "local-1", spanID: "span-1"}
+	closingRef := &carrierRef{traceID: "local-1"}
+	client.httpClient.recordSubmittedCarrier(spanRef)
+	client.httpClient.recordSubmittedCarrier(closingRef)
+	client.httpClient.recordDeliveredCarriers([]carrierRef{*spanRef}, true)
+	client.httpClient.recordDeliveredCarriers([]carrierRef{*closingRef}, false)
+
+	var logged strings.Builder
+	previousOutput, previousFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	}()
+
+	persisted, err := client.waitForReplayPersistence(context.Background(), "run-1", []string{"local-1"}, replayPersistenceTimeout, map[string]string{"local-1": "orig-1#0"})
+	if err != nil || len(persisted) != 0 {
+		t.Fatalf("persisted=%#v error=%v, want no error and nothing read back", persisted, err)
+	}
+	if statusCalls.Load() == 0 {
+		t.Fatal("a queued upload must be confirmed through replay status")
+	}
+	if !strings.Contains(logged.String(), "within 120s") {
+		t.Fatalf("logged %q, want the 120s budget named", logged.String())
 	}
 }
 

@@ -18,6 +18,7 @@ type preparedRequest struct {
 	contentEncoding string
 	rawBytes        int
 	wireBytes       int
+	headers         map[string]string
 }
 
 func prepareRequestBody(body []byte) preparedRequest {

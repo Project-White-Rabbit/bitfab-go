@@ -39,6 +39,7 @@ type traceDelivery struct {
 	ackedSpanIDs     map[string]struct{}
 	closed           bool
 	closingAcked     bool
+	queued           bool
 	serverTraceID    string
 }
 
@@ -46,6 +47,7 @@ type deliveryReport struct {
 	spanCount     int
 	closed        bool
 	delivered     bool
+	queued        bool
 	serverTraceID string
 }
 
@@ -264,6 +266,9 @@ func (h *httpClient) sendPreparedMethod(
 	if prepared.contentEncoding != "" {
 		req.Header.Set("Content-Encoding", prepared.contentEncoding)
 	}
+	for name, value := range prepared.headers {
+		req.Header.Set(name, value)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -446,7 +451,7 @@ func (h *httpClient) recordSubmittedCarrier(ref *carrierRef) {
 	delivery.submittedSpanIDs[ref.spanID] = struct{}{}
 }
 
-func (h *httpClient) recordDeliveredCarriers(refs []carrierRef) {
+func (h *httpClient) recordDeliveredCarriers(refs []carrierRef, queued bool) {
 	h.deliveryMu.Lock()
 	defer h.deliveryMu.Unlock()
 	for _, ref := range refs {
@@ -454,6 +459,7 @@ func (h *httpClient) recordDeliveredCarriers(refs []carrierRef) {
 		if delivery == nil {
 			continue
 		}
+		delivery.queued = delivery.queued || queued
 		if ref.spanID == "" {
 			delivery.closingAcked = true
 		} else {
@@ -539,7 +545,7 @@ func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryR
 			continue
 		}
 		delete(h.traceDeliveries, traceID)
-		delivered := delivery.closingAcked
+		delivered := delivery.closingAcked && !delivery.queued
 		if delivered {
 			for spanID := range delivery.submittedSpanIDs {
 				if _, ok := delivery.ackedSpanIDs[spanID]; !ok {
@@ -552,6 +558,7 @@ func (h *httpClient) takeTraceDeliveries(traceIDs []string) map[string]deliveryR
 			spanCount:     len(delivery.submittedSpanIDs),
 			closed:        delivery.closed,
 			delivered:     delivered,
+			queued:        delivery.queued,
 			serverTraceID: delivery.serverTraceID,
 		}
 	}

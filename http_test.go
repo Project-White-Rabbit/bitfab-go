@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -168,6 +169,43 @@ func TestHTTPClient_TracksCarrierAcknowledgementsAndServerTraceID(t *testing.T) 
 		if _, leaked := carrier.payload["carrierRef"]; leaked {
 			t.Fatalf("carrier bookkeeping leaked onto the wire: %#v", carrier.payload)
 		}
+	}
+}
+
+func TestHTTPClient_QueuedTraceIsDeliveredButNotStored(t *testing.T) {
+	var requests, markedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		if request.Header.Get("X-Bitfab-Async-Ok") == "1" {
+			markedRequests.Add(1)
+		}
+		writer.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(writer).Encode(map[string]any{"accepted": true})
+	}))
+	defer server.Close()
+
+	hc := newHTTPClient("test-key", server.URL)
+	hc.trackTraceDeliveries([]string{"local-trace"})
+	hc.sendSpanPayload(map[string]any{
+		"traceId":       "local-trace",
+		"sourceTraceId": "local-trace",
+		"rawSpan":       map[string]any{"id": "span-1"},
+	})
+	hc.sendTracePayload(map[string]any{
+		"sourceTraceId": "local-trace",
+		"rawTrace":      map[string]any{"id": "local-trace"},
+		"completed":     true,
+	})
+	if !hc.flush(5 * time.Second) {
+		t.Fatal("a queued answer must still count as delivered")
+	}
+	if requests.Load() != 1 || markedRequests.Load() != 1 {
+		t.Fatalf("requests = %d, marked = %d, want 1 and 1", requests.Load(), markedRequests.Load())
+	}
+	report := hc.takeTraceDeliveries([]string{"local-trace"})["local-trace"]
+	want := deliveryReport{spanCount: 1, closed: true, delivered: false, queued: true}
+	if report != want {
+		t.Fatalf("delivery report = %#v, want %#v", report, want)
 	}
 }
 
