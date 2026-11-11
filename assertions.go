@@ -111,9 +111,8 @@ const (
 
 // AssertionCode is code that decides an assertion's verdict from a run's
 // spans before the LLM judge is asked. Source is the body of an async
-// TypeScript function (plain JavaScript also works) called with spans (each
-// {name, index, hasData}, in start order, without its data), input, and
-// output. It reads span data with await named("span name"), which returns
+// JavaScript function called with spans (each {name, index, hasData}, in start
+// order, without its data), input, and output. It reads span data with await named("span name"), which returns
 // {name, index, input, output, metadata} for each span with that name, or
 // await span.data(). It returns "pass" or "fail" to decide the verdict with no
 // judge call, or "defer" to hand the run to the LLM judge, either bare or as
