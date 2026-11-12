@@ -25,6 +25,7 @@ type httpClient struct {
 	simulationPlan  *simulationPlan
 	serviceURL      string
 	client          *http.Client
+	replayRetry     replayRetryPolicy
 
 	transportMu sync.Mutex
 	transport   traceTransport

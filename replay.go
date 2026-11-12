@@ -963,9 +963,13 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 }
 
 func (c *Client) getReplaySpan(ctx context.Context, spanID string) (replaySpan, error) {
-	var span replaySpan
 	endpoint := "/api/sdk/spans/" + url.PathEscape(spanID) + "/raw?view=replay"
-	if err := c.httpClient.get(ctx, endpoint, &span); err != nil {
+	span, err := retryReplayRequest(ctx, c.httpClient.replayRetry, func() (replaySpan, error) {
+		var span replaySpan
+		err := c.httpClient.get(ctx, endpoint, &span)
+		return span, err
+	})
+	if err != nil {
 		return replaySpan{}, fmt.Errorf("bitfab: fetch replay span %s: %w", spanID, err)
 	}
 	return span, nil
@@ -1433,10 +1437,12 @@ func (c *Client) getReplayStatus(ctx context.Context, experimentID string, expec
 }
 
 func (c *Client) completeReplay(ctx context.Context, experimentID string) (completeReplayResponse, error) {
-	response, err := c.httpClient.request(ctx, "/api/sdk/replay/complete", map[string]any{
-		"experimentId": experimentID,
-		"testRunId":    experimentID,
-	}, 30*time.Second)
+	response, err := retryReplayRequest(ctx, c.httpClient.replayRetry, func() (map[string]any, error) {
+		return c.httpClient.request(ctx, "/api/sdk/replay/complete", map[string]any{
+			"experimentId": experimentID,
+			"testRunId":    experimentID,
+		}, 30*time.Second)
+	})
 	if err != nil {
 		return completeReplayResponse{}, fmt.Errorf("bitfab: complete replay: %w", err)
 	}

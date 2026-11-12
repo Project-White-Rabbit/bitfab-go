@@ -13,7 +13,9 @@ import (
 )
 
 func newTestClient(serverURL string) *Client {
-	return NewClient("test-key", WithServiceURL(serverURL))
+	client := NewClient("test-key", WithServiceURL(serverURL))
+	client.httpClient.replayRetry = newFakeReplayRetry().policy()
+	return client
 }
 
 func TestNewClient_Defaults(t *testing.T) {
