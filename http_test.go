@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -283,5 +284,29 @@ func TestCarrierRefForPayloadReadsRawTraceAndLegacyExternalTrace(t *testing.T) {
 		if ref == nil || ref.traceID != "trace-1" {
 			t.Errorf("%s: ref = %#v, want trace-1", field, ref)
 		}
+	}
+}
+
+func TestHTTPClient_SendPrepared_NetworkFaultNamesCause(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+
+	hc := newHTTPClient("test-key", server.URL)
+	_, err := hc.sendPrepared(context.Background(), otelTracesEndpoint, prepareRequestBody([]byte("{}")), time.Second)
+	if err == nil {
+		t.Fatal("expected a network error, got nil")
+	}
+	if statusCode(err) != 0 {
+		t.Fatalf("statusCode(%v) = %d, want 0 for a network fault", err, statusCode(err))
+	}
+	message := err.Error()
+	if !strings.Contains(message, otelTracesEndpoint) || !strings.Contains(message, "EOF") {
+		t.Errorf("error = %q, want the request URL and the underlying EOF", message)
 	}
 }
