@@ -70,22 +70,29 @@ func capValue(v any) any {
 // drops; a value that cannot be marshalled here is left for the http boundary
 // sanitizer (and finalizeSpanPayload) to stub and report.
 func capValueReport(v any) (any, []string) {
+	value, fields, _ := capValueSized(v)
+	return value, fields
+}
+
+func capValueSized(v any) (any, []string, int) {
 	if v == nil {
-		return nil, nil
+		return nil, nil, 0
 	}
 	if exceedsSerializedBudget(v, MaxSerializedValueBytes) {
 		warnValueTooLarge()
-		return fmt.Sprintf("<unserializable: too_large_over_%d_bytes>", MaxSerializedValueBytes), []string{"too_large"}
+		stub := fmt.Sprintf("<unserializable: too_large_over_%d_bytes>", MaxSerializedValueBytes)
+		return stub, []string{"too_large"}, len(stub) + 2
 	}
 	body, err := json.Marshal(v)
 	if err != nil {
-		return v, nil
+		return v, nil, 0
 	}
 	if len(body) > MaxSerializedValueBytes {
 		warnValueTooLarge()
-		return fmt.Sprintf("<unserializable: too_large_%d_bytes>", len(body)), []string{"too_large"}
+		stub := fmt.Sprintf("<unserializable: too_large_%d_bytes>", len(body))
+		return stub, []string{"too_large"}, len(stub) + 2
 	}
-	return v, nil
+	return v, nil, len(body)
 }
 
 func warnValueTooLarge() {

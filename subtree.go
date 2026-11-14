@@ -24,11 +24,18 @@ type TraceOptions struct {
 	Input                   []any
 	MaxDepth                *int
 	MaxCapturedSubtreeSpans *int
-	Exclude                 []string
-	CaptureWhen             CaptureWhen
-	MockOnReplayDefault     bool
-	IncludeWrappers         bool
-	Finalize                SpanFinalizer
+	// MaxPayloadBytesPerFunction caps the serialized bytes of inputs and outputs
+	// that one automatically discovered function may record within a single call
+	// of the root. Nil means 250,000,000; negative values are rejected. Once a
+	// function has recorded this much, its later calls beneath that root call are
+	// not recorded, so a helper called in a loop with a large argument cannot fill
+	// memory. Declared nodes, LLM calls, and nested roots do not count toward it.
+	MaxPayloadBytesPerFunction *int
+	Exclude                    []string
+	CaptureWhen                CaptureWhen
+	MockOnReplayDefault        bool
+	IncludeWrappers            bool
+	Finalize                   SpanFinalizer
 }
 
 // NodeOptions customizes an automatically discovered function. Nil booleans inherit
@@ -145,6 +152,8 @@ type autoRoot struct {
 	active, closing                   bool
 	capturedSubtreeCount              int
 	maxDepth, maxCapturedSubtreeSpans int
+	maxPayloadBytesPerFunction        int
+	payloadBytesByFunction            map[string]int
 	records                           map[*autoRecord]bool
 	rootRecord                        *autoRecord
 	managed                           *managedTraceRoot
@@ -153,11 +162,13 @@ type autoRoot struct {
 	closed                            atomic.Bool
 	truncatedBy                       atomic.Uint32
 	droppedSpans                      atomic.Int64
+	warnedTruncation                  atomic.Bool
 }
 
 const (
 	truncatedByMaxDepth uint32 = 1 << iota
 	truncatedByMaxCapturedSubtreeSpans
+	truncatedByMaxPayloadBytesPerFunction
 )
 
 var truncationLimitNames = []struct {
@@ -166,6 +177,7 @@ var truncationLimitNames = []struct {
 }{
 	{truncatedByMaxDepth, "max_depth"},
 	{truncatedByMaxCapturedSubtreeSpans, "max_captured_subtree_spans"},
+	{truncatedByMaxPayloadBytesPerFunction, "max_payload_bytes_per_function"},
 }
 
 type autoRecord struct {
@@ -184,6 +196,7 @@ type autoRecord struct {
 	experimentID                                      string
 	enrichment                                        *spanEnrichment
 	planPolicy                                        simulationPlanPolicy
+	countsPayload                                     bool
 }
 
 func (root *autoRoot) excluded(symbol, name string) bool {
@@ -201,6 +214,13 @@ func (root *autoRoot) drop(limit uint32) {
 	}
 	root.truncatedBy.Or(limit)
 	root.droppedSpans.Add(1)
+	if !root.warnedTruncation.CompareAndSwap(false, true) {
+		return
+	}
+	warnOnce("subtree-truncated:"+root.key, fmt.Sprintf(
+		"%q hit an automatic subtree capture limit (MaxDepth=%d, MaxCapturedSubtreeSpans=%d, MaxPayloadBytesPerFunction=%d); its trace is incomplete. Raise the limits, configure the calls you need with Node, or narrow the subtree with Exclude.",
+		root.key, root.maxDepth, root.maxCapturedSubtreeSpans, root.maxPayloadBytesPerFunction,
+	))
 }
 
 func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol string, input []any, planPolicy simulationPlanPolicy, interceptionOnly bool) (*autoRecord, bool) {
@@ -231,14 +251,21 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 		return nil, false
 	}
 	captured := !contentOff && !declared
+	countsPayload := captured && kind != "llm"
+	var limit uint32
 	if !interceptionOnly && captured && root.capturedSubtreeCount >= root.maxCapturedSubtreeSpans {
-		root.drop(truncatedByMaxCapturedSubtreeSpans)
+		limit = truncatedByMaxCapturedSubtreeSpans
+	} else if !interceptionOnly && countsPayload && root.payloadBytesByFunction[name] >= root.maxPayloadBytesPerFunction {
+		limit = truncatedByMaxPayloadBytesPerFunction
+	}
+	if limit != 0 {
+		root.drop(limit)
 		if !selective {
 			return nil, true
 		}
 		interceptionOnly = true
 	}
-	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input, planPolicy: planPolicy, interceptionOnly: interceptionOnly}
+	r := &autoRecord{root: root, id: randomUUID(), name: name, kind: kind, functionName: symbol, startedAt: nowISOTimestamp(), input: input, planPolicy: planPolicy, interceptionOnly: interceptionOnly, countsPayload: countsPayload && !interceptionOnly}
 	if parent != nil {
 		r.parentID = parent.id
 		r.exportParentID = parent.id
@@ -251,6 +278,12 @@ func (root *autoRoot) add(parent *autoRecord, depth int, name, kind, symbol stri
 	}
 	root.records[r] = true
 	return r, false
+}
+
+func (root *autoRoot) addPayloadBytes(name string, bytes int) {
+	root.mu.Lock()
+	defer root.mu.Unlock()
+	root.payloadBytesByFunction[name] += bytes
 }
 
 func (root *autoRoot) recordTruncation() {
@@ -299,15 +332,21 @@ func (r *autoRecord) finish(output any, err error) {
 		if contentOff {
 			data["content_off_by_simulation_plan"] = true
 		}
+		payloadBytes := 0
 		if r.input != nil && !contentOff {
-			value, fields := capValueReport(r.input)
+			value, fields, size := capValueSized(r.input)
 			data["input"] = value
 			dropped = append(dropped, fields...)
+			payloadBytes += size
 		}
 		if output != nil && !contentOff {
-			value, fields := capValueReport(output)
+			value, fields, size := capValueSized(output)
 			data["output"] = value
 			dropped = append(dropped, fields...)
+			payloadBytes += size
+		}
+		if r.countsPayload && payloadBytes > 0 {
+			r.root.addPayloadBytes(r.name, payloadBytes)
 		}
 		if err != nil {
 			data["error"] = describeError(err)
@@ -482,7 +521,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if fn == nil {
 		return nil, fmt.Errorf("bitfab: Trace requires a function")
 	}
-	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 {
+	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 || opts.MaxPayloadBytesPerFunction != nil && *opts.MaxPayloadBytesPerFunction < 0 {
 		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
 	}
 	experimentID, err := resolveExperimentID(opts.ExperimentID, opts.TestRunID)
@@ -521,12 +560,15 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 		c.httpClient.simulationPlan.refreshFor(ctx)
 		c.httpClient.simulationPlan.awaitFirstRead(ctx)
 	}
-	maxDepth, maxCapturedSubtreeSpans := 30, 500
+	maxDepth, maxCapturedSubtreeSpans, maxPayloadBytesPerFunction := 30, 500, 250_000_000
 	if opts.MaxDepth != nil {
 		maxDepth = *opts.MaxDepth
 	}
 	if opts.MaxCapturedSubtreeSpans != nil {
 		maxCapturedSubtreeSpans = *opts.MaxCapturedSubtreeSpans
+	}
+	if opts.MaxPayloadBytesPerFunction != nil {
+		maxPayloadBytesPerFunction = *opts.MaxPayloadBytesPerFunction
 	}
 	var frames []autoFrame
 	var records []*autoRecord
@@ -545,7 +587,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	}
 	var root *autoRoot
 	if len(frames) == 0 || currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
-		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
+		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, maxPayloadBytesPerFunction: maxPayloadBytesPerFunction, payloadBytesByFunction: map[string]int{}, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
 		if len(frames) == 0 && managed != nil && currentSpan(ctx) != nil {
 			root.traceID = currentSpan(ctx).traceID
 			root.managed = managed

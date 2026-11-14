@@ -1,11 +1,13 @@
 package bitfab
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -781,7 +783,7 @@ func TestSubtree_ManyDeclaredNodesAllRecord(t *testing.T) {
 func TestSubtree_NegativeTraceLimitsAreRejected(t *testing.T) {
 	c, _ := subtreeClient(t)
 	negative := -1
-	for _, opts := range []TraceOptions{{MaxDepth: &negative}, {MaxCapturedSubtreeSpans: &negative}} {
+	for _, opts := range []TraceOptions{{MaxDepth: &negative}, {MaxCapturedSubtreeSpans: &negative}, {MaxPayloadBytesPerFunction: &negative}} {
 		if _, err := c.Trace(context.Background(), "negative", func(context.Context) (any, error) { t.Fatal("body ran"); return nil, nil }, opts); err == nil {
 			t.Fatalf("negative limit was accepted: %#v", opts)
 		}
@@ -1283,5 +1285,143 @@ func TestSubtree_NestedCopyLeavesOuterRootContexts(t *testing.T) {
 	}
 	if outerRoot["prompt"] != nil {
 		t.Fatalf("outer root prompt = %#v", outerRoot["prompt"])
+	}
+}
+
+func autoChunkCall(ctx context.Context, symbol, chunk string) (result int) {
+	node := EnterAutoNode(ctx, symbol, symbol, []any{chunk}, []any{&result})
+	if node != nil {
+		defer node.End(nil)
+		if node.Mocked() {
+			node.AssignMock()
+			return
+		}
+	}
+	return len(chunk)
+}
+
+func TestSubtree_PayloadBytesPerFunctionStopsLoopHelperAndKeepsOthers(t *testing.T) {
+	c, requests := subtreeClient(t)
+	limit := 3000
+	chunk := strings.Repeat("x", 1000)
+	total := 0
+	counts, truncation := traceAndCount(t, c, requests, "payload-loop-agent", TraceOptions{MaxPayloadBytesPerFunction: &limit}, func(ctx context.Context) {
+		for i := 0; i < 10; i++ {
+			total += autoChunkCall(ctx, "keyOf", chunk) + autoTestCall(ctx, "small", func() int { return i })
+		}
+	})
+	if total != 10_045 {
+		t.Fatalf("total = %d", total)
+	}
+	if counts["keyOf"] != 3 || counts["small"] != 10 || counts["payload-loop-agent"] != 1 {
+		t.Fatalf("counts = %#v", counts)
+	}
+	if truncation["bitfab.truncated_by"] != "max_payload_bytes_per_function" || truncation["bitfab.dropped_spans"] != float64(7) {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+}
+
+func TestSubtree_PayloadBytesPerFunctionStartsEachRootCallEmpty(t *testing.T) {
+	c, requests := subtreeClient(t)
+	limit := 3000
+	chunk := strings.Repeat("x", 1000)
+	for run := 0; run < 2; run++ {
+		counts, _ := traceAndCount(t, c, requests, "payload-per-root-agent", TraceOptions{MaxPayloadBytesPerFunction: &limit}, func(ctx context.Context) {
+			for i := 0; i < 4; i++ {
+				autoChunkCall(ctx, "keyOf", chunk)
+			}
+		})
+		if counts["keyOf"] != 3 {
+			t.Fatalf("run %d counts = %#v", run, counts)
+		}
+	}
+}
+
+func TestSubtree_PayloadBytesPerFunctionRecordsEveryDeclaredNodeCall(t *testing.T) {
+	c, requests := subtreeClient(t)
+	if err := c.Node("declaredKey", NodeOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	limit := 3000
+	chunk := strings.Repeat("x", 1000)
+	total := 0
+	counts, truncation := traceAndCount(t, c, requests, "payload-declared-agent", TraceOptions{MaxPayloadBytesPerFunction: &limit}, func(ctx context.Context) {
+		for i := 0; i < 10; i++ {
+			total += autoChunkCall(ctx, "declaredKey", chunk)
+		}
+	})
+	if total != 10_000 || counts["declaredKey"] != 10 {
+		t.Fatalf("total = %d, counts = %#v", total, counts)
+	}
+	if truncation != nil {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+}
+
+func TestSubtree_PayloadBytesPerFunctionDefaultsToTwoHundredFiftyMillion(t *testing.T) {
+	c, requests := subtreeClient(t)
+	chunk := strings.Repeat("x", 7_000_000)
+	total := 0
+	counts, truncation := traceAndCount(t, c, requests, "payload-default-agent", TraceOptions{}, func(ctx context.Context) {
+		for i := 0; i < 40; i++ {
+			total += autoChunkCall(ctx, "keyOf", chunk)
+		}
+	})
+	if total != 280_000_000 || counts["keyOf"] != 36 {
+		t.Fatalf("total = %d, counts = %#v", total, counts)
+	}
+	if truncation["bitfab.truncated_by"] != "max_payload_bytes_per_function" || truncation["bitfab.dropped_spans"] != float64(4) {
+		t.Fatalf("truncation = %#v", truncation)
+	}
+}
+
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	resetWarnOnce()
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() {
+		log.SetOutput(previous)
+		resetWarnOnce()
+	})
+	return &output
+}
+
+func TestSubtree_EachLimitWarnsOncePerTraceKey(t *testing.T) {
+	spanLimit := 2
+	payloadLimit := 3000
+	chunk := strings.Repeat("x", 1000)
+	cases := []struct {
+		key   string
+		opts  TraceOptions
+		limit string
+		body  func(context.Context)
+	}{
+		{"warn-span-limit-agent", TraceOptions{MaxCapturedSubtreeSpans: &spanLimit}, "max_captured_subtree_spans", func(ctx context.Context) {
+			for i := 0; i < 4; i++ {
+				autoTestCall(ctx, "leaf", func() int { return i })
+			}
+		}},
+		{"warn-payload-limit-agent", TraceOptions{MaxPayloadBytesPerFunction: &payloadLimit}, "max_payload_bytes_per_function", func(ctx context.Context) {
+			for i := 0; i < 10; i++ {
+				autoChunkCall(ctx, "keyOf", chunk)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.limit, func(t *testing.T) {
+			c, requests := subtreeClient(t)
+			output := captureWarnings(t)
+			for i := 0; i < 2; i++ {
+				_, truncation := traceAndCount(t, c, requests, tc.key, tc.opts, tc.body)
+				if truncation["bitfab.truncated_by"] != tc.limit {
+					t.Fatalf("truncation = %#v", truncation)
+				}
+			}
+			if got := strings.Count(output.String(), fmt.Sprintf("%q hit an automatic subtree capture limit", tc.key)); got != 1 {
+				t.Fatalf("warnings = %d, output = %q", got, output.String())
+			}
+		})
 	}
 }
