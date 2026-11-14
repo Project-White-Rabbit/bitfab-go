@@ -440,6 +440,7 @@ type GenerateScenarioOption func(*generateScenarioConfig)
 
 type generateScenarioConfig struct {
 	regenerate bool
+	force      bool
 }
 
 // WithRegenerate builds a scenario the trace already has again: its name,
@@ -449,6 +450,14 @@ type generateScenarioConfig struct {
 // asking while it is generating starts nothing more.
 func WithRegenerate() GenerateScenarioOption {
 	return func(config *generateScenarioConfig) { config.regenerate = true }
+}
+
+// WithForce, together with WithRegenerate, starts over even while the
+// scenario is generating or the scenario callback is still working on it
+// (waiting for its answer, or it answered 202 less than a day ago). WithForce
+// without WithRegenerate is refused.
+func WithForce() GenerateScenarioOption {
+	return func(config *generateScenarioConfig) { config.force = true }
 }
 
 // GenerateScenario starts building the scenario for one trace and returns at
@@ -468,6 +477,9 @@ func (t *TracesClient) GenerateScenario(ctx context.Context, traceID string, opt
 	payload := map[string]any{}
 	if config.regenerate {
 		payload["regenerate"] = true
+	}
+	if config.force {
+		payload["force"] = true
 	}
 	var response struct {
 		Generation ScenarioGeneration `json:"generation"`
