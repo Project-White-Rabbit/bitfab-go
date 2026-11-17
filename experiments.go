@@ -22,6 +22,9 @@ type ListExperimentsParams struct {
 	// GitBranch is an exact match on the branch recorded at replay start.
 	GitBranch         string
 	ExperimentGroupID string
+	// AgentSessionID is an exact match on the coding agent session id
+	// recorded when the run started.
+	AgentSessionID string
 	// Status is pending, completed, failed, or interrupted.
 	Status string
 	// Metadata keeps runs carrying every pair given, 1 to 10 keys.
@@ -87,6 +90,9 @@ type Experiment struct {
 	BaseSHA                *string           `json:"baseSha"`
 	ExperimentSHA          *string           `json:"experimentSha"`
 	Metadata               map[string]string `json:"metadata"`
+	// AgentSessionID is the id of the coding agent session that launched the
+	// run, or nil when none was recorded.
+	AgentSessionID *string `json:"agentSessionId"`
 }
 
 // ExperimentPage is one page of a listing. Pass NextCursor back as Cursor to
@@ -189,6 +195,7 @@ func (e *ExperimentsClient) List(ctx context.Context, params ListExperimentsPara
 		"traceFunctionKey":  params.TraceFunctionKey,
 		"gitBranch":         params.GitBranch,
 		"experimentGroupId": params.ExperimentGroupID,
+		"agentSessionId":    params.AgentSessionID,
 		"status":            params.Status,
 		"cursor":            params.Cursor,
 	} {

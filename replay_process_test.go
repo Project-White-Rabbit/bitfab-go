@@ -59,7 +59,7 @@ func TestReplayProcessesRunFreshWorkersWithOneExperiment(t *testing.T) {
 			})
 			defer server.Close()
 			hookFile := filepath.Join(t.TempDir(), "hooks.txt")
-			args := []string{"pipeline", "--code-change", "skip", "--db-branch"}
+			args := []string{"pipeline", "--code-change", "skip", "--experiment-group-id", "group-1", "--db-branch"}
 			if mode == "dry-run" {
 				args = append(args, "--dry-run")
 			}
@@ -199,7 +199,7 @@ func TestReplayChildDeliveryFailureReachesTheParent(t *testing.T) {
 		base(w, r)
 	}))
 	defer server.Close()
-	command := exec.Command(binary, "pipeline", "--code-change", "skip")
+	command := exec.Command(binary, "pipeline", "--code-change", "skip", "--experiment-group-id", "group-1")
 	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200", "BITFAB_TEST_HOOK_SPAN=1")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -234,7 +234,7 @@ func TestReplayChildUnconfirmedDeliveryWarnsWithoutFailingTheRun(t *testing.T) {
 		base(w, r)
 	}))
 	defer server.Close()
-	command := exec.Command(binary, "pipeline", "--code-change", "skip", "--fail-on-error")
+	command := exec.Command(binary, "pipeline", "--code-change", "skip", "--experiment-group-id", "group-1", "--fail-on-error")
 	command.Env = append(os.Environ(), "BITFAB_TEST_SERVICE_URL="+server.URL, "BITFAB_TEST_CHILD_DELIVERY_TIMEOUT_MS=200")
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout

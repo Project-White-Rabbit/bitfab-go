@@ -184,9 +184,10 @@ func TestReplayRunsTypedFunctionAndPersistsResults(t *testing.T) {
 			return fmt.Sprintf("%s:%d", name, count), nil
 		},
 		&ReplayOptions{
-			CodeChange:     CodeChangeSkip,
-			Limit:          2,
-			MaxConcurrency: 2,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Limit:             2,
+			MaxConcurrency:    2,
 			OnItemStart: func(progress ReplayItemStartProgress) {
 				callbackMu.Lock()
 				defer callbackMu.Unlock()
@@ -318,7 +319,7 @@ func TestReplayCompletesWithOneWarningPerUnconfirmedReplay(t *testing.T) {
 		func(ctx context.Context, name string, count int) (string, error) {
 			return fmt.Sprintf("%s:%d", name, count), nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, Limit: 2, MaxConcurrency: 2},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Limit: 2, MaxConcurrency: 2},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -365,7 +366,7 @@ func TestReplayReadsExperimentIDAndFallsBackToLegacyKeys(t *testing.T) {
 			defer server.Close()
 			client := newTestClient(server.URL)
 			defer client.Close(5 * time.Second)
-			result, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{CodeChange: CodeChangeSkip, Limit: 1})
+			result, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Limit: 1})
 			if err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -388,7 +389,7 @@ func TestReplayStartResponseWithoutExperimentIDFails(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
-	_, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{CodeChange: CodeChangeSkip, Limit: 1})
+	_, err := client.Replay(context.Background(), "typed-workflow", func(name string, count int) string { return name }, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Limit: 1})
 	if err == nil || !strings.Contains(err.Error(), "omitted the experiment ID") {
 		t.Fatalf("err = %v", err)
 	}
@@ -408,9 +409,10 @@ func TestReplayOnExperimentStartFiresOnceBeforeFirstItem(t *testing.T) {
 		"typed-workflow",
 		func(name string, count int) string { return name },
 		&ReplayOptions{
-			CodeChange:     CodeChangeSkip,
-			Limit:          2,
-			MaxConcurrency: 2,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Limit:             2,
+			MaxConcurrency:    2,
 			OnExperimentStart: func(event ReplayExperimentStart) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -443,8 +445,9 @@ func TestReplayOnExperimentStartFiresOnDryRunAndSurvivesPanic(t *testing.T) {
 	defer client.Close(time.Second)
 	calls := 0
 	result, err := client.Replay(context.Background(), "dry", func(string, int) {}, &ReplayOptions{
-		CodeChange: CodeChangeSkip,
-		DryRun:     true,
+		CodeChange:        CodeChangeSkip,
+		ExperimentGroupID: "group-1",
+		DryRun:            true,
 		OnExperimentStart: func(event ReplayExperimentStart) {
 			calls++
 			if event.ExperimentID != "run-1" {
@@ -475,6 +478,7 @@ func TestReplayDryRunAsksForNoExperimentAndNeverTouchesOne(t *testing.T) {
 	started := false
 	result, err := client.Replay(context.Background(), "dry", func(string, int) { t.Error("dry run executed") }, &ReplayOptions{
 		CodeChange:        CodeChangeSkip,
+		ExperimentGroupID: "group-1",
 		DryRun:            true,
 		OnExperimentStart: func(ReplayExperimentStart) { started = true },
 	})
@@ -513,7 +517,8 @@ func TestReplayAdaptsInputsAndIsolatesFunctionErrors(t *testing.T) {
 			return fmt.Sprintf("%s:%d", input.Name, input.Count), nil
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
 			AdaptInputs: func(inputs []any, ctx AdaptContext) ([]any, error) {
 				if ctx.OriginalTraceID == "" || len(inputs) != 2 {
 					return nil, errors.New("missing adaptation context")
@@ -556,7 +561,7 @@ func TestReplayItemErrorCarriesTheDeepestCause(t *testing.T) {
 			}
 			return name, nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -585,7 +590,7 @@ func TestReplayPreservesItemsWhenCompletionFails(t *testing.T) {
 		context.Background(),
 		"completion-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	var replayErr *ReplayError
 	if !errors.As(err, &replayErr) {
@@ -763,7 +768,7 @@ func TestReplayReportsTheGitStateItRanFrom(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{CodeChange: CodeChangeSkip}
+	options := &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}
 	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -791,7 +796,7 @@ func TestReplayOmitsGitStateWhenSwitchedOff(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	options := &ReplayOptions{CodeChange: CodeChangeSkip}
+	options := &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}
 	if _, err := client.Replay(context.Background(), "commit-workflow", func() {}, options); err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -873,9 +878,10 @@ func TestReplayOmitsMetadataWhenUnset(t *testing.T) {
 		server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
 		client := newTestClient(server.URL)
 		_, err := client.Replay(context.Background(), "options-workflow", func() {}, &ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			TraceIDs:   []string{"trace-1"},
-			Metadata:   metadata,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			TraceIDs:          []string{"trace-1"},
+			Metadata:          metadata,
 		})
 		client.Close(5 * time.Second)
 		server.Close()
@@ -909,7 +915,7 @@ func TestReplayJudgesAssertionsByDefault(t *testing.T) {
 			client := newTestClient(server.URL)
 			defer client.Close(5 * time.Second)
 
-			options := &ReplayOptions{CodeChange: CodeChangeSkip, SkipAssertionJudging: tc.skip, JudgeAssertions: tc.judge}
+			options := &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, SkipAssertionJudging: tc.skip, JudgeAssertions: tc.judge}
 			if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -950,7 +956,7 @@ func TestReplayStartsWithoutAnInvocationWhenBuildingItPanics(t *testing.T) {
 	client := newTestClient(server.URL)
 	defer client.Close(5 * time.Second)
 
-	result, err := client.Replay(context.Background(), "invocation-workflow", func() {}, &ReplayOptions{CodeChange: CodeChangeSkip, Name: "baseline"})
+	result, err := client.Replay(context.Background(), "invocation-workflow", func() {}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Name: "baseline"})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -968,20 +974,22 @@ func TestReplayStartsWithoutAnInvocationWhenBuildingItPanics(t *testing.T) {
 func TestReplayReportsTheOptionsTheCallerPassedAsFlags(t *testing.T) {
 	clearInvocationEnvironment(t)
 	invocation := replayStartInvocation(t, &ReplayOptions{
-		CodeChange:     CodeChangeSkip,
-		Name:           "baseline",
-		MaxConcurrency: 2,
-		DatasetIDs:     []string{"ds-1"},
-		Metadata:       map[string]string{"team": "search", "owner": "ada"},
-		OnItemStart:    func(ReplayItemStartProgress) {},
+		CodeChange:        CodeChangeSkip,
+		ExperimentGroupID: "group-1",
+		Name:              "baseline",
+		MaxConcurrency:    2,
+		DatasetIDs:        []string{"ds-1"},
+		Metadata:          map[string]string{"team": "search", "owner": "ada"},
+		OnItemStart:       func(ReplayItemStartProgress) {},
 	})
 	want := map[string]any{
-		"code-change":   "skip",
-		"name":          "baseline",
-		"concurrency":   float64(2),
-		"dataset-ids":   []any{"ds-1"},
-		"metadata":      []any{"owner", "team"},
-		"on-item-start": true,
+		"code-change":         "skip",
+		"experiment-group-id": "group-1",
+		"name":                "baseline",
+		"concurrency":         float64(2),
+		"dataset-ids":         []any{"ds-1"},
+		"metadata":            []any{"owner", "team"},
+		"on-item-start":       true,
 	}
 	if !reflect.DeepEqual(invocation["flags"], want) {
 		t.Fatalf("flags = %#v, want %#v", invocation["flags"], want)
@@ -993,9 +1001,10 @@ func TestReplayReportsTheOptionsTheCallerPassedAsFlags(t *testing.T) {
 
 func TestReplayReportsTheCommandLineFlagsWhenTheCLIStartedIt(t *testing.T) {
 	invocation := replayStartInvocation(t, &ReplayOptions{
-		CodeChange: CodeChangeSkip,
-		Limit:      2,
-		cliFlags:   map[string]any{"limit": 2, "dry-run": true},
+		CodeChange:        CodeChangeSkip,
+		ExperimentGroupID: "group-1",
+		Limit:             2,
+		cliFlags:          map[string]any{"limit": 2, "dry-run": true},
 	})
 	want := map[string]any{"limit": float64(2), "dry-run": true}
 	if !reflect.DeepEqual(invocation["flags"], want) {
@@ -1006,7 +1015,7 @@ func TestReplayReportsTheCommandLineFlagsWhenTheCLIStartedIt(t *testing.T) {
 func TestReplayReportsTheCloudRunner(t *testing.T) {
 	clearInvocationEnvironment(t)
 	t.Setenv("BITFAB_REPLAY_EXECUTION_TARGET", "hosted")
-	invocation := replayStartInvocation(t, &ReplayOptions{CodeChange: CodeChangeSkip})
+	invocation := replayStartInvocation(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip})
 	if invocation["environment"] != "cloud_replay" {
 		t.Fatalf("environment = %#v", invocation["environment"])
 	}
@@ -1027,7 +1036,7 @@ func TestReplayDeprecatedJudgeAssertionsSendsJudgingAndWarnsOnce(t *testing.T) {
 	defer client.Close(5 * time.Second)
 
 	for range 2 {
-		options := &ReplayOptions{CodeChange: CodeChangeSkip, JudgeAssertions: true}
+		options := &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, JudgeAssertions: true}
 		if _, err := client.Replay(context.Background(), "judge-workflow", func() {}, options); err != nil {
 			t.Fatalf("Replay returned error: %v", err)
 		}
@@ -1040,5 +1049,150 @@ func TestReplayDeprecatedJudgeAssertionsSendsJudgingAndWarnsOnce(t *testing.T) {
 	}
 	if count := strings.Count(logs.String(), judgeAssertionsDeprecation); count != 1 {
 		t.Fatalf("deprecation warnings = %d, want 1; logs: %s", count, logs.String())
+	}
+}
+
+func clearAgentSessionEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSION_ID"} {
+		t.Setenv(name, "")
+	}
+}
+
+func replayStartBody(t *testing.T, options *ReplayOptions) map[string]any {
+	t.Helper()
+	state := &replayTestServerState{}
+	server := newLegacyCarrierServer(t, replayTestHandler(t, state, nil))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+	if _, err := client.Replay(context.Background(), "group-workflow", func() {}, options); err != nil {
+		t.Fatalf("Replay returned error: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.startBody
+}
+
+func TestReplayRefusesAMissingExperimentGroupBeforeAnyRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	for _, groupID := range []string{"", "   "} {
+		options := &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: groupID, CodeChange: CodeChangeSkip}
+		_, err := client.Replay(context.Background(), "group-workflow", func() {}, options)
+		if err == nil || err.Error() != "bitfab: "+experimentGroupRequiredMessage {
+			t.Fatalf("Replay error for group %q = %v", groupID, err)
+		}
+	}
+	if !strings.Contains(experimentGroupRequiredMessage, "experiment group id is required. An experiment group is one series of experiments testing one thing.") || !strings.HasSuffix(experimentGroupRequiredMessage, " To run without a group, set SkipExperimentGroup.") {
+		t.Fatalf("message = %q", experimentGroupRequiredMessage)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests sent = %d, want 0", got)
+	}
+}
+
+func TestReplayDryRunNeedsNoExperimentGroup(t *testing.T) {
+	clearAgentSessionEnv(t)
+	body := replayStartBody(t, &ReplayOptions{TraceIDs: []string{"trace-1"}, DryRun: true, CodeChange: CodeChangeSkip})
+	if body["dryRun"] != true || body["requireExperimentGroup"] != true {
+		t.Fatalf("start body = %#v", body)
+	}
+	if _, present := body["experimentGroupId"]; present {
+		t.Fatalf("dry run sent an experiment group: %#v", body)
+	}
+}
+
+func TestReplayAlwaysAsksTheServerToRequireAnExperimentGroup(t *testing.T) {
+	clearAgentSessionEnv(t)
+	body := replayStartBody(t, &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip})
+	if body["requireExperimentGroup"] != true || body["experimentGroupId"] != "group-1" {
+		t.Fatalf("start body = %#v", body)
+	}
+	if _, present := body["agentSessionId"]; present {
+		t.Fatalf("start body sent an agent session id with none known: %#v", body)
+	}
+}
+
+func TestReplaySkipExperimentGroupOmitsTheGroupRequirement(t *testing.T) {
+	clearAgentSessionEnv(t)
+	body := replayStartBody(t, &ReplayOptions{TraceIDs: []string{"trace-1"}, SkipExperimentGroup: true, CodeChange: CodeChangeSkip})
+	for _, key := range []string{"requireExperimentGroup", "experimentGroupId", "experimentGroupName"} {
+		if _, present := body[key]; present {
+			t.Fatalf("skipped group still sent %s: %#v", key, body)
+		}
+	}
+}
+
+func TestReplayRefusesSkipExperimentGroupWithAGroupBeforeAnyRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := newTestClient(server.URL)
+	defer client.Close(5 * time.Second)
+
+	want := "bitfab: replay SkipExperimentGroup cannot be combined with ExperimentGroupID or ExperimentGroupName"
+	for _, options := range []*ReplayOptions{
+		{TraceIDs: []string{"trace-1"}, SkipExperimentGroup: true, ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
+		{TraceIDs: []string{"trace-1"}, SkipExperimentGroup: true, ExperimentGroupName: "Prompt sweep", CodeChange: CodeChangeSkip},
+	} {
+		_, err := client.Replay(context.Background(), "group-workflow", func() {}, options)
+		if err == nil || err.Error() != want {
+			t.Fatalf("Replay error for %+v = %v", options, err)
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests sent = %d, want 0", got)
+	}
+}
+
+func TestReplaySendsTheAgentSessionID(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		env      map[string]string
+		want     string
+	}{
+		{name: "option wins over every env var", explicit: "  option-session  ", env: map[string]string{"CLAUDE_CODE_SESSION_ID": "claude", "CODEX_THREAD_ID": "codex", "AGENT_SESSION_ID": "agent"}, want: "option-session"},
+		{name: "claude code first", env: map[string]string{"CLAUDE_CODE_SESSION_ID": "claude", "CODEX_THREAD_ID": "codex", "AGENT_SESSION_ID": "agent"}, want: "claude"},
+		{name: "codex next", env: map[string]string{"CLAUDE_CODE_SESSION_ID": " ", "CODEX_THREAD_ID": "codex", "AGENT_SESSION_ID": "agent"}, want: "codex"},
+		{name: "agent session last", env: map[string]string{"AGENT_SESSION_ID": " agent "}, want: "agent"},
+		{name: "none known", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearAgentSessionEnv(t)
+			for name, value := range test.env {
+				t.Setenv(name, value)
+			}
+			body := replayStartBody(t, &ReplayOptions{TraceIDs: []string{"trace-1"}, ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, AgentSessionID: test.explicit})
+			got, present := body["agentSessionId"]
+			if test.want == "" {
+				if present {
+					t.Fatalf("agentSessionId = %#v, want absent", got)
+				}
+				return
+			}
+			if got != test.want {
+				t.Fatalf("agentSessionId = %#v, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReplayRefusesAnAgentSessionIDOver255Characters(t *testing.T) {
+	_, err := normalizeReplayOptions(&ReplayOptions{AgentSessionID: strings.Repeat("a", 256)})
+	if err == nil || !strings.Contains(err.Error(), "AgentSessionID must be at most 255 characters") {
+		t.Fatalf("error = %v", err)
 	}
 }

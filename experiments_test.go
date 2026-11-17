@@ -20,7 +20,7 @@ func experimentJSON(id string) map[string]any {
 		"datasetIds": []string{"dataset-1"}, "datasetNames": []string{"Checkout"}, "attempts": 3, "plannedTraceCount": 12,
 		"runBy":       map[string]any{"id": "user-1", "fullName": "Ada", "email": nil, "imageUrl": nil},
 		"githubEmail": nil, "gitBranch": "main", "commitSha": "abc123", "baseSha": nil, "experimentSha": nil,
-		"metadata": map[string]any{"schedule": "eod"},
+		"metadata": map[string]any{"schedule": "eod"}, "agentSessionId": "session-1",
 	}
 }
 
@@ -62,7 +62,7 @@ func TestExperiments_ListEncodesEveryFilterAndDecodesThePage(t *testing.T) {
 	after := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	before := time.Date(2026, 9, 24, 12, 30, 0, 500000000, time.FixedZone("PDT", -7*3600))
 	page, err := client.Experiments.List(context.Background(), ListExperimentsParams{
-		DatasetID: "dataset-1", TraceFunctionKey: "orders", GitBranch: "main", ExperimentGroupID: "group-1",
+		DatasetID: "dataset-1", TraceFunctionKey: "orders", GitBranch: "main", ExperimentGroupID: "group-1", AgentSessionID: "session-1",
 		Status: "completed", Metadata: map[string]string{"schedule": "eod", "owner": "ada"},
 		CreatedAfter: &after, CreatedBefore: &before, Cursor: "cursor-1", Limit: 5,
 	})
@@ -70,7 +70,7 @@ func TestExperiments_ListEncodesEveryFilterAndDecodesThePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := url.Values{
-		"datasetId": {"dataset-1"}, "traceFunctionKey": {"orders"}, "gitBranch": {"main"}, "experimentGroupId": {"group-1"},
+		"datasetId": {"dataset-1"}, "traceFunctionKey": {"orders"}, "gitBranch": {"main"}, "experimentGroupId": {"group-1"}, "agentSessionId": {"session-1"},
 		"status": {"completed"}, "metadata": {`{"owner":"ada","schedule":"eod"}`},
 		"createdAfter": {"2026-09-01T00:00:00Z"}, "createdBefore": {"2026-09-24T12:30:00.5-07:00"},
 		"cursor": {"cursor-1"}, "limit": {"5"},
@@ -91,7 +91,8 @@ func TestExperiments_ListEncodesEveryFilterAndDecodesThePage(t *testing.T) {
 		len(experiment.DatasetIDs) != 1 || experiment.Attempts != 3 || *experiment.PlannedTraceCount != 12 ||
 		experiment.RunBy == nil || *experiment.RunBy.FullName != "Ada" || experiment.RunBy.Email != nil ||
 		experiment.GitHubEmail != nil || *experiment.GitBranch != "main" || *experiment.CommitSHA != "abc123" ||
-		experiment.BaseSHA != nil || experiment.Metadata["schedule"] != "eod" {
+		experiment.BaseSHA != nil || experiment.Metadata["schedule"] != "eod" ||
+		experiment.AgentSessionID == nil || *experiment.AgentSessionID != "session-1" {
 		t.Fatalf("experiment = %+v", experiment)
 	}
 }

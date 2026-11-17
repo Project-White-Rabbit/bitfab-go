@@ -70,7 +70,7 @@ func TestReplayRejectsBoundFunctionKeyMismatch(t *testing.T) {
 		context.Background(),
 		"selected-key",
 		BindReplayFunction("declared-key", func() {}),
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err == nil || !strings.Contains(err.Error(), "declared-key") || !strings.Contains(err.Error(), "selected-key") {
 		t.Fatalf("error = %v", err)
@@ -385,13 +385,13 @@ func TestReplayRefusesInvalidCodeChangeBeforeAnyRequest(t *testing.T) {
 		{name: "nil options", options: nil, want: `bitfab: replay needs a CodeChange naming the code this run tests: ` + codeChangeChoices + `.`},
 		{name: "missing", options: &ReplayOptions{}, want: `bitfab: replay needs a CodeChange naming the code this run tests: ` + codeChangeChoices + `.`},
 		{name: "unknown", options: &ReplayOptions{CodeChange: "staged"}, want: `bitfab: Unknown CodeChange "staged". Pass ` + codeChangeChoices + `.`},
-		{name: "manual without files", options: &ReplayOptions{CodeChange: CodeChangeManual}, want: `bitfab: CodeChange "manual" needs CodeChangeFiles: the path and before/after contents of each edited file.`},
-		{name: "files without manual", options: &ReplayOptions{CodeChange: CodeChangeWorkingTree, CodeChangeFiles: files}, want: `bitfab: CodeChangeFiles only applies with CodeChange "manual" (got "working-tree").`},
-		{name: "skip with description", options: &ReplayOptions{CodeChange: CodeChangeSkip, CodeChangeDescription: "x"}, want: `bitfab: CodeChange "skip" attaches no code change, so it cannot take a CodeChangeDescription.`},
-		{name: "ref without base", options: &ReplayOptions{CodeChange: CodeChangeRef}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
-		{name: "ref with blank base", options: &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: " "}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
-		{name: "ref with option-like base", options: &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "--output=x"}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
-		{name: "base without ref", options: &ReplayOptions{CodeChange: CodeChangeDefaultBranch, CodeChangeBase: "dev"}, want: `bitfab: CodeChangeBase only applies with CodeChange "ref" (got "default-branch").`},
+		{name: "manual without files", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeManual}, want: `bitfab: CodeChange "manual" needs CodeChangeFiles: the path and before/after contents of each edited file.`},
+		{name: "files without manual", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeWorkingTree, CodeChangeFiles: files}, want: `bitfab: CodeChangeFiles only applies with CodeChange "manual" (got "working-tree").`},
+		{name: "skip with description", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, CodeChangeDescription: "x"}, want: `bitfab: CodeChange "skip" attaches no code change, so it cannot take a CodeChangeDescription.`},
+		{name: "ref without base", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "ref with blank base", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef, CodeChangeBase: " "}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "ref with option-like base", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef, CodeChangeBase: "--output=x"}, want: `bitfab: CodeChange "ref" needs CodeChangeBase: the branch or commit to diff against, such as "dev" or a commit SHA.`},
+		{name: "base without ref", options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeDefaultBranch, CodeChangeBase: "dev"}, want: `bitfab: CodeChangeBase only applies with CodeChange "ref" (got "default-branch").`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -407,7 +407,7 @@ func TestReplayRefusesInvalidCodeChangeBeforeAnyRequest(t *testing.T) {
 }
 
 func TestReplaySkipSendsNoCodeChange(t *testing.T) {
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeSkip})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -428,6 +428,7 @@ func TestReplaySkipSendsNoCodeChange(t *testing.T) {
 func TestReplayManualSendsCallerFiles(t *testing.T) {
 	body, err := replayCodeChangeStart(t, &ReplayOptions{
 		CodeChange:            CodeChangeManual,
+		ExperimentGroupID:     "group-1",
 		CodeChangeDescription: "shorter prompt",
 		CodeChangeFiles:       []CodeChangeFile{{Path: "prompt.go", Before: "old", After: "new"}},
 	})
@@ -459,7 +460,7 @@ func TestReplayWorkingTreeSendsUncommittedChanges(t *testing.T) {
 	}
 	t.Chdir(root)
 
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeWorkingTree, Name: "candidate"})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeWorkingTree, Name: "candidate"})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -501,7 +502,7 @@ func TestReplayGitTypesDiffAgainstTheirBase(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(string(test.codeChange), func(t *testing.T) {
-			body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: test.codeChange, CodeChangeDescription: "caller text"})
+			body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: test.codeChange, CodeChangeDescription: "caller text"})
 			if err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -527,7 +528,7 @@ func TestReplayGitTypeWarnsWhenNothingChanged(t *testing.T) {
 	for _, codeChange := range []CodeChangeType{CodeChangeWorkingTree, CodeChangeLastBranch, CodeChangeDefaultBranch} {
 		t.Run(string(codeChange), func(t *testing.T) {
 			warnings := captureReplayWarnings(t)
-			body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: codeChange, CodeChangeDescription: "kept"})
+			body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: codeChange, CodeChangeDescription: "kept"})
 			if err != nil {
 				t.Fatalf("Replay returned error: %v", err)
 			}
@@ -558,7 +559,7 @@ func TestReplayGitTypeUsesCodeChangePathHandoff(t *testing.T) {
 	}
 	t.Setenv("BITFAB_CODE_CHANGE_PATH", path)
 
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeLastBranch})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeLastBranch})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -584,7 +585,7 @@ func TestReplayGitTypeTreatsEmptyHandoffAsNothingFound(t *testing.T) {
 	t.Setenv("BITFAB_CODE_CHANGE_PATH", path)
 	warnings := captureReplayWarnings(t)
 
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeWorkingTree})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeWorkingTree})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -621,7 +622,7 @@ func TestReplayRefDiffsAgainstWhereHeadSplitFromTheNamedBranch(t *testing.T) {
 	writeFixture(t, root, "base.txt", "uncommitted\n")
 	t.Chdir(root)
 
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "dev"})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef, CodeChangeBase: "dev"})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -647,7 +648,7 @@ func TestReplayRefDiffsAgainstACommit(t *testing.T) {
 	gitIn(t, root, "commit", "-qam", "two")
 	t.Chdir(root)
 
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: sha})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef, CodeChangeBase: sha})
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
 	}
@@ -663,7 +664,7 @@ func TestReplayRefDiffsAgainstACommit(t *testing.T) {
 
 func TestReplayRefusesAnUnresolvableRefBeforeAnyRequest(t *testing.T) {
 	t.Chdir(initReplayGitRepo(t, "main"))
-	body, err := replayCodeChangeStart(t, &ReplayOptions{CodeChange: CodeChangeRef, CodeChangeBase: "no-such-branch"})
+	body, err := replayCodeChangeStart(t, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeRef, CodeChangeBase: "no-such-branch"})
 	want := `bitfab: CodeChangeBase "no-such-branch" names no branch or commit in this repository. Pass a branch name, such as "dev", or a commit SHA; fetch it first if it only exists on the remote.`
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)

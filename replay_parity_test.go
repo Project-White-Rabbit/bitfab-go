@@ -61,7 +61,7 @@ func TestReplayAttemptsCarryIdentityMetadataAndIndependentBranches(t *testing.T)
 	var finishes []ReplayItemFinishProgress
 	result, err := client.Replay(context.Background(), "attempts", func(ctx context.Context, name string, count int) string {
 		return GetCurrentReplayBranch(ctx).DatabaseURL()
-	}, &ReplayOptions{CodeChange: CodeChangeSkip, Attempts: 2, MaxConcurrency: 2, Mock: MockNone, DBBranch: &DBBranchOptions{}, OnlyWithAssertions: true,
+	}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Attempts: 2, MaxConcurrency: 2, Mock: MockNone, DBBranch: &DBBranchOptions{}, OnlyWithAssertions: true,
 		AdaptInputs: func(inputs []any, ctx AdaptContext) ([]any, error) {
 			if ctx.Metadata["case"] != "sample" {
 				return nil, fmt.Errorf("metadata missing")

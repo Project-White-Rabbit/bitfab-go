@@ -112,3 +112,24 @@ func resolvedGitState(ctx context.Context) *GitState {
 	}
 	return resolveGitState(ctx, cwd)
 }
+
+const maxAgentSessionIDLength = 255
+
+var agentSessionIDEnvVars = []string{"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "AGENT_SESSION_ID"}
+
+func resolvedAgentSessionID(explicit string) string {
+	if trimmed := strings.TrimSpace(explicit); trimmed != "" {
+		return trimmed
+	}
+	for _, name := range agentSessionIDEnvVars {
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			continue
+		}
+		if len(value) > maxAgentSessionIDLength {
+			return ""
+		}
+		return value
+	}
+	return ""
+}

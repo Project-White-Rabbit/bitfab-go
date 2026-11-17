@@ -286,7 +286,7 @@ func TestReplayRetriesSpanFetchAndCompletionThroughServerErrors(t *testing.T) {
 		context.Background(),
 		"retry-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
@@ -322,7 +322,7 @@ func TestReplayReportsCompletionThatKeepsFailing(t *testing.T) {
 		context.Background(),
 		"retry-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	var replayErr *ReplayError
 	if !errors.As(err, &replayErr) || replayErr.ExperimentID != "run-1" {

@@ -218,7 +218,7 @@ func TestSelectiveReplayRequestAndAttempts(t *testing.T) {
 			return nil, err
 		}
 		return client.Span(ctx, "shop", func(context.Context) (any, error) { return 7, nil }, WithName("price"))
-	}, &ReplayOptions{CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2})
+	}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2})
 	if err != nil || calls.Load() != 2 || len(result.Items) != 2 {
 		t.Fatalf("replay failed: %v %#v", err, result)
 	}
@@ -268,7 +268,7 @@ func TestSelectiveReplayConcurrentStickyFailure(t *testing.T) {
 			_, _ = client.Span(ctx, "shop", func(context.Context) (any, error) { t.Error("unsafe body ran"); return nil, nil }, WithName("unsafe"), WithMockOnReplay(true))
 		}
 		return client.Span(ctx, "shop", func(context.Context) (any, error) { return 7, nil }, WithName("price"))
-	}, &ReplayOptions{CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2, MaxConcurrency: 2})
+	}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, ExperimentalSelectiveReplay: options, Attempts: 2, MaxConcurrency: 2})
 	if err != nil || len(result.Items) != 2 {
 		t.Fatalf("replay failed: %v %#v", err, result)
 	}

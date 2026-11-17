@@ -100,7 +100,7 @@ func TestReplayMarkedMockUsesRecordedOutput(t *testing.T) {
 			}
 			return value.(string), nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -144,8 +144,9 @@ func TestReplayOverridePrecedesRegisteredOverrideAndMemoizesOutput(t *testing.T)
 			return value.(string), nil
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			Mock:       MockNone,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Mock:              MockNone,
 			MockOverrides: []MockOverride{{
 				Match: matcher,
 				Resolve: func(ctx MockOverrideContext) (any, error) {
@@ -193,7 +194,7 @@ func TestReplayMockAllFailsClosedWhenOccurrenceIsMissing(t *testing.T) {
 			}, WithName("Missing"))
 			return "", err
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -237,7 +238,7 @@ func TestReplayMockOutputDecodesIntoConcreteType(t *testing.T) {
 			}
 			return value.(output), nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -300,7 +301,7 @@ func TestReplayMocksRepeatedSpanOccurrencesInRecordedOrder(t *testing.T) {
 			}
 			return outputs, nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockAll},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Mock: MockAll},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -344,7 +345,7 @@ func TestReplayRepeatedSpanFailsClosedAfterRecordedOccurrencesAreExhausted(t *te
 			}
 			return nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -378,8 +379,9 @@ func TestReplayMockMatcherPanicFailsItemClosed(t *testing.T) {
 			return spanErr
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			Mock:       MockNone,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Mock:              MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { panic("broken matcher") },
 			}},
@@ -417,8 +419,9 @@ func TestReplayMockResolverPanicFailsItemClosed(t *testing.T) {
 			return spanErr
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			Mock:       MockNone,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Mock:              MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Resolve: func(MockOverrideContext) (any, error) {
@@ -459,8 +462,9 @@ func TestReplayOverrideOriginalOutputFailsWithoutRecordedOccurrence(t *testing.T
 			return spanErr
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			Mock:       MockNone,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Mock:              MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Resolve: func(ctx MockOverrideContext) (any, error) {
@@ -501,8 +505,9 @@ func TestReplayFlatNilOverrideIsAValidMockValue(t *testing.T) {
 			return value == nil, spanErr
 		},
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
-			Mock:       MockNone,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			Mock:              MockNone,
 			MockOverrides: []MockOverride{{
 				Match: func(SpanNodeMeta) bool { return true },
 				Value: nil,
@@ -539,7 +544,7 @@ func TestReplayMockNoneExecutesRealChildWithoutFetchingTree(t *testing.T) {
 			}
 			return value.(string), nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, Mock: MockNone},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, Mock: MockNone},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -596,7 +601,7 @@ func TestReplayConcurrentMocksShareOneLazyOutputFetch(t *testing.T) {
 			}
 			return outputs, nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)

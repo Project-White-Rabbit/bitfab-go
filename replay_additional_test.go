@@ -31,7 +31,7 @@ func TestFunctionReplayAndBindReplay(t *testing.T) {
 	if bound.traceFunctionKey != "bound-workflow" {
 		t.Fatalf("bound key = %q", bound.traceFunctionKey)
 	}
-	result, err := function.Replay(context.Background(), bound.fn, &ReplayOptions{CodeChange: CodeChangeSkip})
+	result, err := function.Replay(context.Background(), bound.fn, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip})
 	if err != nil {
 		t.Fatalf("Function.Replay returned error: %v", err)
 	}
@@ -51,11 +51,11 @@ func TestNilFunctionReplayAndBindReplayAreSafe(t *testing.T) {
 	if bound.traceFunctionKey != "" || bound.fn == nil {
 		t.Fatalf("nil Function.BindReplay = %#v", bound)
 	}
-	if _, err := function.Replay(context.Background(), func() {}, &ReplayOptions{CodeChange: CodeChangeSkip}); err == nil {
+	if _, err := function.Replay(context.Background(), func() {}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}); err == nil {
 		t.Fatal("nil Function.Replay should fail")
 	}
 	withoutClient := &Function{traceFunctionKey: "workflow"}
-	if _, err := withoutClient.Replay(context.Background(), func() {}, &ReplayOptions{CodeChange: CodeChangeSkip}); err == nil {
+	if _, err := withoutClient.Replay(context.Background(), func() {}, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}); err == nil {
 		t.Fatal("Function.Replay without a client should fail")
 	}
 }
@@ -182,8 +182,9 @@ func TestReplayCallbacksRecoverPanics(t *testing.T) {
 		"callback-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
 		&ReplayOptions{
-			CodeChange:     CodeChangeSkip,
-			MaxConcurrency: 2,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
+			MaxConcurrency:    2,
 			OnItemStart: func(ReplayItemStartProgress) {
 				starts.Add(1)
 				panic("start callback")
@@ -212,7 +213,7 @@ func TestReplaySetupFailuresRemainItemScoped(t *testing.T) {
 		{
 			name: "adapter error",
 			fn:   func(string, int) {},
-			options: &ReplayOptions{CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
+			options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
 				return nil, errors.New("adapter rejected input")
 			}},
 			want: "adapter rejected input",
@@ -220,7 +221,7 @@ func TestReplaySetupFailuresRemainItemScoped(t *testing.T) {
 		{
 			name: "adapter panic",
 			fn:   func(string, int) {},
-			options: &ReplayOptions{CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
+			options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
 				panic("adapter rejected input")
 			}},
 			want: "replay input adapter panicked: adapter rejected input",
@@ -228,7 +229,7 @@ func TestReplaySetupFailuresRemainItemScoped(t *testing.T) {
 		{
 			name: "adapted arity mismatch",
 			fn:   func(string, int) {},
-			options: &ReplayOptions{CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
+			options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, AdaptInputs: func([]any, AdaptContext) ([]any, error) {
 				return []any{"only-one"}, nil
 			}},
 			want: "adapted input has 1 values",
@@ -236,7 +237,7 @@ func TestReplaySetupFailuresRemainItemScoped(t *testing.T) {
 		{
 			name:    "recorded arity mismatch",
 			fn:      func(string, int, bool) {},
-			options: &ReplayOptions{CodeChange: CodeChangeSkip},
+			options: &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 			want:    "recorded input has 2 values",
 		},
 	}
@@ -507,7 +508,7 @@ func TestReplayRejectsInvalidClientFunctionAndKey(t *testing.T) {
 				candidate = NewClient("key", WithServiceURL("http://127.0.0.1:1"))
 				defer candidate.Close(time.Second)
 			}
-			if _, err := candidate.Replay(context.Background(), test.key, test.fn, &ReplayOptions{CodeChange: CodeChangeSkip}); err == nil {
+			if _, err := candidate.Replay(context.Background(), test.key, test.fn, &ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip}); err == nil {
 				t.Fatal("Replay should fail")
 			}
 		})
@@ -599,7 +600,8 @@ func TestReplayProgressCarriesExperimentIDAndDeprecatedAlias(t *testing.T) {
 		"progress-workflow",
 		func(name string, count int) string { return fmt.Sprintf("%s:%d", name, count) },
 		&ReplayOptions{
-			CodeChange: CodeChangeSkip,
+			CodeChange:        CodeChangeSkip,
+			ExperimentGroupID: "group-1",
 			OnItemStart: func(event ReplayItemStartProgress) {
 				mu.Lock()
 				defer mu.Unlock()

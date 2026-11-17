@@ -102,11 +102,11 @@ func TestCheckArgumentsParsesReplayOptionsWithoutRunning(t *testing.T) {
 		args    []string
 		message string
 	}{
-		{[]string{"pipeline", "--code-change", "skip", "--trace-ids", "t1", "--fail-on-error"}, ""},
+		{[]string{"pipeline", "--code-change", "skip", "--experiment-group-id", "group-1", "--trace-ids", "t1", "--fail-on-error"}, ""},
 		{[]string{"pipeline", "--resume", "e1"}, "flag provided but not defined: -resume"},
-		{[]string{"other", "--code-change", "skip", "--trace-ids", "t1"}, "other"},
+		{[]string{"other", "--code-change", "skip", "--experiment-group-id", "group-1", "--trace-ids", "t1"}, "other"},
 		{[]string{"pipeline", "--trace-ids", "t1"}, "--code-change is required"},
-		{[]string{"pipeline", "--code-change", "manual", "--trace-ids", "t1"}, "--code-change manual needs --code-change-file PATH"},
+		{[]string{"pipeline", "--code-change", "manual", "--experiment-group-id", "group-1", "--trace-ids", "t1"}, "--code-change manual needs --code-change-file PATH"},
 	} {
 		var stdout, stderr bytes.Buffer
 		_, err := RunReplayCLI(context.Background(), registry, append([]string{"--check-arguments"}, check.args...), &stdout, &stderr)

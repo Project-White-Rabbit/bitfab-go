@@ -100,13 +100,13 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 }
 
 type registryCLIArgs struct {
-	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, baselineExperimentID, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
-	limit, attempts, concurrency                                                                                                                                                                                              int
-	assertions, skipJudging, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                                            bool
-	parameters                                                                                                                                                                                                                []string
-	metadata                                                                                                                                                                                                                  map[string]string
-	visited                                                                                                                                                                                                                   map[string]bool
-	flags                                                                                                                                                                                                                     map[string]any
+	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, baselineExperimentID, agentSessionID, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
+	limit, attempts, concurrency                                                                                                                                                                                                              int
+	assertions, skipJudging, skipExperimentGroup, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                                       bool
+	parameters                                                                                                                                                                                                                                []string
+	metadata                                                                                                                                                                                                                                  map[string]string
+	visited                                                                                                                                                                                                                                   map[string]bool
+	flags                                                                                                                                                                                                                                     map[string]any
 }
 
 type registryParameters []string
@@ -139,12 +139,14 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.datasetIDs, "dataset-ids", "", "comma-separated dataset IDs")
 	fs.StringVar(&out.datasetIDs, "dataset-id", "", "dataset IDs")
 	fs.StringVar(&out.graderIDs, "grader-ids", "", "comma-separated grader IDs")
-	fs.StringVar(&out.name, "name", "", "What this run is testing, in a few words, such as 'baseline' or 'shorter system prompt'. Bitfab records the commit, branch, tree state, datasets, and who ran it with every experiment, so do not repeat them here.")
+	fs.StringVar(&out.name, "name", "", "What this run changes, in a few words, such as 'baseline' or 'shorter system prompt'. Bitfab records the commit, branch, tree state, datasets, and who ran it with every experiment, so do not repeat them here.")
 	fs.StringVar(&out.notes, "notes", "", "Run conditions Bitfab cannot see on its own, such as an environment override or a forced feature flag. Kept on the experiment next to its name.")
 	fs.StringVar(&out.mock, "mock", "", "marked, all, or none")
-	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "experiment group ID")
-	fs.StringVar(&out.experimentGroupName, "experiment-group-name", "", "Name for the experiment group, applied when this run creates the group or the group has no name yet. A group that already has a name keeps it. Requires --experiment-group-id.")
+	fs.StringVar(&out.experimentGroupID, "experiment-group-id", "", "`ID` (required unless --dry-run: the experiment group this run belongs to, one series of experiments testing one thing. Reuse the id of the group whose runs test the same thing, or pass a new UUID with --experiment-group-name to start a group named after what this run tests)")
+	fs.StringVar(&out.experimentGroupName, "experiment-group-name", "", "Name for the experiment group, named after what this run tests, applied when this run creates the group or the group has no name yet. A group that already has a name keeps it. Requires --experiment-group-id.")
 	fs.StringVar(&out.baselineExperimentID, "baseline-experiment-id", "", "ID of an earlier experiment to compare this run against. Without it, the first finished experiment in the run's group is the baseline, and without a group the original traces are.")
+	fs.BoolVar(&out.skipExperimentGroup, "skip-experiment-group", false, "run without an experiment group, for scripts and schedules whose runs should not be grouped. Cannot be combined with --experiment-group-id or --experiment-group-name.")
+	fs.StringVar(&out.agentSessionID, "agent-session-id", "", "`ID` of the coding agent session that launched this run, stored on the experiment. Defaults to the first non-empty of CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, and AGENT_SESSION_ID")
 	fs.StringVar(&out.codeChange, "code-change", "", "`working-tree|last-branch|default-branch|ref|skip|manual` (required: the code change this run tests; working-tree is the uncommitted changes vs HEAD, last-branch the diff against the branch this one was cut from, default-branch the diff against the default branch, ref the diff against --code-change-base, skip none, manual the edits in --code-change-file)")
 	fs.StringVar(&out.codeChangeBase, "code-change-base", "", "`BRANCH|COMMIT` (with --code-change ref: the branch or commit to diff against)")
 	fs.StringVar(&out.codeChangeFile, "code-change-file", "", "`PATH` (with --code-change manual: a JSON file of { description, files })")
@@ -206,7 +208,19 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	if (out.visited["trace-ids"] && (out.visited["dataset-ids"] || out.visited["dataset-id"])) || (out.dbBranch && out.noDBBranch) {
 		return out, fmt.Errorf("bitfab: conflicting replay options")
 	}
+	if out.skipExperimentGroup && (out.visited["experiment-group-id"] || out.visited["experiment-group-name"]) {
+		return out, fmt.Errorf("bitfab: --skip-experiment-group cannot be combined with --experiment-group-id or --experiment-group-name")
+	}
 	return out, nil
+}
+
+const registryExperimentGroupRequiredMessage = "bitfab: --experiment-group-id is required. An experiment group is one series of experiments testing one thing. Reuse the id of the group whose runs test the same thing, or pass a new UUID with --experiment-group-name, named after what this run tests, to start a group. To run without a group, pass --skip-experiment-group."
+
+func requireRegistryExperimentGroup(parsed registryCLIArgs) error {
+	if parsed.dryRun || parsed.skipExperimentGroup || parsed.executeItem != "" || strings.TrimSpace(parsed.experimentGroupID) != "" {
+		return nil
+	}
+	return errors.New(registryExperimentGroupRequiredMessage)
 }
 
 func requireRegistryCodeChange(parsed registryCLIArgs) error {
@@ -399,6 +413,9 @@ func checkRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 		if err = requireRegistryCodeChange(parsed); err != nil {
 			return err
 		}
+		if err = requireRegistryExperimentGroup(parsed); err != nil {
+			return err
+		}
 	}
 	_, err = registry.fetch(parsed.pipeline)
 	return err
@@ -430,6 +447,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		return runSeedRegistryCLI(ctx, registry, parsed, stdout, stderr)
 	}
 	if err = requireRegistryCodeChange(parsed); err != nil {
+		return nil, err
+	}
+	if err = requireRegistryExperimentGroup(parsed); err != nil {
 		return nil, err
 	}
 	entry, err := registry.fetch(parsed.pipeline)
@@ -570,6 +590,12 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	}
 	if parsed.visited["baseline-experiment-id"] {
 		options.BaselineExperimentID = parsed.baselineExperimentID
+	}
+	if parsed.visited["skip-experiment-group"] {
+		options.SkipExperimentGroup = parsed.skipExperimentGroup
+	}
+	if parsed.visited["agent-session-id"] {
+		options.AgentSessionID = parsed.agentSessionID
 	}
 	if parsed.visited["grader-ids"] {
 		options.GraderIDs, err = registryIDs(parsed.graderIDs)

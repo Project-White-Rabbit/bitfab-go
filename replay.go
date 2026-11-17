@@ -204,7 +204,7 @@ type ReplayOptions struct {
 	DryRun               bool
 	Limit                int
 	TraceIDs             []string
-	// What this run is testing, in a few words, such as 'baseline' or
+	// What this run changes, in a few words, such as 'baseline' or
 	// 'shorter system prompt'. Bitfab records the commit, branch, tree state,
 	// datasets, and who ran it with every experiment, so do not repeat them
 	// here.
@@ -250,10 +250,15 @@ type ReplayOptions struct {
 	// is CodeChangeRef, and only then, such as "dev", "release/2.3", or a
 	// commit SHA. A branch that exists only on the remote is read as
 	// origin/<name>. A name git cannot resolve is refused.
-	CodeChangeBase    string
-	Mock              MockStrategy
-	MockOverrides     []MockOverride
-	DBBranch          *DBBranchOptions
+	CodeChangeBase string
+	Mock           MockStrategy
+	MockOverrides  []MockOverride
+	DBBranch       *DBBranchOptions
+	// ExperimentGroupID is required unless DryRun is set. An experiment group
+	// is one series of experiments testing one thing. Reuse the id of the
+	// group whose runs test the same thing, or pass a new UUID with an
+	// ExperimentGroupName, named after what this run tests, to start a group.
+	// A replay without it is refused before any request is sent.
 	ExperimentGroupID string
 	// ExperimentGroupName names the experiment group when this replay creates
 	// it, or when the group exists but has no name yet. A group that already
@@ -265,9 +270,20 @@ type ReplayOptions struct {
 	// is the baseline, and without a group the original traces are. The
 	// server refuses an experiment outside the caller's organization.
 	BaselineExperimentID string
-	DatasetID            string
-	DatasetIDs           []string
-	GraderIDs            []string
+	// SkipExperimentGroup runs the replay without an experiment group, for
+	// scripts and schedules whose runs should not be grouped. It cannot be
+	// combined with ExperimentGroupID or ExperimentGroupName; setting either
+	// with it is refused before any request is sent.
+	SkipExperimentGroup bool
+	// AgentSessionID is the id of the coding agent session that launched this
+	// replay, stored on the experiment so the run can be traced back to that
+	// session. When empty, the first non-empty of the CLAUDE_CODE_SESSION_ID,
+	// CODEX_THREAD_ID, and AGENT_SESSION_ID environment variables is used.
+	// At most 255 characters.
+	AgentSessionID string
+	DatasetID      string
+	DatasetIDs     []string
+	GraderIDs      []string
 	// CategoryIDs replays only the selected traces that carry an approved
 	// assertion in one of these categories. It narrows a TraceIDs, DatasetID
 	// or DatasetIDs selection the way OnlyWithAssertions does, but counts only
@@ -629,6 +645,9 @@ func (c *Client) Replay(
 	if err != nil {
 		return ReplayResult{}, err
 	}
+	if err := validateExperimentGroup(&resolved); err != nil {
+		return ReplayResult{}, err
+	}
 	resolved.invocation = safeReplayInvocation(options)
 	if resolved.JudgeAssertions {
 		warnOnce("judge-assertions-deprecated", judgeAssertionsDeprecation)
@@ -732,6 +751,15 @@ func (c *Client) Replay(
 	return result, nil
 }
 
+const experimentGroupRequiredMessage = "experiment group id is required. An experiment group is one series of experiments testing one thing. Reuse the id of the group whose runs test the same thing, or pass a new UUID with an experiment group name, named after what this run tests, to start a group. To run without a group, set SkipExperimentGroup."
+
+func validateExperimentGroup(options *ReplayOptions) error {
+	if options != nil && (options.DryRun || options.SkipExperimentGroup || strings.TrimSpace(options.ExperimentGroupID) != "") {
+		return nil
+	}
+	return fmt.Errorf("bitfab: %s", experimentGroupRequiredMessage)
+}
+
 const judgeAssertionsDeprecation = "JudgeAssertions is deprecated. Assertion judging is on by default; set SkipAssertionJudging to turn it off."
 
 func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
@@ -767,8 +795,15 @@ func normalizeReplayOptions(options *ReplayOptions) (ReplayOptions, error) {
 	if resolved.MaxConcurrency < 1 {
 		return ReplayOptions{}, fmt.Errorf("bitfab: replay max concurrency must be at least 1")
 	}
+	if resolved.SkipExperimentGroup && (resolved.ExperimentGroupID != "" || resolved.ExperimentGroupName != "") {
+		return ReplayOptions{}, fmt.Errorf("bitfab: replay SkipExperimentGroup cannot be combined with ExperimentGroupID or ExperimentGroupName")
+	}
 	if resolved.ExperimentGroupName != "" && resolved.ExperimentGroupID == "" {
 		return ReplayOptions{}, fmt.Errorf("bitfab: replay ExperimentGroupName requires ExperimentGroupID")
+	}
+	resolved.AgentSessionID = strings.TrimSpace(resolved.AgentSessionID)
+	if len(resolved.AgentSessionID) > maxAgentSessionIDLength {
+		return ReplayOptions{}, fmt.Errorf("bitfab: replay AgentSessionID must be at most %d characters", maxAgentSessionIDLength)
 	}
 	mockStrategy, err := normalizeMockStrategy(resolved.Mock)
 	if err != nil {
@@ -925,6 +960,12 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if gitState := resolvedGitState(ctx); gitState != nil {
 		payload["git"] = gitState
+	}
+	if !options.SkipExperimentGroup {
+		payload["requireExperimentGroup"] = true
+	}
+	if agentSessionID := resolvedAgentSessionID(options.AgentSessionID); agentSessionID != "" {
+		payload["agentSessionId"] = agentSessionID
 	}
 	if options.DryRun {
 		payload["dryRun"] = true

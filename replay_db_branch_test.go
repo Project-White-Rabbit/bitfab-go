@@ -123,7 +123,7 @@ func TestReplayUsesHistoricalDBBranchReportsAccessAndReleases(t *testing.T) {
 			seenURL = branch.DatabaseURL()
 			return "used-historical", nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{
 			MinCU:     1,
 			MaxCU:     1,
 			WarmupSQL: "SELECT count(*) FROM documents",
@@ -208,7 +208,7 @@ func TestReplayDBBranchResolutionFailureFailsItemClosed(t *testing.T) {
 			calls.Add(1)
 			return "unsafe"
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -242,7 +242,7 @@ func TestReplayDBBranchTransportFailureRetainsCauseAndFailsClosed(t *testing.T) 
 			calls.Add(1)
 			return "unsafe"
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -278,7 +278,7 @@ func TestReplayReleasesDBBranchWhenFunctionErrors(t *testing.T) {
 		func(context.Context, string, int) (string, error) {
 			return "", errors.New("workflow failed")
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned whole-run error: %v", err)
@@ -305,7 +305,7 @@ func TestReplayDBBranchReleaseFailureDoesNotFailRun(t *testing.T) {
 		context.Background(),
 		"db-workflow",
 		func(context.Context, string, int) string { return "ok" },
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error after release failure: %v", err)
@@ -335,7 +335,7 @@ func TestReplayDBSnapshotUsageRecordsUnaccessedBranch(t *testing.T) {
 			branch := GetCurrentReplayBranch(ctx)
 			return branch != nil && branch.Region == "aws-us-west-2", nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip, DBBranch: &DBBranchOptions{}},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
@@ -366,7 +366,7 @@ func TestReplayWithoutDBBranchSkipsResolveAndRelease(t *testing.T) {
 		func(ctx context.Context, _ string, _ int) bool {
 			return GetCurrentReplayBranch(ctx) == nil
 		},
-		&ReplayOptions{CodeChange: CodeChangeSkip},
+		&ReplayOptions{ExperimentGroupID: "group-1", CodeChange: CodeChangeSkip},
 	)
 	if err != nil {
 		t.Fatalf("Replay returned error: %v", err)
