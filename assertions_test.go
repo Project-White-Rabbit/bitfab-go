@@ -336,16 +336,16 @@ func TestAssertions_ReadFillsCategoryIDAndDeprecatedAlias(t *testing.T) {
 	}
 }
 
-func TestAssertions_JustificationsAndApprovalFields(t *testing.T) {
-	approvedAt := "2026-09-10T00:00:00Z"
+func TestAssertions_JustificationsAndStatusFields(t *testing.T) {
+	confirmedAt := "2026-09-10T00:00:00Z"
 	server := newDatasetsServer(t, func(r datasetRequest) any {
 		if r.method == http.MethodGet {
 			return map[string]any{"assertions": []any{map[string]any{
 				"id": "assertion-1", "traceId": "trace", "assertion": "Arrives on time", "source": "agent",
 				"justification":         []any{map[string]any{"spanId": "span-1", "text": "Shows arrival"}},
 				"categoryJustification": []any{map[string]any{"spanId": "span-2", "text": "Shows timing"}},
-				"approvalState":         "approved", "approvedBy": map[string]any{"id": "user-1", "fullName": nil, "email": "ada@example.com", "imageUrl": nil},
-				"approvedAt": approvedAt,
+				"status":                "confirmed", "confirmedBy": map[string]any{"id": "user-1", "fullName": nil, "email": "ada@example.com", "imageUrl": nil},
+				"confirmedAt": confirmedAt,
 			}}, "inheritedFrom": nil}
 		}
 		return map[string]any{"assertions": []any{}}
@@ -373,10 +373,13 @@ func TestAssertions_JustificationsAndApprovalFields(t *testing.T) {
 		t.Fatalf("GetAssertions = %+v, %v", result, err)
 	}
 	got := result.Assertions[0]
-	if got.ApprovalState != ApprovalApproved || got.ApprovedBy == nil || got.ApprovedBy.Email == nil ||
-		*got.ApprovedBy.Email != "ada@example.com" || got.ApprovedAt == nil || *got.ApprovedAt != approvedAt ||
+	if got.Status != AssertionStatusConfirmed || got.ConfirmedBy == nil || got.ConfirmedBy.Email == nil ||
+		*got.ConfirmedBy.Email != "ada@example.com" || got.ConfirmedAt == nil || *got.ConfirmedAt != confirmedAt ||
 		len(got.Justification) != 1 || len(got.CategoryJustification) != 1 {
-		t.Fatalf("approval and justifications = %+v", got)
+		t.Fatalf("status and justifications = %+v", got)
+	}
+	if got.ApprovalState != ApprovalApproved || got.ApprovedBy != got.ConfirmedBy || got.ApprovedAt != got.ConfirmedAt {
+		t.Fatalf("deprecated approval fields = %+v", got)
 	}
 }
 

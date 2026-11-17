@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -115,7 +116,7 @@ func TestVerdicts_SaveAndReadEvidence(t *testing.T) {
 			return map[string]any{"verdicts": []any{map[string]any{
 				"traceId": "one", "verdict": "pass", "verdictStatus": "judged",
 				"labelStatus": "labeled", "label": true,
-				"annotation": "good", "evidence": evidence, "approved": false,
+				"annotation": "good", "evidence": evidence, "confirmed": false,
 				"passed": 1, "failed": 0, "assertions": []any{},
 			}}}
 		}
@@ -387,10 +388,10 @@ func TestVerdicts_ReadsPreserveNullsAndAssertionVerdicts(t *testing.T) {
 		}
 		return map[string]any{"verdicts": []any{map[string]any{
 			"traceId": "one", "verdict": nil, "verdictStatus": "skipped", "labelStatus": "skipped", "label": nil, "annotation": nil,
-			"approved": false, "passed": 0, "failed": 1,
+			"confirmed": false, "passed": 0, "failed": 1,
 			"assertions": []any{map[string]any{
 				"assertionId": "assertion", "assertion": "arrives on time", "verdictStatus": "judged", "labelStatus": "labeled", "label": false,
-				"verdict": "abstained", "annotation": "arrived late", "confidence": "High", "source": "agent", "labelSource": "agent", "approved": true,
+				"verdict": "abstained", "annotation": "arrived late", "confidence": "High", "source": "agent", "labelSource": "agent", "confirmed": true,
 			}},
 		}}}
 	})
@@ -403,7 +404,7 @@ func TestVerdicts_ReadsPreserveNullsAndAssertionVerdicts(t *testing.T) {
 	}
 	assertion := verdicts[0].Assertions[0]
 	if assertion.Verdict == nil || *assertion.Verdict != VerdictAbstained || assertion.VerdictStatus != VerdictStatusJudged ||
-		assertion.Source != VerdictSourceAgent || !assertion.Approved || assertion.Label == nil || *assertion.Label {
+		assertion.Source != VerdictSourceAgent || !assertion.Confirmed || !assertion.Approved || assertion.Label == nil || *assertion.Label {
 		t.Fatalf("assertion = %+v", assertion)
 	}
 	missing, err := client.Verdicts.Get(ctx, "missing")
@@ -698,5 +699,35 @@ func TestVerdicts_SaveHumanAllFillsDeprecatedLabelFromVerdict(t *testing.T) {
 	}
 	if results[1].Verdict != VerdictPass || !results[1].Label {
 		t.Fatalf("pass outcome = %+v", results[1])
+	}
+}
+
+func TestVerdicts_ConfirmedKeyFillsDeprecatedApproved(t *testing.T) {
+	var got TraceVerdicts
+	if err := json.Unmarshal([]byte(`{"traceId":"one","confirmed":true,"assertions":[{"assertionId":"a","confirmed":true}]}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Confirmed || !got.Approved || !got.Assertions[0].Confirmed || !got.Assertions[0].Approved {
+		t.Fatalf("decoded = %+v", got)
+	}
+}
+
+func TestVerdicts_LegacyApprovedKeyFillsConfirmed(t *testing.T) {
+	var got TraceVerdicts
+	if err := json.Unmarshal([]byte(`{"traceId":"one","approved":true,"assertions":[{"assertionId":"a","approved":true}]}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Confirmed || !got.Approved || !got.Assertions[0].Confirmed || !got.Assertions[0].Approved {
+		t.Fatalf("decoded = %+v", got)
+	}
+}
+
+func TestVerdicts_ConfirmedKeyWinsOverLegacyApprovedKey(t *testing.T) {
+	var got AssertionVerdict
+	if err := json.Unmarshal([]byte(`{"assertionId":"a","confirmed":false,"approved":true}`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Confirmed || got.Approved {
+		t.Fatalf("decoded = %+v", got)
 	}
 }

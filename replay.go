@@ -197,8 +197,16 @@ type ReplayOptions struct {
 	Concurrency                 *ReplayConcurrency
 	processCommand              *replayProcessCommand
 	// Attempts repeats each selected trace 1–100 times. Zero defaults to one.
-	Attempts             int
-	OnlyWithAssertions   bool
+	Attempts           int
+	OnlyWithAssertions bool
+	// OnlyDrafts replays only the selected traces that carry at least one draft
+	// assertion, one nobody has confirmed or rejected yet and that is not
+	// archived. It narrows whatever Limit, TraceIDs, DatasetID or DatasetIDs
+	// selected, the way OnlyWithAssertions does. With DatasetIDs it replays the
+	// part of the dataset that carries draft assertions, and the
+	// experiment shows as a subset of that dataset. A selection that narrows to
+	// nothing replays nothing.
+	OnlyDrafts           bool
 	SkipAssertionJudging bool
 	JudgeAssertions      bool
 	DryRun               bool
@@ -284,7 +292,7 @@ type ReplayOptions struct {
 	DatasetID      string
 	DatasetIDs     []string
 	GraderIDs      []string
-	// CategoryIDs replays only the selected traces that carry an approved
+	// CategoryIDs replays only the selected traces that carry a confirmed
 	// assertion in one of these categories. It narrows a TraceIDs, DatasetID
 	// or DatasetIDs selection the way OnlyWithAssertions does, but counts only
 	// assertions filed under a named category. It changes which traces
@@ -898,6 +906,9 @@ func (c *Client) startReplay(ctx context.Context, traceFunctionKey string, optio
 	}
 	if options.OnlyWithAssertions {
 		payload["onlyWithAssertions"] = true
+	}
+	if options.OnlyDrafts {
+		payload["onlyDrafts"] = true
 	}
 	if options.CategoryIDs != nil {
 		payload["categoryIds"] = options.CategoryIDs

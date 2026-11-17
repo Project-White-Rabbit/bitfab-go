@@ -102,7 +102,7 @@ func (r *ReplayRegistry) fetch(name string) (ReplayRegistration, error) {
 type registryCLIArgs struct {
 	pipeline, traceIDs, datasetIDs, graderIDs, categoryIDs, name, notes, mock, experimentGroupID, experimentGroupName, baselineExperimentID, agentSessionID, codeChange, codeChangeFile, codeChangeBase, params, seed, fromTrace, executeItem string
 	limit, attempts, concurrency                                                                                                                                                                                                              int
-	assertions, skipJudging, skipExperimentGroup, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                                       bool
+	assertions, onlyDrafts, skipJudging, skipExperimentGroup, judge, dryRun, failOnError, dbBranch, noDBBranch, run                                                                                                                           bool
 	parameters                                                                                                                                                                                                                                []string
 	metadata                                                                                                                                                                                                                                  map[string]string
 	visited                                                                                                                                                                                                                                   map[string]bool
@@ -135,7 +135,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.IntVar(&out.attempts, "attempts", 0, "attempts per trace (1..100)")
 	fs.IntVar(&out.concurrency, "concurrency", 0, "maximum concurrent items")
 	fs.IntVar(&out.concurrency, "max-concurrency", 0, "maximum concurrent items")
-	fs.StringVar(&out.traceIDs, "trace-ids", "", "comma-separated trace IDs")
+	fs.StringVar(&out.traceIDs, "trace-ids", "", "comma-separated trace IDs; with --dataset-ids, replay only these members of the datasets, recorded on the experiment as a subset of them")
 	fs.StringVar(&out.datasetIDs, "dataset-ids", "", "comma-separated dataset IDs")
 	fs.StringVar(&out.datasetIDs, "dataset-id", "", "dataset IDs")
 	fs.StringVar(&out.graderIDs, "grader-ids", "", "comma-separated grader IDs")
@@ -155,10 +155,11 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	fs.StringVar(&out.seed, "cases", "", "seed cases JSON or JSONL file")
 	fs.StringVar(&out.executeItem, "execute-item", "", "internal replay assignment")
 	fs.StringVar(&out.fromTrace, "from-trace", "", "trace IDs to reseed")
-	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require approved assertions")
-	fs.StringVar(&out.categoryIDs, "category-ids", "", "with --trace-ids or --dataset-ids: replay only the traces carrying an approved assertion in one of these categories; which assertions are judged stays the same")
+	fs.BoolVar(&out.assertions, "only-with-assertions", false, "require confirmed assertions")
+	fs.BoolVar(&out.onlyDrafts, "only-drafts", false, "replay only traces carrying a draft assertion, one nobody has confirmed or rejected yet; with --dataset-ids the run is recorded as a subset of the dataset")
+	fs.StringVar(&out.categoryIDs, "category-ids", "", "with --trace-ids or --dataset-ids: replay only the traces carrying a confirmed assertion in one of these categories; which assertions are judged stays the same")
 	fs.BoolVar(&out.judge, "judge-assertions", false, "deprecated: judging is on by default")
-	fs.BoolVar(&out.skipJudging, "skip-assertion-judging", false, "don't judge approved assertions on each replay; judging is on by default and costs model calls")
+	fs.BoolVar(&out.skipJudging, "skip-assertion-judging", false, "don't judge confirmed assertions on each replay; judging is on by default and costs model calls")
 	fs.BoolVar(&out.dryRun, "dry-run", false, "resolve inputs without execution")
 	fs.BoolVar(&out.failOnError, "fail-on-error", false, "return an error after printing the result when any replayed item errored; under --dry-run, items whose inputs failed to resolve count")
 	fs.BoolVar(&out.dbBranch, "db-branch", false, "use historical database branches")
@@ -205,7 +206,7 @@ func parseRegistryCLI(registry *ReplayRegistry, args []string, stderr io.Writer)
 	if out.attempts > 100 {
 		return out, fmt.Errorf("bitfab: --attempts supports at most 100")
 	}
-	if (out.visited["trace-ids"] && (out.visited["dataset-ids"] || out.visited["dataset-id"])) || (out.dbBranch && out.noDBBranch) {
+	if out.dbBranch && out.noDBBranch {
 		return out, fmt.Errorf("bitfab: conflicting replay options")
 	}
 	if out.skipExperimentGroup && (out.visited["experiment-group-id"] || out.visited["experiment-group-name"]) {
@@ -333,21 +334,49 @@ func loadRegistryParams(path string, raw []string) (map[string]any, error) {
 
 type registryAssertionNarrowing struct {
 	onlyWithAssertions bool
+	onlyDrafts         bool
 	categoryIDs        []string
 }
 
-func (n registryAssertionNarrowing) narrows() bool {
+func (n registryAssertionNarrowing) narrowsToConfirmed() bool {
 	return n.onlyWithAssertions || n.categoryIDs != nil
 }
 
-// hasApprovedAssertion reports whether a trace carries an assertion a person has
-// approved. GetAssertions returns every state so a reviewer can see drafts, but
-// only an approved assertion is checked on a replay, so narrowing on anything
+func (n registryAssertionNarrowing) narrows() bool {
+	return n.narrowsToConfirmed() || n.onlyDrafts
+}
+
+func (n registryAssertionNarrowing) keeps(assertions []TraceAssertion) bool {
+	if n.narrowsToConfirmed() && !hasConfirmedAssertion(assertions, n.categoryIDs) {
+		return false
+	}
+	return !n.onlyDrafts || hasDraftAssertion(assertions)
+}
+
+func (n registryAssertionNarrowing) noTracesMatched() error {
+	if n.onlyDrafts {
+		return fmt.Errorf("bitfab: No traces with a draft assertion matched this replay selection.")
+	}
+	if n.categoryIDs != nil {
+		return fmt.Errorf("bitfab: No traces with a confirmed assertion in the given categories matched this replay selection.")
+	}
+	return fmt.Errorf("bitfab: no traces with confirmed assertions matched this selection")
+}
+
+func hasDraftAssertion(assertions []TraceAssertion) bool {
+	return slices.ContainsFunc(assertions, func(assertion TraceAssertion) bool {
+		return assertion.Status == AssertionStatusDraft
+	})
+}
+
+// hasConfirmedAssertion reports whether a trace carries an assertion a person has
+// confirmed. GetAssertions returns every status so a reviewer can see drafts, but
+// only a confirmed assertion is checked on a replay, so narrowing on anything
 // else would pick traces the run cannot be judged against. The server applies
 // the same rule when it revalidates the selection.
-func hasApprovedAssertion(assertions []TraceAssertion, categoryIDs []string) bool {
+func hasConfirmedAssertion(assertions []TraceAssertion, categoryIDs []string) bool {
 	for _, assertion := range assertions {
-		if assertion.ApprovalState != ApprovalApproved {
+		if assertion.Status != AssertionStatusConfirmed {
 			continue
 		}
 		if categoryIDs == nil || (assertion.CategoryID != nil && slices.Contains(categoryIDs, *assertion.CategoryID)) {
@@ -373,7 +402,7 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		if err != nil {
 			return nil, err
 		}
-		if result.InheritedFrom == nil && hasApprovedAssertion(result.Assertions, narrowing.categoryIDs) {
+		if result.InheritedFrom == nil && narrowing.keeps(result.Assertions) {
 			selected = append(selected, id)
 			if len(selected) == limit {
 				break
@@ -381,10 +410,7 @@ func boundRegistryTraceIDs(ctx context.Context, client *Client, ids []string, li
 		}
 	}
 	if len(selected) == 0 {
-		if narrowing.categoryIDs != nil {
-			return nil, fmt.Errorf("bitfab: No traces with an approved assertion in the given categories matched this replay selection.")
-		}
-		return nil, fmt.Errorf("bitfab: no traces with approved assertions matched this selection")
+		return nil, narrowing.noTracesMatched()
 	}
 	return selected, nil
 }
@@ -489,19 +515,25 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		if options.TraceIDs != nil && options.DatasetIDs != nil {
 			return nil, fmt.Errorf("bitfab: registry trace_ids and dataset_ids cannot both select a source")
 		}
+		datasetFlagged := parsed.visited["dataset-ids"] || parsed.visited["dataset-id"]
 		if parsed.visited["trace-ids"] {
-			options.TraceIDs, err = registryIDs(parsed.traceIDs)
+			if options.TraceIDs, err = registryIDs(parsed.traceIDs); err != nil {
+				return nil, err
+			}
 			options.DatasetIDs = nil
-		}
-		if parsed.visited["dataset-ids"] || parsed.visited["dataset-id"] {
-			options.DatasetIDs, err = registryIDs(parsed.datasetIDs)
+		} else if datasetFlagged {
 			options.TraceIDs = nil
 		}
-		if err != nil {
-			return nil, err
+		if datasetFlagged {
+			if options.DatasetIDs, err = registryIDs(parsed.datasetIDs); err != nil {
+				return nil, err
+			}
 		}
 		if parsed.visited["only-with-assertions"] {
 			options.OnlyWithAssertions = parsed.assertions
+		}
+		if parsed.visited["only-drafts"] {
+			options.OnlyDrafts = parsed.onlyDrafts
 		}
 		if parsed.visited["category-ids"] {
 			options.CategoryIDs, err = registryIDs(parsed.categoryIDs)
@@ -512,7 +544,7 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 		if options.CategoryIDs != nil && options.TraceIDs == nil && options.DatasetIDs == nil {
 			return nil, fmt.Errorf("bitfab: --category-ids narrows a trace ID or dataset selection. Pass it with --trace-ids or --dataset-ids.")
 		}
-		narrowing := registryAssertionNarrowing{onlyWithAssertions: options.OnlyWithAssertions, categoryIDs: options.CategoryIDs}
+		narrowing := registryAssertionNarrowing{onlyWithAssertions: options.OnlyWithAssertions, onlyDrafts: options.OnlyDrafts, categoryIDs: options.CategoryIDs}
 		if parsed.visited["judge-assertions"] {
 			fmt.Fprintln(stderr, "bitfab: --judge-assertions is deprecated. Assertion judging is on by default; pass --skip-assertion-judging to turn it off.")
 		}
@@ -668,7 +700,11 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	options.OnExperimentStart = func(event ReplayExperimentStart) {
 		fmt.Fprintf(stderr, "[replay] Experiment %s: %s\n", event.ExperimentID, event.ExperimentURL)
 	}
-	fmt.Fprintf(stderr, "[replay] Replaying %q...\n", entry.TraceFunctionKey)
+	selection := ""
+	if options.OnlyDrafts {
+		selection = " traces with a draft assertion from"
+	}
+	fmt.Fprintf(stderr, "[replay] Replaying%s %q...\n", selection, entry.TraceFunctionKey)
 	options.cliFlags = parsed.flags
 	result, err := entry.Client.Replay(ctx, entry.TraceFunctionKey, entry.Function, &options)
 	if err != nil {

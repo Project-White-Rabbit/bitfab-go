@@ -2,6 +2,7 @@ package bitfab
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -497,7 +498,10 @@ type AssertionVerdict struct {
 	Annotation    *string            `json:"annotation"`
 	Evidence      *VerdictEvidence   `json:"evidence"`
 	Confidence    *VerdictConfidence `json:"confidence"`
-	Approved      bool               `json:"approved"`
+	// Confirmed is true when a person set the verdict or confirmed it.
+	Confirmed bool `json:"confirmed"`
+	// Deprecated: Use Confirmed instead.
+	Approved bool `json:"approved"`
 	// Counted is true on the one verdict per assertion that counts toward the
 	// trace's verdict and pass counts. A person's counts over a coding agent's,
 	// and a coding agent's over Bitfab's judge's, which then reads false.
@@ -515,15 +519,18 @@ type AssertionVerdict struct {
 type TraceVerdicts struct {
 	TraceID string `json:"traceId"`
 	// Verdict is nil when the trace has none.
-	Verdict       *Verdict           `json:"verdict"`
-	VerdictStatus VerdictStatus      `json:"verdictStatus"`
-	Annotation    *string            `json:"annotation"`
-	Evidence      *VerdictEvidence   `json:"evidence"`
-	Approved      bool               `json:"approved"`
-	Passed        int                `json:"passed"`
-	Failed        int                `json:"failed"`
-	Abstained     int                `json:"abstained"`
-	Assertions    []AssertionVerdict `json:"assertions"`
+	Verdict       *Verdict         `json:"verdict"`
+	VerdictStatus VerdictStatus    `json:"verdictStatus"`
+	Annotation    *string          `json:"annotation"`
+	Evidence      *VerdictEvidence `json:"evidence"`
+	// Confirmed is true when a person set the verdict or confirmed it.
+	Confirmed bool `json:"confirmed"`
+	// Deprecated: Use Confirmed instead.
+	Approved   bool               `json:"approved"`
+	Passed     int                `json:"passed"`
+	Failed     int                `json:"failed"`
+	Abstained  int                `json:"abstained"`
+	Assertions []AssertionVerdict `json:"assertions"`
 	// Deprecated: Use VerdictStatus instead.
 	LabelStatus LabelStatus `json:"labelStatus"`
 	// Deprecated: Use Verdict instead.
@@ -771,4 +778,47 @@ func (v *VerdictsClient) GetAll(ctx context.Context, traceIDs []string) ([]Trace
 		return nil, err
 	}
 	return response.Verdicts, nil
+}
+
+func confirmedFromWire(confirmed, approved *bool) bool {
+	if confirmed != nil {
+		return *confirmed
+	}
+	return approved != nil && *approved
+}
+
+// UnmarshalJSON reads Confirmed from the confirmed key, or from the legacy
+// approved key when only that is present, and fills the deprecated Approved.
+func (verdict *AssertionVerdict) UnmarshalJSON(data []byte) error {
+	type assertionVerdictFields AssertionVerdict
+	var decoded struct {
+		assertionVerdictFields
+		Confirmed *bool `json:"confirmed"`
+		Approved  *bool `json:"approved"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*verdict = AssertionVerdict(decoded.assertionVerdictFields)
+	verdict.Confirmed = confirmedFromWire(decoded.Confirmed, decoded.Approved)
+	verdict.Approved = verdict.Confirmed
+	return nil
+}
+
+// UnmarshalJSON reads Confirmed from the confirmed key, or from the legacy
+// approved key when only that is present, and fills the deprecated Approved.
+func (verdicts *TraceVerdicts) UnmarshalJSON(data []byte) error {
+	type traceVerdictsFields TraceVerdicts
+	var decoded struct {
+		traceVerdictsFields
+		Confirmed *bool `json:"confirmed"`
+		Approved  *bool `json:"approved"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*verdicts = TraceVerdicts(decoded.traceVerdictsFields)
+	verdicts.Confirmed = confirmedFromWire(decoded.Confirmed, decoded.Approved)
+	verdicts.Approved = verdicts.Confirmed
+	return nil
 }

@@ -131,7 +131,7 @@ type AssertionCode struct {
 
 // TraceAssertion describes what should happen when a trace is replayed.
 type TraceAssertion struct {
-	ApprovalFields
+	StatusFields
 	ID                     string       `json:"id"`
 	TraceID                string       `json:"traceId"`
 	Assertion              string       `json:"assertion"`
@@ -209,7 +209,8 @@ type AssertionRewrite struct {
 	Error *string `json:"error"`
 }
 
-// UnmarshalJSON fills CategoryID and CategoryAssertionID from whichever key the server sent.
+// UnmarshalJSON fills CategoryID and CategoryAssertionID from whichever key the
+// server sent, and the deprecated approval fields from the status fields.
 func (assertion *TraceAssertion) UnmarshalJSON(data []byte) error {
 	type traceAssertionFields TraceAssertion
 	var decoded traceAssertionFields
@@ -220,6 +221,7 @@ func (assertion *TraceAssertion) UnmarshalJSON(data []byte) error {
 		decoded.CategoryID = decoded.CategoryAssertionID
 	}
 	decoded.CategoryAssertionID = decoded.CategoryID
+	decoded.fillLegacy()
 	*assertion = TraceAssertion(decoded)
 	return nil
 }
