@@ -478,6 +478,101 @@ func TestAssertions_HumanNoteOmissionSettingAndClearing(t *testing.T) {
 	}
 }
 
+func TestAssertions_CodeHintsRejectSetAndClear(t *testing.T) {
+	client := NewClient("test-key")
+	hints := "Read output.arrival on book_flight."
+	_, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+		TraceID: "trace",
+		Assertions: []SaveAssertion{{
+			Assertion: "works", CodeHints: &hints, ClearCodeHints: true,
+		}},
+	})
+	if err == nil {
+		t.Fatal("setting and clearing code hints was accepted")
+	}
+}
+
+func TestAssertions_CodeHintsOmissionSettingAndClearing(t *testing.T) {
+	hints := "Read output.arrival on book_flight."
+	empty := ""
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "a1", "assertion": "Arrives early", "codeHints": hints},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	var saved []TraceAssertion
+	for _, assertion := range []SaveAssertion{
+		{Assertion: "Keep the hints"},
+		{Assertion: "Point at the span", CodeHints: &hints},
+		{Assertion: "Drop the hints", ClearCodeHints: true},
+		{Assertion: "Empty the hints", CodeHints: &empty},
+	} {
+		result, err := client.Traces.SaveAssertions(context.Background(), SaveAssertionsParams{
+			TraceID: "trace", Assertions: []SaveAssertion{assertion},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved = result
+	}
+	requests := server.recorded()
+	sent := func(index int) map[string]any {
+		return requests[index].body["updates"].([]any)[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	}
+	if _, ok := sent(0)["codeHints"]; ok {
+		t.Fatalf("omitted code hints sent: %+v", sent(0))
+	}
+	if sent(1)["codeHints"] != hints {
+		t.Fatalf("code hints = %+v", sent(1))
+	}
+	if cleared, ok := sent(2)["codeHints"]; !ok || cleared != nil {
+		t.Fatalf("cleared code hints = %+v", sent(2))
+	}
+	if sent(3)["codeHints"] != "" {
+		t.Fatalf("empty code hints = %+v", sent(3))
+	}
+	if len(saved) != 1 || saved[0].CodeHints == nil || *saved[0].CodeHints != hints {
+		t.Fatalf("saved code hints = %+v", saved)
+	}
+}
+
+func TestAssertions_CodeHintsOnBatchSaveAndRead(t *testing.T) {
+	hints := "Read output.arrival on book_flight."
+	server := newDatasetsServer(t, func(r datasetRequest) any {
+		return map[string]any{"assertions": []any{
+			map[string]any{"id": "a1", "assertion": "Arrives early", "codeHints": hints},
+			map[string]any{"id": "a2", "assertion": "Arrives early", "codeHints": nil},
+		}}
+	})
+	client := NewClient("test-key", WithServiceURL(server.URL))
+	if _, err := client.Traces.SaveAssertionsAll(context.Background(), SaveAssertionsAllParams{
+		Updates: []TraceAssertionsUpdate{
+			{TraceID: "t1", Assertions: []SaveAssertion{{Assertion: "Arrives early", CodeHints: &hints}}},
+			{TraceID: "t2", Assertions: []SaveAssertion{{Assertion: "Arrives early"}}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updates := server.recorded()[0].body["updates"].([]any)
+	first := updates[0].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	second := updates[1].(map[string]any)["assertions"].([]any)[0].(map[string]any)
+	if first["codeHints"] != hints {
+		t.Fatalf("batch code hints = %+v", first)
+	}
+	if _, ok := second["codeHints"]; ok {
+		t.Fatalf("omitted batch code hints sent: %+v", second)
+	}
+	result, err := client.Traces.GetAssertions(context.Background(), "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Assertions) != 2 || result.Assertions[0].CodeHints == nil ||
+		*result.Assertions[0].CodeHints != hints || result.Assertions[1].CodeHints != nil {
+		t.Fatalf("read code hints = %+v", result.Assertions)
+	}
+}
+
 func TestAssertions_AssigneeRejectsSetAndClear(t *testing.T) {
 	client := NewClient("test-key")
 	email := "dana@bitfab.dev"

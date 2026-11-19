@@ -132,11 +132,21 @@ type AssertionCode struct {
 // TraceAssertion describes what should happen when a trace is replayed.
 type TraceAssertion struct {
 	StatusFields
-	ID                     string       `json:"id"`
-	TraceID                string       `json:"traceId"`
-	Assertion              string       `json:"assertion"`
-	PassCriteria           *string      `json:"passCriteria"`
-	FailCriteria           *string      `json:"failCriteria"`
+	ID        string `json:"id"`
+	TraceID   string `json:"traceId"`
+	Assertion string `json:"assertion"`
+	// Deprecated: Write the assertion specific enough to need no criteria,
+	// and put where to look in CodeHints. Still returned, and the LLM judge
+	// still reads it on an assertion that has it.
+	PassCriteria *string `json:"passCriteria"`
+	// Deprecated: Write the assertion specific enough to need no criteria,
+	// and put where to look in CodeHints. Still returned, and the LLM judge
+	// still reads it on an assertion that has it.
+	FailCriteria *string `json:"failCriteria"`
+	// CodeHints holds pointers for whoever writes code to check the
+	// assertion: span names, field paths, which span holds the answer. The
+	// LLM judge never reads them. It is nil when there are none.
+	CodeHints              *string      `json:"codeHints"`
 	TargetOnEvaluatedTrace *TraceTarget `json:"targetOnEvaluatedTrace"`
 	// Kind says who decides the assertion: Bitfab, or your own system for an
 	// external assertion.
@@ -252,7 +262,7 @@ type AssertionVerdictEvidence struct {
 
 // SaveAssertion creates an assertion or updates ID in place. Nil optional fields
 // preserve existing values. Set the corresponding Clear field to send null for
-// the human note, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
+// the human note, code hints, criteria, targets, categories, and assignees. Point a justification to a nil slice to clear it.
 // Set Code to give the assertion code, set ClearCode to remove its code, and
 // leave both unset to keep the current code. Code is run on the trace before
 // saving and refused when it throws, runs past its time limit, or returns
@@ -266,21 +276,38 @@ type AssertionVerdictEvidence struct {
 // assertion, for one Bitfab never judges; a different kind on an edit is
 // refused, so leave it empty there.
 type SaveAssertion struct {
-	ID                          string
-	Assertion                   string
-	HumanNote                   *string
-	PassCriteria                *string
-	FailCriteria                *string
-	TargetOnEvaluatedTrace      *TraceTarget
-	Kind                        AssertionKind
-	Code                        *AssertionCode
-	CodeOff                     *bool
-	CategoryID                  *string
-	Justification               *Justification
-	CategoryJustification       *Justification
-	AssigneeEmail               *string
-	ClearHumanNote              bool
-	ClearPassCriteria           bool
+	ID        string
+	Assertion string
+	HumanNote *string
+	// Deprecated: Write the assertion specific enough to need no criteria,
+	// and put where to look in CodeHints. Still accepted, and the LLM judge
+	// still reads it on an assertion that has it.
+	PassCriteria *string
+	// Deprecated: Write the assertion specific enough to need no criteria,
+	// and put where to look in CodeHints. Still accepted, and the LLM judge
+	// still reads it on an assertion that has it.
+	FailCriteria *string
+	// CodeHints holds pointers for whoever writes code to check the
+	// assertion: span names, field paths, which span holds the answer. The
+	// LLM judge never reads them, so never put a requirement here: it belongs
+	// in Assertion. Leave it nil to keep the current hints, point it to an
+	// empty string or set ClearCodeHints to clear them. Changing only the
+	// hints does not return the assertion to draft.
+	CodeHints              *string
+	TargetOnEvaluatedTrace *TraceTarget
+	Kind                   AssertionKind
+	Code                   *AssertionCode
+	CodeOff                *bool
+	CategoryID             *string
+	Justification          *Justification
+	CategoryJustification  *Justification
+	AssigneeEmail          *string
+	ClearHumanNote         bool
+	// ClearCodeHints sends null to remove the assertion's code hints.
+	ClearCodeHints bool
+	// Deprecated: Pass and fail criteria are deprecated; see PassCriteria.
+	ClearPassCriteria bool
+	// Deprecated: Pass and fail criteria are deprecated; see FailCriteria.
 	ClearFailCriteria           bool
 	ClearTargetOnEvaluatedTrace bool
 	ClearCategoryID             bool
@@ -311,6 +338,14 @@ func (assertion SaveAssertion) payload() (map[string]any, error) {
 		payload["humanNote"] = nil
 	} else if assertion.HumanNote != nil {
 		payload["humanNote"] = *assertion.HumanNote
+	}
+	if assertion.ClearCodeHints {
+		if assertion.CodeHints != nil {
+			return nil, fmt.Errorf("bitfab: cannot set and clear assertion code hints together")
+		}
+		payload["codeHints"] = nil
+	} else if assertion.CodeHints != nil {
+		payload["codeHints"] = *assertion.CodeHints
 	}
 	if assertion.ClearPassCriteria {
 		if assertion.PassCriteria != nil {
