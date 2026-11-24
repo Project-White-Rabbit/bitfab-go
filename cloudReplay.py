@@ -49,6 +49,13 @@ LEGACY_KEY_SECRET_REFERENCE = re.compile(
     + r"\"?[ \t]*:[ \t]*[\"']?\$\{\{\s*secrets\[\s*format\(.*$"
 )
 DEFAULT_SERVICE_URL = "https://bitfab.ai"
+LAUNCH_ID_METADATA_KEY = "bitfab-launch-id"
+AGENT_SESSION_ENV_VARS = (
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "AGENT_SESSION_ID",
+)
+SAFE_AGENT_SESSION_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 OIDC_AUDIENCE = "bitfab-cloud-replay"
 ID_TOKEN_PERMISSION = re.compile(
     r"^[ \t]*(\"?id-token\"?[ \t]*:[ \t]*[\"']?write[\"']?|\"?permissions\"?[ \t]*:[ \t]*[\"']?write-all[\"']?)[ \t]*(#.*)?$",
@@ -899,6 +906,59 @@ def check_arguments(replay):
         )
 
 
+def replay_flag_value(replay, flag):
+    for index, token in enumerate(replay):
+        name, separator, value = token.partition("=")
+        if name != flag:
+            continue
+        if separator:
+            return value
+        if index + 1 < len(replay):
+            return replay[index + 1]
+    return None
+
+
+def launch_metadata_args(execution_id):
+    return ["--metadata", f"{LAUNCH_ID_METADATA_KEY}={execution_id}"]
+
+
+def agent_session_id(replay):
+    explicit = (replay_flag_value(replay, "--agent-session-id") or "").strip()
+    if explicit:
+        return explicit
+    for name in AGENT_SESSION_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value and len(value) <= 255:
+            return value
+    return None
+
+
+def record_agent_session_launch(parsed):
+    session_id = agent_session_id(parsed["replay"])
+    if session_id is None or not SAFE_AGENT_SESSION_ID.fullmatch(session_id):
+        return
+    try:
+        directory = Path.home() / ".bitfab" / "agent-sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        service_url = (
+            os.environ.get("BITFAB_SERVICE_URL", "").strip() or DEFAULT_SERVICE_URL
+        )
+        resumed = replay_flag_value(parsed["replay"], "--resume")
+        line = json.dumps(
+            {
+                "launchId": None if resumed else parsed["id"],
+                "experimentId": resumed,
+                "name": replay_flag_value(parsed["replay"], "--name"),
+                "serviceUrl": service_url.rstrip("/"),
+                "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+        with open(directory / "experiments.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:
+        return
+
+
 def replay_request(root, parsed):
     cwd = Path.cwd().resolve()
     args, files = [], []
@@ -923,6 +983,8 @@ def replay_request(root, parsed):
         else:
             args.append(token)
         index += 1
+    if replay_flag_value(replay, "--resume") is None:
+        args += launch_metadata_args(parsed["id"])
     validate_arguments(args)
     request = {
         "version": REQUEST_VERSION
@@ -1998,6 +2060,8 @@ def run_cli(argv):
                 raise
             if record.get("preview"):
                 return record, None
+            if record["state"] != "prepared":
+                record_agent_session_launch(parsed)
             reason = record.pop("unfollowed", None)
             if reason:
                 report_unfollowed(record, reason)

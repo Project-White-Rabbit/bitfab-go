@@ -692,6 +692,7 @@ func (c *Client) Replay(
 	experimentURL := ""
 	if start.ExperimentID != "" {
 		experimentURL = c.replayURL(start.ExperimentURL)
+		recordAgentSessionExperiment(start.ExperimentID, experimentURL, resolved.Name, c.serviceURL, resolved.AgentSessionID)
 	}
 	result := ReplayResult{
 		Attempts:      resolved.Attempts,
