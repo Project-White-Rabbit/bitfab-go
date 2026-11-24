@@ -41,7 +41,7 @@ func TestCloudShipsHelperInsteadOfReadingRepository(t *testing.T) {
 func TestCloudPassesArgumentsAndTheReplayCommand(t *testing.T) {
 	root := cloudTestRepo(t)
 	mark := filepath.Join(root, "mark.json")
-	helper := []byte("import json, os, sys\nopen(" + strconv.Quote(mark) + ", 'w').write(json.dumps({'args': sys.argv[1:], 'command': json.loads(os.environ['BITFAB_REPLAY_COMMAND']), 'language': os.environ['BITFAB_SDK_LANGUAGE']}))\nprint('replay output')\nraise SystemExit(3)\n")
+	helper := []byte("import { writeFileSync } from \"node:fs\"\nwriteFileSync(" + strconv.Quote(mark) + ", JSON.stringify({ args: process.argv.slice(2), command: JSON.parse(process.env.BITFAB_REPLAY_COMMAND), language: process.env.BITFAB_SDK_LANGUAGE }))\nconsole.log(\"replay output\")\nprocess.exit(3)\n")
 	args := []string{"--cloud", "pipeline", "--trace-ids", "id", "--fail-on-error"}
 	var output bytes.Buffer
 	err := runCloudReplayHelper(context.Background(), helper, args, &output, io.Discard, nil)
@@ -128,7 +128,7 @@ func TestCheckArgumentsParsesReplayOptionsWithoutRunning(t *testing.T) {
 func TestCloudChecksReplayOptionsInThisProcessBeforeHandingOff(t *testing.T) {
 	root := cloudTestRepo(t)
 	mark := filepath.Join(root, "mark.json")
-	helper := []byte("import json, os, sys\nif sys.argv[1] == '--replay-arguments':\n    print(json.dumps(sys.argv[2:-1]))\n    raise SystemExit(0)\nopen(" + strconv.Quote(mark) + ", 'w').write(os.environ.get('BITFAB_REPLAY_ARGUMENTS_CHECKED', ''))\n")
+	helper := []byte("import { writeFileSync } from \"node:fs\"\nif (process.argv[2] === \"--replay-arguments\") {\n  console.log(JSON.stringify(process.argv.slice(3, -1)))\n  process.exit(0)\n}\nwriteFileSync(" + strconv.Quote(mark) + ", process.env.BITFAB_REPLAY_ARGUMENTS_CHECKED ?? \"\")\n")
 	args := []string{"pipeline", "--trace-ids", "t1", "--cloud"}
 	var checked []string
 	refused := errors.New("flag provided but not defined: -resume")
@@ -162,6 +162,15 @@ func TestCloudRefusesABadOptionWithTheLocalError(t *testing.T) {
 	_, err := RunReplayCLI(context.Background(), registry, []string{"pipeline", "--resume", "e1", "--cloud"}, io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -resume") {
 		t.Fatalf("expected the local parse error, got %v", err)
+	}
+}
+
+func TestCloudSaysNodeIsNeededWhenItIsMissing(t *testing.T) {
+	root := cloudTestRepo(t)
+	t.Setenv("PATH", root)
+	err := runCloudReplayHelper(context.Background(), []byte(""), []string{"--cloud-status", "id"}, io.Discard, io.Discard, nil)
+	if err == nil || !strings.Contains(err.Error(), "needs Node.js 18+ on PATH as node") {
+		t.Fatalf("expected the Node.js requirement, got %v", err)
 	}
 }
 
