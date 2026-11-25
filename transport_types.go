@@ -5,8 +5,8 @@ import "time"
 type traceOperation string
 
 const (
-	operationSpan          traceOperation = "external_span"
-	operationTrace         traceOperation = "external_trace"
+	operationSpan          traceOperation = "span"
+	operationTrace         traceOperation = "trace"
 	operationInternalTrace traceOperation = "internal_trace"
 )
 

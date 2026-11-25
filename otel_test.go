@@ -201,7 +201,7 @@ func TestOtel_CarrierNameFallbacks(t *testing.T) {
 			name:      "no key at all falls back to the operation",
 			operation: operationTrace,
 			payload:   map[string]any{},
-			want:      "bitfab.external_trace",
+			want:      "bitfab.trace",
 		},
 	}
 
@@ -819,7 +819,7 @@ func TestOtel_EveryRequestIsMarkedSafeToQueueWhateverItHolds(t *testing.T) {
 		sent = append(sent, sentRequest{operations: operations, headers: request.prepared.headers})
 	}
 	want := []sentRequest{{
-		operations: []string{"external_span", "external_trace", "internal_trace", "external_span"},
+		operations: []string{"span", "trace", "internal_trace", "span"},
 		headers:    map[string]string{"X-Bitfab-Async-Ok": "1"},
 	}}
 	if !reflect.DeepEqual(sent, want) {
