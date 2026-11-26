@@ -20085,7 +20085,7 @@ function validateEnvironment(values) {
 function workflowEnvironmentConflicts(root, values) {
   const workflow = runningWorkflow(root);
   const mapped = existsSync2(workflow) ? workflowSecrets(readFileSync(workflow, "utf8")) : {};
-  const conflicts = Object.keys(values).filter((name) => name in mapped).sort();
+  const conflicts = Object.keys(values).filter((name) => Object.hasOwn(mapped, name)).sort();
   if (conflicts.length > 0) {
     throw new ValueError(
       `The workflow already reads ${conflicts.join(", ")} from a GitHub secret, so a replay cannot set it; update the secret with bitfab-replay --cloud-secrets`
@@ -20881,7 +20881,16 @@ async function bitfabApi(client, location, { method = "POST", payload } = {}) {
     throw error;
   }
   const text = body.toString("utf8");
-  return text.trim() ? parseJson(text) : {};
+  if (!text.trim()) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new CommandError(
+      `Bitfab ${method} ${location} returned a response that is not JSON`
+    );
+  }
 }
 async function issueKeyToken(root, record, text) {
   const shared = "so the run uses the workflow's BITFAB_API_KEY secret";
@@ -23182,11 +23191,6 @@ import {
   writeFileSync as writeFileSync3
 } from "node:fs";
 import path6 from "node:path";
-var NODE_SETUP = {
-  uses: ACTIONS.node,
-  with: { "node-version": "lts/*" }
-};
-var NODE_ON_THE_RUNNER = "Cloud replay runs with Node.js 18+ on the runner. GitHub-hosted runners include it; on a self-hosted runner or in a container job without it, add an actions/setup-node step before the step that runs --cloud-execute";
 var PNPM_FOR_LOCKFILE = {
   "9": "10",
   "6": "8",
@@ -23951,9 +23955,6 @@ async function updateWorkflow(root, workflowPath, { removeOldKeySecrets = false 
       "Already set up. Edit the workflow directly to change its install steps, secrets, runner, or Environment"
     );
   }
-  if (!text.includes("actions/setup-node@")) {
-    steps.push(NODE_ON_THE_RUNNER);
-  }
   const [leftovers, leftoverSteps] = await leftoverKeySecretReport(
     root,
     text,
@@ -24042,8 +24043,7 @@ async function initialize(argv, name = "--cloud-init") {
   if (project === void 0) {
     throw new ValueError(`'${language}'`);
   }
-  const [projectSteps, detected] = project(root, start);
-  const steps = language === "typescript" ? projectSteps : [NODE_SETUP, ...projectSteps];
+  const [steps, detected] = project(root, start);
   const run = args.run || detected;
   if (!run) {
     throw new ValueError(

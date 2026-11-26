@@ -453,6 +453,9 @@ func RunReplayCLI(ctx context.Context, registry *ReplayRegistry, args []string, 
 	if len(args) > 0 && args[0] == checkArgumentsFlag {
 		return nil, checkRegistryCLI(registry, args[1:], stderr)
 	}
+	if isCloudExecuteCommand(args) {
+		return nil, runNativeCloudExecute(ctx, stdout, stderr)
+	}
 	if isCloudReplayCommand(args) {
 		var check func([]string) error
 		if registry != nil {

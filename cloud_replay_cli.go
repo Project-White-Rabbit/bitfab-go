@@ -25,9 +25,23 @@ func isCloudReplayCommand(args []string) bool {
 	return false
 }
 
+func isCloudExecuteCommand(args []string) bool {
+	return len(args) == 1 && args[0] == "--cloud-execute"
+}
+
+func runNativeCloudExecute(ctx context.Context, stdout, stderr io.Writer) error {
+	if code := runCloudExecute(ctx, stdout, stderr); code != 0 {
+		return &cloudReplayExitError{code: code}
+	}
+	return nil
+}
+
 func RunCloudReplayCLI(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) > 0 && args[0] == checkArgumentsFlag {
 		return errors.New("bitfab: cloud replay checks replay options with RunReplayCLI and your registry; route arguments without --cloud to RunReplayCLI, and only --cloud commands to RunCloudReplayCLI")
+	}
+	if isCloudExecuteCommand(args) {
+		return runNativeCloudExecute(ctx, stdout, stderr)
 	}
 	return runCloudReplayHelper(ctx, cloudReplayHelper, args, stdout, stderr, nil)
 }

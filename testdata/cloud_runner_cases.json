@@ -1,0 +1,1766 @@
+{
+  "cases": [
+    {
+      "name": "a passing replay passes the job and summarizes its items",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "starting\n{\"experimentId\": \"e1\", \"items\": [{\"originalTraceId\": \"t1\", \"result\": 1, \"originalOutput\": 1}, {\"originalTraceId\": \"t2\", \"result\": 2, \"originalOutput\": 3}]}\n",
+        "exitCode": 0
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": ["bitfab-replay-output-begin", "bitfab-replay-output-end"],
+        "notStdout": ["Replay exited"],
+        "result": {
+          "exitCode": 0
+        },
+        "resultStdoutJson": {
+          "cloudSummary": true,
+          "experimentId": "e1",
+          "counts": {
+            "replayed": 2,
+            "carriedOver": 0,
+            "same": 1,
+            "changed": 1,
+            "matchedExpected": 0,
+            "missedExpected": 0,
+            "errored": 0
+          },
+          "erroredItems": [],
+          "exitCode": 0
+        },
+        "summary": [
+          "### Bitfab replay",
+          "Exit code: 0",
+          "Replayed: 2, same: 1, changed: 1, errored: 0"
+        ],
+        "replayed": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "cwd": ".",
+          "env": {
+            "BITFAB_REPLAY_EXECUTION_TARGET": "hosted",
+            "BITFAB_CODE_CHANGE_PATH": null
+          },
+          "codeChange": null
+        }
+      }
+    },
+    {
+      "name": "a failing replay fails the job with its exit code",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{}\n",
+        "stderr": "boom\n",
+        "exitCode": 3
+      },
+      "expect": {
+        "exitCode": 3,
+        "stdout": [
+          "boom",
+          "::warning title=Bitfab replay::Replay exited 3, so this job exits with it too"
+        ],
+        "result": {
+          "exitCode": 3,
+          "stdout": "{}\n"
+        },
+        "summary": ["Exit code: 3"]
+      }
+    },
+    {
+      "name": "errored items are counted and listed in the step summary",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{\"items\": [{\"originalTraceId\": \"t1\", \"error\": {\"message\": \"rate   limited\"}, \"attempt\": 2}, {\"traceId\": \"t2\", \"result\": 1, \"originalOutput\": 1, \"carriedOver\": true}, {\"traceId\": \"t3\", \"result\": \"x\", \"originalOutput\": \"x\", \"ingestionType\": \"seeded\"}]}\n",
+        "exitCode": 1
+      },
+      "expect": {
+        "exitCode": 1,
+        "resultStdoutJson": {
+          "cloudSummary": true,
+          "counts": {
+            "replayed": 2,
+            "carriedOver": 1,
+            "same": 0,
+            "changed": 0,
+            "matchedExpected": 1,
+            "missedExpected": 0,
+            "errored": 1
+          },
+          "erroredItems": [
+            {
+              "originalTraceId": "t1",
+              "error": "rate limited",
+              "attempt": 2
+            }
+          ],
+          "exitCode": 1
+        },
+        "summary": [
+          "Replayed: 2, same: 0, changed: 0, errored: 1",
+          "#### Errored items",
+          "- `trace t1: rate limited`"
+        ]
+      }
+    },
+    {
+      "name": "output that ends in no item list is carried as it is",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "plain text\nmore text\n",
+        "exitCode": 0
+      },
+      "expect": {
+        "exitCode": 0,
+        "result": {
+          "exitCode": 0,
+          "stdout": "plain text\nmore text\n"
+        }
+      }
+    },
+    {
+      "name": "full output keeps the item list as the replay printed it",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "fullOutput": true
+        }
+      },
+      "replay": {
+        "stdout": "{\"items\": []}\n",
+        "exitCode": 0
+      },
+      "expect": {
+        "exitCode": 0,
+        "result": {
+          "exitCode": 0,
+          "stdout": "{\"items\": []}\n"
+        }
+      }
+    },
+    {
+      "name": "progress lines lose their item payloads unless full output is asked for",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stderr": "@@bitfab:progress {\"item\": {\"traceId\": \"t1\", \"input\": \"big\", \"result\": \"big\", \"status\": \"done\"}}\n[replay] Experiment 33333333-3333-4333-8333-333333333333: running\n",
+        "stdout": "{}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "@@bitfab:progress {\"item\":{\"traceId\":\"t1\",\"status\":\"done\"}}",
+          "[replay] Experiment 33333333-3333-4333-8333-333333333333: running"
+        ],
+        "notStdout": ["\"input\""]
+      }
+    },
+    {
+      "name": "full output forwards progress lines whole",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "fullOutput": true
+        }
+      },
+      "replay": {
+        "stderr": "@@bitfab:progress {\"item\": {\"traceId\": \"t1\", \"input\": \"big\"}}\n",
+        "stdout": "{}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "@@bitfab:progress {\"item\": {\"traceId\": \"t1\", \"input\": \"big\"}}"
+        ]
+      }
+    },
+    {
+      "name": "the request's environment reaches the replay and the git token does not",
+      "env": {
+        "BITFAB_REPLAY_GIT_TOKEN": "ghs_secret"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "env": {
+            "FEATURE_FLAG": "on",
+            "MODEL": "small"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": ["Setting FEATURE_FLAG, MODEL from the request"],
+        "replayed": {
+          "env": {
+            "FEATURE_FLAG": "on",
+            "MODEL": "small",
+            "BITFAB_REPLAY_GIT_TOKEN": null
+          }
+        }
+      }
+    },
+    {
+      "name": "the replay runs in the request's folder",
+      "files": {
+        "web/package.json": "{}\n"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "cwd": "web"
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "cwd": "web"
+        }
+      }
+    },
+    {
+      "name": "a base64 request from an older sdk with check adds dry run",
+      "inputs": {
+        "execution_id": "11111111-1111-4111-8111-111111111111",
+        "requestBase64": {
+          "version": 2,
+          "id": "11111111-1111-4111-8111-111111111111",
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "check": true
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "result": {
+          "executionId": "11111111-1111-4111-8111-111111111111"
+        },
+        "replayed": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip",
+            "--dry-run"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a dry run runs the check command first",
+      "env": {
+        "BITFAB_REPLAY_CHECK": "sh -c 'echo checked-bucket'"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip",
+            "--dry-run"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "Running BITFAB_REPLAY_CHECK: sh -c 'echo checked-bucket'",
+          "checked-bucket"
+        ]
+      }
+    },
+    {
+      "name": "a failing check command stops the run before the replay",
+      "env": {
+        "BITFAB_REPLAY_CHECK": "sh -c 'exit 4'"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip",
+            "--dry-run"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: BITFAB_REPLAY_CHECK exited 4; its output is above"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a run that is not the first attempt is refused",
+      "env": {
+        "GITHUB_RUN_ATTEMPT": "2"
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Submit a new replay instead of rerunning an Actions job"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a checkout of another commit is refused",
+      "env": {
+        "GITHUB_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Runner checkout does not match the dispatched commit"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched run with no request is refused",
+      "inputs": {},
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: A replay of dev takes its request from the workflow_dispatch request input, and this run has none"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched run with a dash for its request is refused",
+      "inputs": {
+        "requestText": "-"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "takes its request from the workflow_dispatch request input"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request that is not json is refused",
+      "inputs": {
+        "requestText": "not json!"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The request input is neither JSON nor base64-encoded JSON"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request that is not an object is refused",
+      "inputs": {
+        "requestText": "[1]"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: The request input must be a JSON object"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request version that is too old is refused",
+      "inputs": {
+        "request": {
+          "version": 1,
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Request version 1 is not supported; send version 4, or leave version out"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request from a newer sdk is refused",
+      "inputs": {
+        "request": {
+          "version": 5,
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: This replay was submitted by a newer SDK than the one dev installs; the request is version 5 and this SDK reads up to 4"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request id that is not a uuid is refused",
+      "inputs": {
+        "request": {
+          "id": "x",
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: The request id must be a UUID"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request id that differs from the execution id input is refused",
+      "inputs": {
+        "execution_id": "22222222-2222-4222-8222-222222222222",
+        "request": {
+          "id": "11111111-1111-4111-8111-111111111111",
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The request id does not match the execution_id input"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "replay arguments that are not a list of strings are refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", 1]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: Replay arguments must be a list of strings"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a replay argument with a line break is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "a\nb"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: Replay options must be single-line values"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a replay that would dispatch again is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--cloud"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The runner replays locally and never dispatches again"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a timeout outside the allowed range is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline"],
+          "timeoutMinutes": 0
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: timeoutMinutes must be 1..7200"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a folder outside the repository is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "cwd": "../outside"
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: Paths must stay inside the repository"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched working tree code change is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "working-tree"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: A dispatched replay runs dev as it is on GitHub, with no snapshot of a checkout, so --code-change working-tree has nothing to compare against there"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched last branch code change is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change=last-branch"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "so --code-change last-branch has nothing to compare against there"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched ref code change without a base is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "ref"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: A dispatched replay runs dev as it is on GitHub, so --code-change ref needs --code-change-base naming a branch or commit SHA on GitHub to fetch there"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment value that looks like a secret is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "API_TOKEN": "x"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: API_TOKEN looks like a secret, and --cloud-env values are stored in the snapshot commit on GitHub"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment value the runner owns is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "GITHUB_SHA": "x"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: GITHUB_SHA belongs to GitHub Actions or the cloud runner and cannot be set per replay"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment name that is not a variable name is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "A-B": "x"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: 'A-B' is not an environment variable name; use letters, digits, and underscores"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment value with a password in a url is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "DATABASE_URL": "postgres://user:hunter2@db/app"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: DATABASE_URL holds a URL with a password"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment value with a line break is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "NOTE": "a\nb"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: NOTE must be a single-line value"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request environment that is not names to strings is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "COUNT": 1
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Replay environment must map names to string values"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a request cannot set a value the workflow reads from a secret",
+      "files": {
+        ".github/workflows/bitfab-replay.yml": "jobs:\n  replay:\n    steps:\n      - run: bitfab-replay --cloud-execute\n        env:\n          FEATURE_FLAG: ${{ secrets.FEATURE_FLAG }}\n"
+      },
+      "env": {
+        "FEATURE_FLAG": "set"
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"],
+          "env": {
+            "FEATURE_FLAG": "on"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The workflow already reads FEATURE_FLAG from a GitHub secret, so a replay cannot set it; update the secret with bitfab-replay --cloud-secrets"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "an empty secret the workflow maps stops the run",
+      "files": {
+        ".github/workflows/bitfab-replay.yml": "jobs:\n  replay:\n    steps:\n      - run: bitfab-replay --cloud-execute\n        env:\n          OPENAI_API_KEY: \"${{ secrets['BITFAB_CLOUD_OPENAI_API_KEY'] }}\"\n"
+      },
+      "env": {
+        "OPENAI_API_KEY": ""
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: These replay environment variables are empty on the runner: OPENAI_API_KEY (secret BITFAB_CLOUD_OPENAI_API_KEY)"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a multi line secret with a short line is warned about",
+      "files": {
+        ".github/workflows/bitfab-replay.yml": "jobs:\n  replay:\n    steps:\n      - run: bitfab-replay --cloud-execute\n        env:\n          SERVICE_JSON: ${{ secrets.SERVICE_JSON }}\n"
+      },
+      "env": {
+        "SERVICE_JSON": "{\n  \"a\": 1\n}"
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::SERVICE_JSON has a line of three characters or fewer"
+        ]
+      }
+    },
+    {
+      "name": "a workflow without id token permission is warned about",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::This workflow does not grant id-token: write"
+        ]
+      }
+    },
+    {
+      "name": "a snapshot replays its working tree change on the branch it was taken from",
+      "files": {
+        "a.txt": "one\n",
+        "gone.txt": "bye\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "branch": "feature/x",
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "working-tree",
+            "--name",
+            "Try a shorter prompt"
+          ]
+        },
+        "files": {
+          "a.txt": "two\n",
+          "b.txt": "new\n"
+        },
+        "remove": ["gone.txt"]
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "branch": "feature/x",
+          "codeChange": {
+            "description": "Try a shorter prompt (3 files changed uncommitted (vs HEAD))",
+            "files": [
+              {
+                "path": "a.txt",
+                "before": "one\n",
+                "after": "two\n"
+              },
+              {
+                "path": "b.txt",
+                "before": "",
+                "after": "new\n"
+              },
+              {
+                "path": "gone.txt",
+                "before": "bye\n",
+                "after": ""
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot without a name describes its change by the commit it was taken on",
+      "files": {
+        "a.txt": "one\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 3,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "working-tree"]
+        },
+        "files": {
+          "a.txt": "two\n"
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "description": "Initial commit (1 file changed uncommitted (vs HEAD))",
+            "files": [
+              {
+                "path": "a.txt",
+                "before": "one\n",
+                "after": "two\n"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot with no changed files hands over an empty change",
+      "files": {
+        "a.txt": "one\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "working-tree"]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "files": []
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot leaves skip to the sdk",
+      "files": {
+        "a.txt": "one\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "skip"]
+        },
+        "files": {
+          "a.txt": "two\n"
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": null
+        }
+      }
+    },
+    {
+      "name": "a snapshot's last branch change compares against the base it carries",
+      "files": {
+        "a.txt": "one\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "last-branch"],
+          "codeChangeBase": {
+            "sha": "BASE",
+            "ref": "main"
+          }
+        },
+        "files": {
+          "a.txt": "two\n"
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "description": "Initial commit (1 file changed vs main)",
+            "files": [
+              {
+                "path": "a.txt",
+                "before": "one\n",
+                "after": "two\n"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot's branch change with a base it cannot trust hands over an empty change",
+      "files": {
+        "a.txt": "one\n"
+      },
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "default-branch"],
+          "codeChangeBase": {
+            "sha": "not-a-sha",
+            "ref": "main"
+          }
+        },
+        "files": {
+          "a.txt": "two\n"
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "files": []
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot on a branch other than the one its request names is refused",
+      "snapshot": {
+        "ref": "bitfab-replay/22222222-2222-4222-8222-222222222222",
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The runner replays only the snapshot branch its request names; start replays with bitfab-replay --cloud"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a snapshot from a different sdk is refused",
+      "snapshot": {
+        "request": {
+          "version": 2,
+          "cwd": ".",
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: This replay was submitted by a different SDK than the one the snapshot installs; match the SDK you run locally to the one in the lockfile"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a snapshot from a newer sdk is refused",
+      "snapshot": {
+        "request": {
+          "version": 9,
+          "cwd": ".",
+          "args": ["pipeline"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: This replay was submitted by a newer SDK than the one the snapshot installs"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a snapshot that would dispatch again is refused",
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "cwd": ".",
+          "args": ["pipeline", "--cloud-ref", "dev"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The runner replays locally and never dispatches again"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched default branch change is fetched and compared",
+      "origin": true,
+      "files": {
+        "a.txt": "one\n"
+      },
+      "branchFiles": {
+        "a.txt": "two\n"
+      },
+      "event": {
+        "repository": {
+          "default_branch": "main"
+        }
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "default-branch"]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": ["Fetching main to record the code change against it"],
+        "replayed": {
+          "codeChange": {
+            "description": "Change on dev (1 file changed vs main)",
+            "files": [
+              {
+                "path": "a.txt",
+                "before": "one\n",
+                "after": "two\n"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a dispatched ref change is fetched and compared",
+      "origin": true,
+      "files": {
+        "a.txt": "one\n"
+      },
+      "branchFiles": {
+        "a.txt": "two\n"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--code-change",
+            "ref",
+            "--code-change-base",
+            "main",
+            "--name",
+            "Shorter prompt"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "description": "Shorter prompt (1 file changed vs main)",
+            "files": [
+              {
+                "path": "a.txt",
+                "before": "one\n",
+                "after": "two\n"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "a dispatched default branch change on the default branch records no files",
+      "origin": true,
+      "files": {
+        "a.txt": "one\n"
+      },
+      "event": {
+        "repository": {
+          "default_branch": "main"
+        }
+      },
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "default-branch"]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "codeChange": {
+            "files": []
+          }
+        }
+      }
+    },
+    {
+      "name": "a dispatched default branch change with no default branch in the event is refused",
+      "inputs": {
+        "request": {
+          "args": ["pipeline", "--code-change", "default-branch"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: The run's event names no default branch, so --code-change default-branch has nothing to compare against; pass --code-change ref with --code-change-base"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched ref change whose base cannot be fetched is refused",
+      "origin": true,
+      "files": {
+        "a.txt": "one\n"
+      },
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--code-change",
+            "ref",
+            "--code-change-base",
+            "no-such-branch"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Could not fetch no-such-branch from origin to compare against (",
+          "the workflow passes no BITFAB_REPLAY_GIT_TOKEN to fetch it with, so run bitfab-replay --cloud-update and commit the workflow it updates, or pass --code-change skip"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a dispatched manual change reaches the sdk unchanged",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--code-change",
+            "manual",
+            "--code-change-file",
+            "change.json"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "args": [
+            "pipeline",
+            "--code-change",
+            "manual",
+            "--code-change-file",
+            "change.json"
+          ],
+          "codeChange": null
+        }
+      }
+    },
+    {
+      "name": "a replay started with a key token runs as the person who started it",
+      "api": {},
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "timeoutMinutes": 5
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::add-mask::bf_temporary",
+          "Replaying as the person who started this run, with a key that is turned off when the replay ends"
+        ],
+        "notStdout": ["does not grant id-token"],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": "bf_temporary"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/token",
+            "authorization": "Bearer bearer-test",
+            "query": "audience=bitfab-cloud-replay"
+          },
+          {
+            "method": "POST",
+            "path": "/api/sdk/replay/cloudKey/redeem",
+            "authorization": null,
+            "body": {
+              "token": "bfcr_token",
+              "oidcToken": "oidc-token",
+              "minutes": 5
+            }
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/sdk/replay/cloudKey",
+            "authorization": "Bearer bf_temporary"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a key token bitfab refuses falls back to the workflow's key",
+      "api": {
+        "POST /api/sdk/replay/cloudKey/redeem": {
+          "status": 403,
+          "body": {
+            "error": "expired"
+          }
+        }
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::Bitfab POST replay/cloudKey/redeem failed (HTTP 403): expired, so this run uses the workflow's BITFAB_API_KEY secret"
+        ],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": null
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/token"
+          },
+          {
+            "method": "POST",
+            "path": "/api/sdk/replay/cloudKey/redeem",
+            "body": {
+              "token": "bfcr_token",
+              "oidcToken": "oidc-token"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a key token bitfab answers with no key falls back to the workflow's key",
+      "api": {
+        "POST /api/sdk/replay/cloudKey/redeem": {
+          "status": 200,
+          "body": {}
+        }
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::Bitfab returned no key for the replay token, so this run uses the workflow's BITFAB_API_KEY secret"
+        ],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": null
+          }
+        }
+      }
+    },
+    {
+      "name": "a key token without id token permission falls back to the workflow's key",
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::The workflow does not grant id-token: write, so this run cannot prove to Bitfab which run it is; run bitfab-replay --cloud-update to add it, so this run uses the workflow's BITFAB_API_KEY secret"
+        ],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": null
+          }
+        }
+      }
+    },
+    {
+      "name": "a key the workflow still sets from a secret is used and warned about",
+      "env": {
+        "BITFAB_REPLAY_BITFAB_API_KEY": "bf_old"
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::This workflow still sets BITFAB_REPLAY_BITFAB_API_KEY from a secret named by the run's inputs",
+          "Replaying with the Bitfab API key of the person who started this run"
+        ],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": "bf_old"
+          }
+        }
+      }
+    },
+    {
+      "name": "a snapshot request with no folder is refused",
+      "snapshot": {
+        "request": {
+          "version": 4,
+          "args": ["pipeline", "--code-change", "skip"]
+        }
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: Expected a repository-relative path"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "a bitfab answer that is not json falls back to the workflow's key",
+      "api": {
+        "POST /api/sdk/replay/cloudKey/redeem": {
+          "status": 200,
+          "raw": "<html>maintenance</html>"
+        }
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::Bitfab POST replay/cloudKey/redeem returned a response that is not JSON, so this run uses the workflow's BITFAB_API_KEY secret"
+        ],
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": null
+          }
+        }
+      }
+    },
+    {
+      "name": "a key turn off answer that is not json still writes the result",
+      "api": {
+        "DELETE /api/sdk/replay/cloudKey": {
+          "status": 200,
+          "raw": "<html>maintenance</html>"
+        }
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{}\n",
+        "exitCode": 0
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "::warning title=Bitfab replay::Could not turn off this replay's key (Bitfab DELETE replay/cloudKey returned a response that is not JSON); it expires on its own 30 minutes after the replay's timeout"
+        ],
+        "result": {
+          "exitCode": 0,
+          "stdout": "{}\n"
+        },
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": "bf_temporary"
+          }
+        }
+      }
+    },
+    {
+      "name": "whole numbers written with a decimal point are accepted",
+      "inputs": {
+        "requestText": "{\"version\": 4.0, \"timeoutMinutes\": 5.0, \"args\": [\"pipeline\", \"--trace-ids\", \"22222222-2222-4222-8222-222222222222\", \"--code-change\", \"skip\"]}"
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      }
+    },
+    {
+      "name": "an empty list for the request id is refused",
+      "inputs": {
+        "requestText": "{\"id\": [], \"args\": [\"pipeline\", \"--trace-ids\", \"22222222-2222-4222-8222-222222222222\", \"--code-change\", \"skip\"]}"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: The request id must be a UUID"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "an empty list for the request environment is refused",
+      "inputs": {
+        "requestText": "{\"env\": [], \"args\": [\"pipeline\", \"--trace-ids\", \"22222222-2222-4222-8222-222222222222\", \"--code-change\", \"skip\"]}"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": [
+          "Cloud replay: Replay environment must map names to string values"
+        ],
+        "replayed": false
+      }
+    },
+    {
+      "name": "an empty object for the request folder is refused",
+      "inputs": {
+        "requestText": "{\"cwd\": {}, \"args\": [\"pipeline\", \"--trace-ids\", \"22222222-2222-4222-8222-222222222222\", \"--code-change\", \"skip\"]}"
+      },
+      "expect": {
+        "exitCode": 1,
+        "stderr": ["Cloud replay: Expected a repository-relative path"],
+        "replayed": false
+      }
+    },
+    {
+      "name": "an environment name every javascript object has can be set",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ],
+          "env": {
+            "valueOf": "x"
+          }
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": ["Setting valueOf from the request"],
+        "replayed": {
+          "env": {
+            "valueOf": "x"
+          }
+        }
+      }
+    },
+    {
+      "name": "a result equal to its original up to number formatting and key order counts as same",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{\"items\": [{\"originalTraceId\": \"t1\", \"result\": {\"x\": 1.0, \"2\": \"a\", \"1\": \"b\"}, \"originalOutput\": {\"1\": \"b\", \"x\": 1, \"2\": \"a\"}}, {\"originalTraceId\": \"t2\", \"result\": [1.5, true], \"originalOutput\": [1.50, false]}]}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "summary": ["Replayed: 2, same: 1, changed: 1, errored: 0"]
+      }
+    },
+    {
+      "name": "a number too large for json in the item list is read as null",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{\"items\": [{\"originalTraceId\": \"t1\", \"result\": 1e400, \"originalOutput\": 1}, {\"originalTraceId\": \"t2\", \"result\": 1e400, \"originalOutput\": null}]}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "result": {
+          "exitCode": 0
+        },
+        "summary": ["Replayed: 2, same: 1, changed: 1, errored: 0"]
+      }
+    },
+    {
+      "name": "a number too large for json in a progress line is forwarded as null",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stderr": "@@bitfab:progress {\"item\": {\"n\": 1e400, \"input\": 1}}\nafter the progress line\n",
+        "stdout": "{}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "stdout": [
+          "@@bitfab:progress {\"item\":{\"n\":null}}",
+          "after the progress line"
+        ],
+        "result": {
+          "exitCode": 0
+        }
+      }
+    },
+    {
+      "name": "a lone surrogate in the item list still gets a summary",
+      "inputs": {
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "replay": {
+        "stdout": "{\"items\": [{\"originalTraceId\": \"t1\", \"result\": \"\\ud83d\", \"originalOutput\": \"a\"}]}\n"
+      },
+      "expect": {
+        "exitCode": 0,
+        "summary": ["Replayed: 1, same: 0, changed: 1, errored: 0"]
+      }
+    },
+    {
+      "name": "a redirect on the key exchange is followed with the same request",
+      "api": {
+        "POST /api/sdk/replay/cloudKey/redeem": {
+          "status": 308,
+          "location": "/api/sdk/replay/cloudKey/redeem-moved",
+          "body": {}
+        },
+        "POST /api/sdk/replay/cloudKey/redeem-moved": {
+          "status": 200,
+          "body": {
+            "apiKey": "bf_temporary"
+          }
+        }
+      },
+      "inputs": {
+        "key_id": "bfcr_token",
+        "request": {
+          "args": [
+            "pipeline",
+            "--trace-ids",
+            "22222222-2222-4222-8222-222222222222",
+            "--code-change",
+            "skip"
+          ]
+        }
+      },
+      "expect": {
+        "exitCode": 0,
+        "replayed": {
+          "env": {
+            "BITFAB_REPLAY_BITFAB_API_KEY": "bf_temporary"
+          }
+        },
+        "requests": [
+          {
+            "method": "GET",
+            "path": "/token"
+          },
+          {
+            "method": "POST",
+            "path": "/api/sdk/replay/cloudKey/redeem",
+            "body": {
+              "token": "bfcr_token",
+              "oidcToken": "oidc-token"
+            }
+          },
+          {
+            "method": "POST",
+            "path": "/api/sdk/replay/cloudKey/redeem-moved",
+            "body": {
+              "token": "bfcr_token",
+              "oidcToken": "oidc-token"
+            }
+          },
+          {
+            "method": "DELETE",
+            "path": "/api/sdk/replay/cloudKey",
+            "authorization": "Bearer bf_temporary"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -180,3 +180,108 @@ func TestCloudEntryPointRefusesTheOptionCheckInsteadOfLooping(t *testing.T) {
 		t.Fatalf("expected an immediate routing error, got %v", err)
 	}
 }
+
+func dispatchCloudExecute(t *testing.T, request map[string]any) (string, string, error) {
+	t.Helper()
+	prepareCloudExecute(t, request)
+	var stdout, stderr bytes.Buffer
+	err := RunCloudReplayCLI(context.Background(), []string{"--cloud-execute"}, &stdout, &stderr)
+	return stdout.String(), stderr.String(), err
+}
+
+func prepareCloudExecute(t *testing.T, request map[string]any) {
+	t.Helper()
+	root := cloudTestRepo(t)
+	if out, err := exec.Command("git", "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "init").CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v", out, err)
+	}
+	head, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := json.Marshal(map[string]any{"inputs": map[string]string{"request": string(encoded)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join(root, "event.json")
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_RUN_ATTEMPT", "1")
+	t.Setenv("GITHUB_SHA", strings.TrimSpace(string(head)))
+	t.Setenv("GITHUB_REF_NAME", "dev")
+	t.Setenv("GITHUB_EVENT_PATH", eventPath)
+	t.Setenv("BITFAB_API_KEY", "test")
+	t.Setenv(replayProgramEnv, "1")
+}
+
+var dispatchedReplay = []string{"pipeline", "--trace-ids", "22222222-2222-4222-8222-222222222222"}
+
+func TestCloudExecuteExitsNonZeroWhenTheReplayFails(t *testing.T) {
+	stdout, _, err := dispatchCloudExecute(t, map[string]any{"args": append(append([]string{}, dispatchedReplay...), "--code-change", "skip")})
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("expected a non-zero exit, got %v", err)
+	}
+	if !strings.Contains(stdout, "Replay exited "+strconv.Itoa(exit.ExitCode())+", so this job exits with it too") {
+		t.Fatalf("missing the replay's exit code: %s", stdout)
+	}
+}
+
+func TestCloudExecuteRefusesADispatchedGitCodeChange(t *testing.T) {
+	_, stderr, err := dispatchCloudExecute(t, map[string]any{"args": append(append([]string{}, dispatchedReplay...), "--code-change", "working-tree")})
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("expected exit 1, got %v", err)
+	}
+	if !strings.Contains(stderr, "--code-change working-tree has nothing to compare against") {
+		t.Fatalf("missing the refusal: %s", stderr)
+	}
+}
+
+func TestCloudExecuteChecksTheRequestEnvironment(t *testing.T) {
+	_, stderr, err := dispatchCloudExecute(t, map[string]any{"args": append(append([]string{}, dispatchedReplay...), "--code-change", "skip"), "env": map[string]string{"API_TOKEN": "x"}})
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("expected exit 1, got %v", err)
+	}
+	if !strings.Contains(stderr, "API_TOKEN looks like a secret") {
+		t.Fatalf("missing the environment check: %s", stderr)
+	}
+}
+
+func TestReplayCLIRunsCloudExecuteWithoutNode(t *testing.T) {
+	prepareCloudExecute(t, map[string]any{"args": append(append([]string{}, dispatchedReplay...), "--code-change", "skip")})
+	tools := t.TempDir()
+	for _, tool := range []string{"git", "sh"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, filepath.Join(tools, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", tools)
+	if _, err := exec.LookPath("node"); err == nil {
+		t.Fatal("node is still on PATH")
+	}
+	var stdout, stderr bytes.Buffer
+	_, err := RunReplayCLI(context.Background(), NewReplayRegistry(), []string{"--cloud-execute"}, &stdout, &stderr)
+	var exit interface{ ExitCode() int }
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("expected the replay's non-zero exit, got %v\n%s\n%s", err, stdout.String(), stderr.String())
+	}
+	if strings.Contains(err.Error(), "Node.js") || strings.Contains(stderr.String(), "Node.js") {
+		t.Fatalf("went through the Node.js helper: %v\n%s", err, stderr.String())
+	}
+	for _, text := range []string{"bitfab-replay-output-begin", "bitfab-replay-result ", "Replay exited " + strconv.Itoa(exit.ExitCode()) + ", so this job exits with it too"} {
+		if !strings.Contains(stdout.String(), text) {
+			t.Fatalf("missing %q from the native runner: %s", text, stdout.String())
+		}
+	}
+}
