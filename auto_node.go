@@ -45,7 +45,7 @@ type autoLLMCall struct {
 // EnterAutoNode is called by generated first-party function prologues. Application
 // code configures these functions with Client.Node and enters with Client.Trace.
 func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []any, wrapper ...bool) *AutoNode {
-	return enterAutoNode(ctx, symbol, name, inputs, outputs, len(wrapper) > 0 && wrapper[0], "function")
+	return enterAutoNode(ctx, symbol, symbol, name, inputs, outputs, len(wrapper) > 0 && wrapper[0], "function")
 }
 
 // EnterAutoLLMCall is called by generated helpers that bitfab-instrument puts
@@ -55,7 +55,13 @@ func EnterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 func EnterAutoLLMCall(fn any, ctx any, name string, inputs, outputs []any) *AutoNode {
 	callCtx, _ := ctx.(context.Context)
 	startedAt := time.Now()
-	node := enterAutoNode(callCtx, autoCallSymbol(fn, name), name, inputs, outputs, false, "llm")
+	origin := ""
+	if pc, _, _, ok := runtime.Caller(1); ok {
+		if caller := runtime.FuncForPC(pc); caller != nil {
+			origin = caller.Name()
+		}
+	}
+	node := enterAutoNode(callCtx, autoCallSymbol(fn, name), origin, name, inputs, outputs, false, "llm")
 	if node == nil {
 		return nil
 	}
@@ -80,7 +86,7 @@ func autoCallSymbol(fn any, fallback string) string {
 	return normalizeAutoSymbol(fallback)
 }
 
-func enterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []any, wrapper bool, defaultKind string) *AutoNode {
+func enterAutoNode(ctx context.Context, symbol, origin, name string, inputs, outputs []any, wrapper bool, defaultKind string) *AutoNode {
 	if inputs == nil {
 		inputs = []any{}
 	}
@@ -114,12 +120,20 @@ func enterAutoNode(ctx context.Context, symbol, name string, inputs, outputs []a
 		next.skipName = ""
 		return &AutoNode{ctx: context.WithValue(ctx, autoScopeContextKey{}, &next), restore: pushAutoScope(&next), outputs: outputs}
 	}
+	library := libraryModule(origin)
+	if library != "" && !scope.includesLibrary(library) {
+		return nil
+	}
 	var records []*autoRecord
 	var finalize SpanFinalizer
 	frames := scope.frames
 	copied := false
 	droppedByLimit, droppedForGood := true, true
 	for i, frame := range scope.frames {
+		if library != "" && !frame.root.recordsLibrary(library) {
+			droppedByLimit = false
+			continue
+		}
 		opts, configured := frame.root.client.nodeOptions(symbol)
 		replay := currentReplayContext(frame.root.ctx)
 		selective := replay != nil && replay.selective != nil

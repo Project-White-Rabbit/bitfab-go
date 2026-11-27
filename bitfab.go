@@ -135,6 +135,9 @@ type Client struct {
 	mockOverrides          []MockOverride
 	autoMu                 sync.RWMutex
 	autoNodes              map[string]NodeOptions
+	includePackages        []string
+	includePackagesSet     bool
+	includePackagesErr     error
 	autoPending            int
 	autoPendingDone        chan struct{}
 	closeMu                sync.Mutex
@@ -243,6 +246,30 @@ func WithAPIKey(apiKey string) Option {
 // remains lazy so environment loading can follow package initialization.
 func WithStrict(strict bool) Option {
 	return func(c *Client) { c.strict = strict }
+}
+
+// WithIncludePackages names dependency modules, by module path such as
+// github.com/acme/payments, whose calls every Client.Trace root records beneath
+// it like first-party calls. Without this option every root records every
+// module that bitfab-instrument -include-packages rewrote, so naming a module
+// in the build is enough. Passing it replaces that default, so
+// WithIncludePackages() with no paths records a rewritten module only beneath
+// the roots that name it. A root's TraceOptions.IncludePackages adds to this
+// list. Only modules the build rewrote can be recorded. Naming the Bitfab SDK, a standard library package, or an empty path
+// makes every Client.Trace call return that error without running its function;
+// a module this program does not depend on warns once and is ignored.
+func WithIncludePackages(modules ...string) Option {
+	err := validateIncludedLibraries(modules)
+	return func(c *Client) {
+		if err != nil {
+			if c.includePackagesErr == nil {
+				c.includePackagesErr = err
+			}
+			return
+		}
+		c.includePackagesSet = true
+		c.includePackages = append(c.includePackages, modules...)
+	}
 }
 
 // NewClient creates a new Bitfab client.

@@ -32,10 +32,22 @@ type TraceOptions struct {
 	// memory. Declared nodes, LLM calls, and nested roots do not count toward it.
 	MaxPayloadBytesPerFunction *int
 	Exclude                    []string
-	CaptureWhen                CaptureWhen
-	MockOnReplayDefault        bool
-	IncludeWrappers            bool
-	Finalize                   SpanFinalizer
+	// IncludePackages names dependency modules, by module path such as
+	// github.com/acme/payments, whose calls this root records like first-party
+	// calls, in addition to the client's WithIncludePackages. It covers every
+	// package in each module that bitfab-instrument -include-packages rewrote,
+	// and not the modules those depend on. Their calls count toward the limits
+	// above, Exclude omits them by name, and a node with Capture=false is still
+	// not sent. It only changes anything when the client sets
+	// WithIncludePackages, since by default every root records every module the
+	// build rewrote; then a rewritten module named neither here nor on the client
+	// runs untraced beneath this root. Naming the Bitfab SDK, a standard
+	// library package, or an empty path makes Trace return an error.
+	IncludePackages     []string
+	CaptureWhen         CaptureWhen
+	MockOnReplayDefault bool
+	IncludeWrappers     bool
+	Finalize            SpanFinalizer
 }
 
 // NodeOptions customizes an automatically discovered function. Nil booleans inherit
@@ -154,6 +166,7 @@ type autoRoot struct {
 	maxDepth, maxCapturedSubtreeSpans int
 	maxPayloadBytesPerFunction        int
 	payloadBytesByFunction            map[string]int
+	libraries                         map[string]bool
 	records                           map[*autoRecord]bool
 	rootRecord                        *autoRecord
 	managed                           *managedTraceRoot
@@ -524,6 +537,12 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	if opts.MaxDepth != nil && *opts.MaxDepth < 0 || opts.MaxCapturedSubtreeSpans != nil && *opts.MaxCapturedSubtreeSpans < 0 || opts.MaxPayloadBytesPerFunction != nil && *opts.MaxPayloadBytesPerFunction < 0 {
 		return nil, fmt.Errorf("bitfab: trace limits must be non-negative")
 	}
+	if c.includePackagesErr != nil {
+		return nil, c.includePackagesErr
+	}
+	if err := validateIncludedLibraries(opts.IncludePackages); err != nil {
+		return nil, err
+	}
 	experimentID, err := resolveExperimentID(opts.ExperimentID, opts.TestRunID)
 	if err != nil {
 		return nil, err
@@ -587,7 +606,7 @@ func (c *Client) Trace(ctx context.Context, key string, fn SpanFunc, opts TraceO
 	}
 	var root *autoRoot
 	if len(frames) == 0 || currentReplayContext(ctx) == nil && seedFromContext(ctx) == nil {
-		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, maxPayloadBytesPerFunction: maxPayloadBytesPerFunction, payloadBytesByFunction: map[string]int{}, ctx: ctx, active: true, records: map[*autoRecord]bool{}}
+		root = &autoRoot{client: c, key: key, traceID: randomUUID(), opts: opts, maxDepth: maxDepth, maxCapturedSubtreeSpans: maxCapturedSubtreeSpans, maxPayloadBytesPerFunction: maxPayloadBytesPerFunction, payloadBytesByFunction: map[string]int{}, libraries: c.rootLibraries(opts.IncludePackages), ctx: ctx, active: true, records: map[*autoRecord]bool{}}
 		if len(frames) == 0 && managed != nil && currentSpan(ctx) != nil {
 			root.traceID = currentSpan(ctx).traceID
 			root.managed = managed

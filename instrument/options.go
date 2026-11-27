@@ -10,6 +10,13 @@ import (
 type ListOptions struct {
 	OverlayPath    string
 	overlayIndices map[int]bool
+	// IncludePackages lists module paths, such as github.com/acme/payments,
+	// whose packages are instrumented beside the main module's. The Bitfab SDK
+	// cannot be listed.
+	IncludePackages []string
+	// ModFile is the caller's -modfile, if any.
+	ModFile        string
+	modFileIndices map[int]bool
 	Directory      string
 	BuildFlags     []string
 	Patterns       []string
@@ -87,6 +94,23 @@ func ParseListOptions(command string, args []string) (ListOptions, error) {
 		}
 		flagIndex := i
 		flag, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if flag == IncludePackagesFlag {
+			if !hasValue {
+				if i+1 >= len(args) {
+					return options, fmt.Errorf("bitfab-instrument: -%s requires a comma-separated list of module paths", IncludePackagesFlag)
+				}
+				i++
+				value = args[i]
+			}
+			options.IncludePackages = append(options.IncludePackages, SplitPackages(value)...)
+			if options.overlayIndices == nil {
+				options.overlayIndices = map[int]bool{}
+			}
+			for index := flagIndex; index <= i; index++ {
+				options.overlayIndices[index] = true
+			}
+			continue
+		}
 		if flag == "C" {
 			if !hasValue {
 				if i+1 >= len(args) {
@@ -117,6 +141,10 @@ func ParseListOptions(command string, args []string) (ListOptions, error) {
 				options.overlayIndices[i] = true
 			}
 		}
+		if flag == "modfile" {
+			options.ModFile = value
+			options.modFileIndices = map[int]bool{flagIndex: true, i: true}
+		}
 		if selectionValueFlags[flag] || selectionBooleanFlags[flag] {
 			forwarded := "-" + flag
 			if hasValue {
@@ -131,6 +159,21 @@ func ParseListOptions(command string, args []string) (ListOptions, error) {
 	return options, nil
 }
 
+// IncludePackagesFlag names the bitfab-instrument flag that lists dependency
+// modules to instrument, as -include-packages=github.com/acme/payments,github.com/acme/db.
+const IncludePackagesFlag = "include-packages"
+
+// SplitPackages splits a comma-separated -include-packages value into module paths.
+func SplitPackages(value string) []string {
+	var libraries []string
+	for _, library := range strings.Split(value, ",") {
+		if library = strings.TrimSpace(library); library != "" {
+			libraries = append(libraries, library)
+		}
+	}
+	return libraries
+}
+
 func (o ListOptions) directory(base string) string {
 	if o.Directory == "" {
 		return base
@@ -141,7 +184,8 @@ func (o ListOptions) directory(base string) string {
 	return filepath.Join(base, o.Directory)
 }
 
-// GoArgs preserves the caller's invocation except overlays merged into the generated overlay.
+// GoArgs preserves the caller's invocation except overlays merged into the
+// generated overlay and the bitfab-instrument -include-packages flag.
 func (o ListOptions) GoArgs(args []string) []string {
 	result := make([]string, 0, len(args))
 	for i, arg := range args {
